@@ -1,0 +1,15 @@
+[package]
+name = "scriptorium-core"
+description = "Screenplay document model, text normalization and diffing. Pure: no I/O, no UI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+regex.workspace = true
+serde.workspace = true
+unicode-segmentation.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+/target
+*.fdx
+*.review.txt
+*.review.original.txt
+*.scriptorium.json
+*.json.old
+*(scriptorium).fdx

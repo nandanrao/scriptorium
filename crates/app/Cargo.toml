@@ -1,0 +1,24 @@
+[package]
+name = "scriptorium-app"
+description = "The Scriptorium desktop app (GPUI)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "scriptorium-app"
+path = "src/main.rs"
+
+[dependencies]
+scriptorium-core.workspace = true
+scriptorium-fdx.workspace = true
+scriptorium-review.workspace = true
+# GPUI is pinned to one Zed commit; upgrade on purpose (see AGENTS.md).
+gpui = { git = "https://github.com/zed-industries/zed", rev = "99c890d39d336052d9dae34c7914b55ee82abc5f" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "99c890d39d336052d9dae34c7914b55ee82abc5f", features = ["wayland", "x11", "font-kit"] }
+unicode-segmentation.workspace = true
+
+[lints]
+workspace = true
