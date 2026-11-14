@@ -1,0 +1,17 @@
+[package]
+name = "scriptorium-mcp"
+description = "MCP server exposing the `scriptorium` CLI as tools for Claude (Cowork, Claude Desktop, Claude Code)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "scriptorium-mcp"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
