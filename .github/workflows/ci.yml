@@ -33,8 +33,11 @@ jobs:
             libx11-xcb-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libzstd-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned so a new stable's clippy lints don't break CI unannounced;
+      # bump on purpose, together with the local toolchain.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99.1"
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
@@ -52,12 +55,14 @@ jobs:
 
   macos:
     name: macOS (release build, test)
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - name: build (release)
         run: cargo build --release -p scriptorium-app -p scriptorium-cli
