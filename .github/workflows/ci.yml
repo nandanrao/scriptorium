@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  linux:
+    name: Linux (fmt, clippy, test, wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GPUI's Linux build deps; the list follows Zed's script/linux at the
+      # pinned rev, minus what only Zed itself needs (webrtc, git, sqlite).
+      - name: Install GPUI build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld cmake pkg-config \
+            libasound2-dev libfontconfig-dev libfreetype-dev libglib2.0-dev \
+            libssl-dev libva-dev libvulkan1 libvulkan-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libzstd-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      # Caches ~/.cargo (registry, git) and target/. GPUI builds are slow.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: wasm check (library crates stay pure)
+        run: cargo check -p scriptorium-review -p scriptorium-core -p scriptorium-fdx --target wasm32-unknown-unknown
+
+  macos:
+    name: macOS (release build, test)
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build (release)
+        run: cargo build --release -p scriptorium-app -p scriptorium-cli
+      - name: test
+        run: cargo test --workspace
