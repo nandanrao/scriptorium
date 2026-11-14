@@ -22,15 +22,25 @@ SCRIPTS
 REVIEWING
   These work on the same saved session as the app (<script>.scriptorium.json
   next to the script), so an agent and a person see each other's decisions.
+  The session remembers which review files are attached to the script; a
+  command uses those when you don't name one. Review files named on a command
+  that saves (decide, edit, undo, redo, apply) are attached too.
   Suggestions are numbered from 1 in script order, as `suggestions` lists them.
+  <review> below is a review file, or --review <name or file> to pick one of
+  the attached reviews; it can be left out when only one is attached.
 
-  scriptorium review <script.fdx> <review.txt>...
-        summary of each review file: suggestions, decisions, lines not found
-  scriptorium suggestions <script.fdx> <review.txt> [--pending] [--json]
+  scriptorium reviews <script.fdx>
+        the attached review files, with progress
+  scriptorium reviews <script.fdx> add <review.txt>...
+  scriptorium reviews <script.fdx> remove <review.txt>...
+        attach or detach review files (detaching keeps the text as it is)
+  scriptorium review <script.fdx> [<review.txt>...]
+        summary of each review: suggestions, decisions, lines not found
+  scriptorium suggestions <script.fdx> [<review>] [--pending] [--json]
         list the suggestions, with status and current text
-  scriptorium decide <script.fdx> <review.txt> <n> accept [<option>]
-  scriptorium decide <script.fdx> <review.txt> <n> keep | undecide
-  scriptorium decide <script.fdx> <review.txt> <n> rewrite <text>
+  scriptorium decide <script.fdx> [<review>] <n> accept [<option>]
+  scriptorium decide <script.fdx> [<review>] <n> keep | undecide
+  scriptorium decide <script.fdx> [<review>] <n> rewrite <text>
         decide suggestion n (option numbers start at 1)
   scriptorium edit <script.fdx> <paragraph id> <text> [-r <review.txt>]...
         replace one paragraph's text (ids from `dump`)
@@ -40,7 +50,7 @@ REVIEWING
                       --after <text> [--after <text>]... [--why <text>]
         add a suggestion to a review file (created if missing); checks that
         the line exists and that the change would be visible
-  scriptorium progress <script.fdx> <review.txt> [-o <file>]
+  scriptorium progress <script.fdx> [<review>] [-o <file>]
         the review file with every decision written in (STATUS/CHOSEN/MINE),
         to hand on or continue elsewhere; stdout unless -o
   scriptorium apply <script.fdx> [<review.txt>...] [--accept-all] [-o <out.fdx>]

@@ -1,10 +1,13 @@
 //! Scriptorium desktop app: review proposed changes to a script, and edit its text.
 //!
-//! Usage: `scriptorium-app SCRIPT.fdx [REVIEW.txt ...]`. See docs/PLAN.md.
+//! Usage: `scriptorium-app [SCRIPT.fdx [REVIEW.txt ...]]`. See docs/PLAN.md.
 
 mod editor;
 mod elements;
 mod layout;
+mod log;
+mod menus;
+mod script_view;
 mod theme;
 mod workspace;
 
@@ -14,9 +17,13 @@ use std::path::PathBuf;
 use gpui::{App, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
 
 use editor::*;
+use script_view::*;
 use workspace::*;
 
-const USAGE: &str = "usage: scriptorium-app SCRIPT.fdx [REVIEW.txt ...]";
+const USAGE: &str = "usage: scriptorium-app [SCRIPT.fdx [REVIEW.txt ...]]
+
+Opens the script with the review files attached to it last time, plus any
+given here. With no arguments, opens an empty window (File › Open).";
 
 /// Cmd on macOS, Ctrl elsewhere.
 macro_rules! sec {
@@ -55,6 +62,8 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(sec!("z"), Undo, ctx),
         KeyBinding::new(sec!("shift-z"), Redo, ctx),
         KeyBinding::new("escape", Escape, ctx),
+        KeyBinding::new(sec!("o"), Open, Some("Workspace")),
+        KeyBinding::new(sec!("shift-o"), AddReview, Some("Workspace")),
         KeyBinding::new(sec!("s"), ApplyToFdx, Some("Workspace")),
         KeyBinding::new(sec!("q"), SaveAndQuit, Some("Workspace")),
         KeyBinding::new(sec!("0"), ShowScript, Some("Workspace")),
@@ -64,6 +73,12 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-tab", NextView, Some("Workspace")),
         KeyBinding::new("ctrl-shift-tab", PrevView, Some("Workspace")),
     ];
+    if cfg!(target_os = "macos") {
+        b.extend([
+            KeyBinding::new("cmd-shift-]", NextView, Some("Workspace")),
+            KeyBinding::new("cmd-shift-[", PrevView, Some("Workspace")),
+        ]);
+    }
     // Single keys on the review card, as in script-review.
     let review = Some("Review");
     b.extend([
@@ -117,19 +132,14 @@ fn bindings() -> Vec<KeyBinding> {
 }
 
 fn main() {
+    log::install_panic_hook();
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-    if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!("{USAGE}");
         std::process::exit(2);
     }
-    let opened = Opened::load(&args[0], &args[1..]).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    });
-    let title = format!(
-        "{} — Scriptorium",
-        opened.script_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
-    );
+    let script = args.first().cloned();
+    let reviews = args.get(1..).unwrap_or_default().to_vec();
     gpui_platform::application().run(move |cx: &mut App| {
         let fonts: Vec<Cow<'static, [u8]>> = vec![
             Cow::Borrowed(include_bytes!("../assets/fonts/CourierPrime-Regular.ttf")),
@@ -138,18 +148,21 @@ fn main() {
             Cow::Borrowed(include_bytes!("../assets/fonts/CourierPrime-BoldItalic.ttf")),
         ];
         if let Err(e) = cx.text_system().add_fonts(fonts) {
-            eprintln!("warning: could not load Courier Prime: {e}");
+            log::warn(&format!("could not load Courier Prime: {e}"));
         }
         cx.bind_keys(bindings());
+        // With no window to handle it (all closed), Quit still quits.
+        cx.on_action(|_: &SaveAndQuit, cx| cx.quit());
+        cx.set_menus(menus::app_menus());
         let bounds = Bounds::centered(None, size(px(1500.), px(1000.)), cx);
         let window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions { title: Some(title.into()), ..Default::default() }),
+                    titlebar: Some(TitlebarOptions { title: Some("Scriptorium".into()), ..Default::default() }),
                     ..Default::default()
                 },
-                move |window, cx| cx.new(|cx| Workspace::new(opened, window, cx)),
+                move |window, cx| cx.new(|cx| Workspace::new(script, reviews, window, cx)),
             )
             .expect("open window");
         window.update(cx, |_, _, cx| cx.activate(true)).ok();

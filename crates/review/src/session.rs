@@ -69,6 +69,9 @@ pub struct Review {
     /// Identifies the review file by its contents (see [`crate::sessionfile::hash`]).
     pub id: String,
     pub name: String,
+    /// Where the file was opened from, as the session file stores it (see
+    /// [`crate::sessionfile::stored_path`]). Empty if it doesn't matter.
+    pub path: String,
     pub file: ReviewFile,
     /// In script order.
     pub items: Vec<Item>,
@@ -160,7 +163,24 @@ impl Review {
             })
             .collect();
         let id = crate::sessionfile::hash(text)[..12].to_string();
-        Self { id, name: name.into(), file, items, unmatched, invisible, warnings, entry_index, restore }
+        Self {
+            id,
+            name: name.into(),
+            path: String::new(),
+            file,
+            items,
+            unmatched,
+            invisible,
+            warnings,
+            entry_index,
+            restore,
+        }
+    }
+
+    /// Record where the file was opened from (kept in the session file).
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
     }
 
     /// How many of the file's suggestions had decisions saved in it.
@@ -214,18 +234,57 @@ impl Session {
         format!("review/{}/{}", self.reviews[r].id, self.item(r, i).entry)
     }
 
+    /// Add a review opened on the same script. Returns its index, or an
+    /// explanation if the same file (same contents) is already open.
+    pub fn add(&mut self, review: Review) -> Result<usize, String> {
+        if let Some(open) = self.reviews.iter().find(|r| r.id == review.id) {
+            return Err(if open.name == review.name {
+                format!("{} is already open.", review.name)
+            } else {
+                format!("{} is the same file as {}, which is already open.", review.name, open.name)
+            });
+        }
+        self.reviews.push(review);
+        Ok(self.reviews.len() - 1)
+    }
+
+    /// The review files to remember in the session file.
+    pub fn attached(&self) -> Vec<crate::sessionfile::Attached> {
+        self.reviews.iter().map(|r| crate::sessionfile::Attached { path: r.path.clone(), id: r.id.clone() }).collect()
+    }
+
     /// Start a document for `script` with the decisions saved in the review
     /// files already applied. They are the starting point, so undo stops there.
     pub fn open_document(&self, script: Script) -> Document {
+        self.open_document_with_base(script).0
+    }
+
+    /// [`Self::open_document`], plus the events that applied the saved
+    /// decisions (to keep in the session file, so the starting point can be
+    /// rebuilt without the review files).
+    pub fn open_document_with_base(&self, script: Script) -> (Document, Vec<scriptorium_core::doc::Event>) {
         let mut doc = Document::new(script);
-        let sel = Selection::cursor(doc.start());
-        for (r, review) in self.reviews.iter().enumerate() {
-            for (i, d) in &review.restore {
-                // A restore that doesn't apply (paragraph missing) is skipped.
-                let _ = self.decide(&mut doc, sel, r, *i, d.clone());
-            }
+        for r in 0..self.reviews.len() {
+            self.restore_into(&mut doc, r);
         }
-        doc.rebase()
+        let base = doc.log().to_vec();
+        (doc.rebase(), base)
+    }
+
+    /// Apply the decisions saved in review `r`'s file to a document that
+    /// already has history (a review added later): one undo step. Returns how
+    /// many applied.
+    pub fn apply_saved(&self, doc: &mut Document, r: usize) -> usize {
+        let depth = doc.undo_depth();
+        let n = self.restore_into(doc, r);
+        doc.merge_undo_since(depth);
+        n
+    }
+
+    fn restore_into(&self, doc: &mut Document, r: usize) -> usize {
+        let sel = Selection::cursor(doc.start());
+        // A restore that doesn't apply (paragraph missing) is skipped.
+        self.reviews[r].restore.iter().filter(|(i, d)| self.decide(doc, sel, r, *i, d.clone()).is_ok()).count()
     }
 
     fn text(doc: &Document, para: ParaId) -> String {

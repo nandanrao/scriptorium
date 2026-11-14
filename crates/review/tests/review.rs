@@ -263,28 +263,109 @@ fn two_reviews_on_one_line() {
 
 #[test]
 fn session_file_resumes_decisions_and_survives_review_changes() {
+    use scriptorium_review::sessionfile::{Resumed, resume};
+    let raw = sample();
+    let fdx = FdxFile::parse(raw.clone()).unwrap();
+    let open_with = |texts: &[(&str, &str)]| -> Vec<Review> {
+        let script = fdx.to_script();
+        texts
+            .iter()
+            .map(|(path, t)| Review::open(*path, t, &script, |k| fdx.is_caps(k.name()), "").with_path(*path))
+            .collect()
+    };
+    let extra = "---\nBEFORE: Laura smiles.\nAFTER: Laura grins.\n";
+    let o = resume(open_with(&[("main.txt", REVIEW)]), fdx.to_script(), &raw, None);
+    assert_eq!(o.how, Resumed::Fresh);
+    let mut o = o;
+    o.session.decide(&mut o.doc, sel(), 0, 0, Decision::Accept(0)).unwrap();
+    let saved = o.to_file(&raw).to_json();
+
+    // Reopened with another review file in front: the decision is still found.
+    let o2 = resume(open_with(&[("extra.txt", extra), ("main.txt", REVIEW)]), fdx.to_script(), &raw, Some(&saved));
+    assert_eq!(o2.how, Resumed::Resumed { events: 1 });
+    assert_eq!(o2.session.status(&o2.doc, 1, 0), Status::Accepted(0));
+    assert_eq!(o2.session.status(&o2.doc, 0, 0), Status::Pending);
+
+    // A changed script: the session is not used.
+    let o3 = resume(open_with(&[("main.txt", REVIEW)]), fdx.to_script(), &raw.replace("Laura", "Lara"), Some(&saved));
+    assert!(matches!(o3.how, Resumed::Discarded(_)));
+}
+
+/// REVIEW with suggestion 2 accepted (option 2) and 4 rewritten, saved in the file.
+fn review_with_decisions() -> String {
+    let (_, s, mut doc) = open(REVIEW, "sample.fdx");
+    s.decide(&mut doc, sel(), 0, 1, Decision::Accept(1)).unwrap();
+    s.decide(&mut doc, sel(), 0, 2, Decision::Rewrite("She leaves.".into())).unwrap();
+    s.save_progress(&doc, 0)
+}
+
+#[test]
+fn adding_a_review_with_saved_decisions_is_one_undo_step() {
+    let fdx = FdxFile::parse(sample()).unwrap();
+    let script = fdx.to_script();
+    let mut s = Session::default();
+    let mut doc = s.open_document(script.clone());
+    doc.replace_text(sel(), ParaId(6), "Laura laughs.", &[]).unwrap();
+    let r = s.add(Review::open("r", &review_with_decisions(), &script, |k| fdx.is_caps(k.name()), "")).unwrap();
+    assert_eq!(s.apply_saved(&mut doc, r), 2);
+    assert_eq!(s.status(&doc, r, 1), Status::Accepted(1));
+    assert_eq!(s.status(&doc, r, 2), Status::Rewritten);
+    doc.undo();
+    assert_eq!(s.status(&doc, r, 1), Status::Pending);
+    assert_eq!(s.status(&doc, r, 2), Status::Pending);
+    assert_eq!(doc.paragraphs()[6].text(), "Laura laughs.", "the earlier edit is a separate step");
+    doc.undo();
+    assert!(!doc.can_undo());
+
+    // The same file again is refused.
+    let again = Review::open("r2", &review_with_decisions(), &script, |k| fdx.is_caps(k.name()), "");
+    assert!(s.add(again).unwrap_err().contains("same file"));
+}
+
+#[test]
+fn session_v2_remembers_reviews_and_reopens_without_double_applying() {
     use scriptorium_review::sessionfile::{Resumed, SessionFile, resume};
     let raw = sample();
     let fdx = FdxFile::parse(raw.clone()).unwrap();
-    let open_with = |texts: &[&str]| {
-        let script = fdx.to_script();
-        Session::new(texts.iter().map(|t| Review::open("r", t, &script, |k| fdx.is_caps(k.name()), "")).collect())
-    };
+    let script = fdx.to_script();
+    let decided = review_with_decisions();
     let extra = "---\nBEFORE: Laura smiles.\nAFTER: Laura grins.\n";
-    let s = open_with(&[REVIEW]);
-    let (mut doc, how) = resume(&s, fdx.to_script(), &raw, None);
-    assert_eq!(how, Resumed::Fresh);
-    s.decide(&mut doc, sel(), 0, 0, Decision::Accept(0)).unwrap();
-    let saved = SessionFile::new(&raw, doc.log()).to_json();
+    let open =
+        |path: &str, text: &str| Review::open(path, text, &script, |k| fdx.is_caps(k.name()), "").with_path(path);
 
-    // Reopened with another review file in front: the decision is still found.
-    let s2 = open_with(&[extra, REVIEW]);
-    let (doc2, how) = resume(&s2, fdx.to_script(), &raw, Some(&saved));
-    assert_eq!(how, Resumed::Resumed { events: 1 });
-    assert_eq!(s2.status(&doc2, 1, 0), Status::Accepted(0));
-    assert_eq!(s2.status(&doc2, 0, 0), Status::Pending);
+    // Started with one review (its decisions are the starting point)...
+    let mut o = resume(vec![open("a.txt", &decided)], script.clone(), &raw, None);
+    assert!(!o.doc.can_undo());
+    // ...then another added with a saved decision of its own, then a hand edit.
+    let extra_decided = {
+        let s = Session::new(vec![open("b.txt", extra)]);
+        let mut d = s.open_document(script.clone());
+        s.decide(&mut d, sel(), 0, 0, Decision::KeepMine).unwrap();
+        s.save_progress(&d, 0)
+    };
+    let r = o.session.add(open("b.txt", &extra_decided)).unwrap();
+    o.session.apply_saved(&mut o.doc, r);
+    o.doc.replace_text(sel(), ParaId(0), "EXT. FARM - NIGHT", &[]).unwrap();
+    let file = o.to_file(&raw);
+    assert_eq!(file.reviews.iter().map(|a| a.path.as_str()).collect::<Vec<_>>(), ["a.txt", "b.txt"]);
+    let json = file.to_json();
+    assert_eq!(SessionFile::from_json(&json).unwrap(), file);
 
-    // A changed script: the session is not used.
-    let (_, how) = resume(&s2, fdx.to_script(), &raw.replace("Laura", "Lara"), Some(&saved));
-    assert!(matches!(how, Resumed::Discarded(_)));
+    // Reopened with both: same state, same undo history, nothing applied twice.
+    let o2 = resume(vec![open("a.txt", &decided), open("b.txt", &extra_decided)], script.clone(), &raw, Some(&json));
+    assert_eq!(o2.how, Resumed::Resumed { events: o.doc.log().len() });
+    assert_eq!(o2.doc.script(), o.doc.script());
+    assert_eq!(o2.doc.all_meta(), o.doc.all_meta());
+    let mut d = o2.doc.clone();
+    d.undo();
+    d.undo();
+    assert!(!d.can_undo(), "two steps: the added review, the hand edit");
+
+    // Reopened without b (removed from the list): its decision stays in the text.
+    let o3 = resume(vec![open("a.txt", &decided)], script.clone(), &raw, Some(&json));
+    assert_eq!(o3.doc.script(), o.doc.script());
+
+    // b's file changed since: it's said, and its new saved decisions apply as a step.
+    let o4 = resume(vec![open("a.txt", &decided), open("b.txt", extra)], script, &raw, Some(&json));
+    assert!(o4.notes.iter().any(|n| n.contains("changed since last time")), "{:?}", o4.notes);
 }

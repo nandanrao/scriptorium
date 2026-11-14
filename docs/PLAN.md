@@ -275,7 +275,8 @@ Open, shown as "to decide" in the mockup:
 - **Saved session**: `<script>.scriptorium.json` holds the log, replayed over
   the script on open. Review ids are hashes of the review files' contents, so a
   session survives adding, removing or reordering review files. If the script
-  itself changed, the session is set aside, not applied.
+  itself changed, the session is set aside, not applied. Version 2 (see below)
+  also remembers the attached review files.
 - Outputs: `<script> (scriptorium).fdx` (never the original), and
   `scriptorium progress` writes a review file with STATUS/CHOSEN/MINE.
 - CLI for agents: `suggestions`, `decide`, `suggest`, `edit`, `undo`/`redo`,
@@ -291,15 +292,42 @@ Known gaps:
 - No dark theme; review keys are single letters only while the card has focus.
 - Not tried yet: macOS, Windows, a real IME in the review flow.
 
-### Next: File menu and a Mac build (agreed 2026-11-14, not started)
+### File menu and remembered reviews (built, 2026-11-14)
+
+Step 1 of [plans/file-menu-and-mac-release.md](plans/file-menu-and-mac-release.md).
+- **File › Open…** (Ctrl/Cmd+O) and **File › Add review…** (Ctrl/Cmd+Shift+O)
+  with the native picker (xdg-desktop-portal on Linux, NSOpenPanel on macOS),
+  drag and drop (`.fdx` opens, `.txt` adds), and an empty window when started
+  with no arguments. Errors are notices in the status bar, never dialogs.
+- Menus are defined once (`app/src/menus.rs`): the macOS menu bar, and on Linux
+  a File button with a dropdown (GPUI draws no menu bar there).
+- The window is split: `Workspace` (shell: toolbar, menus, empty state, drop
+  target) holds an optional `ScriptView` (one open script). Open saves the old
+  view's session and swaps in a new one.
+- **Session file version 2**: `reviews` lists the attached review files (path
+  relative to the script's folder when inside it, plus the review id when
+  attached), and `base` holds the events that made the starting document (the
+  decisions saved in the review files attached when the session began). The
+  starting point is rebuilt from `base`, not from whichever review files are
+  open now, so attaching or detaching a review can't make the log stop
+  replaying. A review that wasn't attached last time (or whose file changed:
+  new id) has its saved decisions applied on top as one undo step. Version 1
+  files are read as "no reviews attached" and their starting point is rebuilt
+  as before, from the reviews being opened.
+- CLI parity: `scriptorium reviews <script> [add|remove …]`; commands use the
+  attached reviews when none is named, `--review <name or file>` picks one.
+- A plain log file (`~/Library/Logs/Scriptorium/scriptorium.log`, or
+  `$XDG_STATE_HOME/scriptorium/scriptorium.log`) gets warnings, errors and
+  panics. About shows its path.
+- Not verified yet: the file pickers driven by a person (headless they open but
+  couldn't be driven reliably), drag and drop (no headless way to drag), macOS.
+
+### Next: a Mac build (agreed 2026-11-14)
 
 The first outside tester is the user's partner, on a Mac; the PURPLE LIST is
 their project. Plan with all context: [plans/file-menu-and-mac-release.md](plans/file-menu-and-mac-release.md).
 In short:
-- File › Open and File › Add review, with native pickers. On Linux, an
-  in-window File button, since GPUI has no Linux menu bar.
-- Reviews remembered per script in the session file.
-- CLI parity for both.
+- File › Open, File › Add review, remembered reviews: done (above).
 - First commit, a private GitHub repo (created with `gh`), CI on Linux and
   macOS.
 - A downloadable, ad-hoc-signed `Scriptorium.app` (macOS 13+), released from tags.

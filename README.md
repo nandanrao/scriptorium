@@ -15,12 +15,17 @@ line, undo), working on the same saved session you see in the app.
 
 ## Try it
 
-Review a script against one or more review files (the `SCRIPT REVIEW v1`
-format from `script-review`):
+Start the app, then **File › Open…** (`Ctrl+O`, `Cmd+O` on a Mac) a Final
+Draft script and **File › Add review…** (`Ctrl+Shift+O`) one or more review
+files (the `SCRIPT REVIEW v1` format from `script-review`). Dropping files on
+the window works too. Paths can also go on the command line:
 
 ```
 cargo run --release -p scriptorium-app -- "MY SCRIPT.fdx" "MY SCRIPT.review.txt"
 ```
+
+The script remembers its reviews: next time, opening the script brings them
+back.
 
 The sidebar switches between the plain script and each review; a review lists
 its changes. Keys on the review card: `A`/`Enter` accept, `1` `2` `3` pick an
@@ -35,11 +40,15 @@ From the command line (`scriptorium --help` for everything):
 
 ```
 scriptorium info "MY SCRIPT.fdx"
-scriptorium suggestions "MY SCRIPT.fdx" review.txt --pending --json
-scriptorium decide "MY SCRIPT.fdx" review.txt 12 accept 2
+scriptorium reviews "MY SCRIPT.fdx" add review.txt     # attach (the app sees it too)
+scriptorium suggestions "MY SCRIPT.fdx" --pending --json
+scriptorium decide "MY SCRIPT.fdx" 12 accept 2         # --review <name> if several are attached
 scriptorium suggest review.txt "MY SCRIPT.fdx" --para 40 --after "New text." --why "tense"
-scriptorium apply "MY SCRIPT.fdx" review.txt
+scriptorium apply "MY SCRIPT.fdx"
 ```
+
+Problems are logged to `~/Library/Logs/Scriptorium/scriptorium.log` (macOS) or
+`~/.local/state/scriptorium/scriptorium.log` (Linux).
 
 ## Roadmap
 

@@ -1,6 +1,6 @@
 # Plan: File menu, and a Mac build for the first outside tester
 
-Status: **agreed, not started** (2026-11-14). Written for the agent who builds
+Status: steps 1–3 built (2026-11-14); step 4 (hand-off) next. The partner has an Apple Silicon Mac; the user forwards the zip. Written for the agent who builds
 it. Read `AGENTS.md` and `docs/PLAN.md` first; this file assumes them.
 
 ## Why

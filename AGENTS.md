@@ -53,7 +53,8 @@ Apache-2.0 and may be copied with attribution; Zed's `editor`, `ui`, `text`,
 5. **Everything is reachable from the CLI.** If you add a capability, add a
    subcommand so agents can use it and it can be tested without the GUI. The
    app and the CLI go through the same library calls and the same session file
-   (`<script>.scriptorium.json`); never give the app a code path the CLI lacks.
+   (`<script>.scriptorium.json`, which also lists the review files attached to
+   the script); never give the app a code path the CLI lacks.
 
 ## Checks (run before you finish)
 
@@ -85,6 +86,26 @@ WAYLAND_DISPLAY=wayland-N grim shot.png
 
 Work on copies of scripts in a scratch directory: the app writes a session
 file and an output `.fdx` next to the script.
+
+More for the headless session:
+- Run the app under `dbus-run-session` with `DISPLAY` unset, so a file picker
+  (xdg-desktop-portal) opens on the headless output, never on the user's
+  desktop. It does appear there, but typing a path into it with `wtype` is
+  unreliable; instead set `SCRIPTORIUM_TEST_PICK=/path/a:/path/b` and the app's
+  pickers return those paths without opening a dialog.
+- Headless Sway has no pointer, and `swaymsg seat - cursor` does nothing
+  without one. Clicking needs a `zwlr_virtual_pointer_v1` client (a ~40-line
+  `wayland-client` program does it).
+- Stop the headless Sway through its own socket (`SWAYSOCK=… swaymsg exit`),
+  never with a `pkill` that could match the user's Sway.
+- The app logs to `$XDG_STATE_HOME/scriptorium/scriptorium.log`; point
+  `XDG_STATE_HOME` at the scratch directory.
+
+App layout: `main.rs` (arguments, key bindings, log + panic hook), `menus.rs`
+(the one menu definition: macOS menu bar, Linux File dropdown), `workspace.rs`
+(the window shell: toolbar, empty state, notices, pickers, drops),
+`script_view.rs` (one open script: sidebar, editor, review card, autosave),
+`editor.rs`, `elements.rs`, `layout.rs`, `theme.rs`, `log.rs`.
 
 ## Adding a file format
 

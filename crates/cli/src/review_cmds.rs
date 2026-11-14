@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use scriptorium_core::doc::Event;
 use scriptorium_core::outline::annotate;
 use scriptorium_core::text::looks_same;
 use scriptorium_core::{Document, ParaId, Selection};
@@ -19,24 +20,34 @@ use serde::Serialize;
 use crate::{USAGE, load};
 
 pub const COMMANDS: &[&str] =
-    &["review", "suggestions", "decide", "edit", "undo", "redo", "suggest", "progress", "apply"];
+    &["review", "reviews", "suggestions", "decide", "edit", "undo", "redo", "suggest", "progress", "apply"];
 
 pub fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     match (cmd, args) {
-        ("review", [script, reviews @ ..]) if !reviews.is_empty() => {
+        ("review", [script, reviews @ ..]) => {
             let o = Opened::open(script, reviews)?;
+            if o.session.reviews.is_empty() {
+                return Err(no_reviews(script));
+            }
             summary(&o);
             Ok(())
         }
-        ("suggestions", [script, review, flags @ ..]) => suggestions(script, review, flags),
-        ("decide", [script, review, n, decision @ ..]) => decide(script, review, n, decision),
+        ("reviews", [script]) => list_reviews(script),
+        ("reviews", [script, "add", files @ ..]) if !files.is_empty() => add_reviews(script, files),
+        ("reviews", [script, "remove", files @ ..]) if !files.is_empty() => remove_reviews(script, files),
+        ("suggestions", [script, rest @ ..]) => suggestions(script, rest),
+        ("decide", [script, rest @ ..]) => decide(script, rest),
         ("edit", [script, id, text, rest @ ..]) => edit(script, id, text, &review_flags(rest)?),
         ("undo" | "redo", [script, rest @ ..]) => undo(script, cmd == "redo", &review_flags(rest)?),
         ("suggest", [review, script, rest @ ..]) => suggest(review, script, rest),
-        ("progress", [script, review, rest @ ..]) => progress(script, review, rest),
+        ("progress", [script, rest @ ..]) => progress(script, rest),
         ("apply", [script, rest @ ..]) => apply(script, rest),
         _ => Err(format!("wrong arguments for `{cmd}`\n\n{USAGE}")),
     }
+}
+
+fn no_reviews(script: &str) -> String {
+    format!("no review files attached to {script}. Attach one with `scriptorium reviews {script:?} add <review.txt>`")
 }
 
 /// `-r <review.txt>` pairs.
@@ -52,42 +63,130 @@ fn review_flags<'a>(rest: &[&'a str]) -> Result<Vec<&'a str>, String> {
     Ok(out)
 }
 
-/// A script, its review files and the saved session, opened like the app does.
+/// Takes `--review <name or file>` out of `args`.
+fn take_review_flag<'a>(args: &[&'a str]) -> Result<(Option<&'a str>, Vec<&'a str>), String> {
+    let (mut pick, mut rest) = (None, vec![]);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--review" => pick = Some(*it.next().ok_or("--review needs a review name or file")?),
+            other => rest.push(other),
+        }
+    }
+    Ok((pick, rest))
+}
+
+/// A script, its review files and the saved session, opened like the app does:
+/// the review files attached in the session, plus any given on the command line.
 struct Opened {
     fdx: FdxFile,
     raw: String,
     session: Session,
     doc: Document,
+    base: Vec<Event>,
     session_path: PathBuf,
+    /// Index into `session.reviews` of each review file given on the command line.
+    given: Vec<usize>,
 }
 
 impl Opened {
-    fn open(script: &str, reviews: &[&str]) -> Result<Self, String> {
+    fn open(script: &str, extra: &[&str]) -> Result<Self, String> {
         let fdx = load(script)?;
         let raw = fdx.raw().to_string();
         let script_name = file_name(Path::new(script));
+        let dir = script_dir(script)?;
         let s = fdx.to_script();
-        let mut opened = vec![];
-        for r in reviews {
-            let text = std::fs::read_to_string(r).map_err(|e| format!("{r}: {e}"))?;
-            opened.push(Review::open(*r, &text, &s, |k| fdx.is_caps(k.name()), &script_name));
-        }
-        let session = Session::new(opened);
-        let session_path = Path::new(script).with_file_name(sessionfile::file_name_for(&script_name));
+        let session_path = dir.join(sessionfile::file_name_for(&script_name));
         let saved = std::fs::read_to_string(&session_path).ok();
-        let (doc, how) = sessionfile::resume(&session, s, &raw, saved.as_deref());
-        if let Resumed::Discarded(why) = how {
+        let attached: Vec<String> = saved
+            .as_deref()
+            .and_then(|j| SessionFile::from_json(j).ok())
+            .map(|f| f.reviews.into_iter().map(|a| a.path).collect())
+            .unwrap_or_default();
+
+        // (where it is, how it's stored, given on the command line)
+        let mut paths: Vec<(PathBuf, String, bool)> = vec![];
+        for stored in attached {
+            let at = sessionfile::resolve_path(&dir, &stored);
+            let at = at.canonicalize().unwrap_or(at);
+            paths.push((at, stored, false));
+        }
+        for r in extra {
+            let at = Path::new(r).canonicalize().map_err(|e| format!("{r}: {e}"))?;
+            match paths.iter_mut().find(|(p, _, _)| *p == at) {
+                Some(found) => found.2 = true,
+                None => paths.push((at.clone(), sessionfile::stored_path(&dir, &at), true)),
+            }
+        }
+        let mut reviews = vec![];
+        let mut given_ids = vec![];
+        for (at, stored, given) in paths {
+            let text = match std::fs::read_to_string(&at) {
+                Ok(t) => t,
+                Err(e) if !given => {
+                    eprintln!("note: attached review {stored} can't be read ({e}); left out");
+                    continue;
+                }
+                Err(e) => return Err(format!("{}: {e}", at.display())),
+            };
+            let review = Review::open(&stored, &text, &s, |k| fdx.is_caps(k.name()), &script_name).with_path(&stored);
+            if given {
+                given_ids.push(review.id.clone());
+            }
+            reviews.push(review);
+        }
+        let opened = sessionfile::resume(reviews, s, &raw, saved.as_deref());
+        if let Resumed::Discarded(why) = opened.how {
             return Err(format!(
-                "can't use the saved session {}: {why}. Pass the same review files as the app (with -r), \
-                 or move the session file aside to start fresh.",
+                "can't use the saved session {}: {why}. Move the session file aside to start fresh.",
                 session_path.display()
             ));
         }
-        Ok(Self { fdx, raw, session, doc, session_path })
+        for n in &opened.notes {
+            eprintln!("note: {n}");
+        }
+        let given = given_ids.iter().filter_map(|id| opened.session.reviews.iter().position(|r| r.id == *id)).collect();
+        let sessionfile::Opened { session, doc, base, .. } = opened;
+        Ok(Self { fdx, raw, session, doc, base, session_path, given })
+    }
+
+    /// Open, and pick the one review a command works on: the file given
+    /// (positionally or with `--review`), else the only one attached.
+    fn open_one(script: &str, file: Option<&str>, pick: Option<&str>) -> Result<(Self, usize), String> {
+        // `--review` names an attached review, or is a file to open.
+        let pick_is_file = pick.is_some_and(|p| Path::new(p).is_file());
+        let extra: Vec<&str> = file.into_iter().chain(pick.filter(|_| pick_is_file)).collect();
+        let o = Self::open(script, &extra)?;
+        let r = if let Some(&r) = o.given.first() {
+            r
+        } else if let Some(p) = pick {
+            let p_lower = p.to_lowercase();
+            o.session
+                .reviews
+                .iter()
+                .position(|r| {
+                    r.path == p
+                        || r.name.to_lowercase() == p_lower
+                        || file_name(Path::new(&r.path)).to_lowercase() == p_lower
+                        || file_name(Path::new(&r.path)).to_lowercase().starts_with(&p_lower)
+                })
+                .ok_or_else(|| format!("no attached review matches {p:?}. Attached: {}", o.names()))?
+        } else {
+            match o.session.reviews.len() {
+                0 => return Err(no_reviews(script)),
+                1 => 0,
+                _ => return Err(format!("several reviews are attached; pick one with --review: {}", o.names())),
+            }
+        };
+        Ok((o, r))
+    }
+
+    fn names(&self) -> String {
+        self.session.reviews.iter().map(|r| r.path.as_str()).collect::<Vec<_>>().join(", ")
     }
 
     fn save(&self) -> Result<(), String> {
-        let json = SessionFile::new(&self.raw, self.doc.log()).to_json();
+        let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, self.doc.log()).to_json();
         std::fs::write(&self.session_path, json).map_err(|e| format!("{}: {e}", self.session_path.display()))
     }
 
@@ -100,8 +199,74 @@ impl Opened {
     }
 }
 
+/// The script's folder, canonical (so review paths compare and relativize).
+fn script_dir(script: &str) -> Result<PathBuf, String> {
+    let p = Path::new(script).canonicalize().map_err(|e| format!("{script}: {e}"))?;
+    Ok(p.parent().map(Path::to_path_buf).unwrap_or_default())
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+fn list_reviews(script: &str) -> Result<(), String> {
+    let o = Opened::open(script, &[])?;
+    if o.session.reviews.is_empty() {
+        println!("no review files attached (add one: scriptorium reviews {script:?} add <review.txt>)");
+    }
+    for (r, review) in o.session.reviews.iter().enumerate() {
+        let p = o.session.progress(&o.doc, r);
+        println!(
+            "{}  {} of {} decided ({} accepted, {} kept, {} rewritten, {} pending)",
+            review.path,
+            p.done(),
+            p.total,
+            p.accepted,
+            p.rejected,
+            p.rewritten,
+            p.pending
+        );
+    }
+    Ok(())
+}
+
+fn add_reviews(script: &str, files: &[&str]) -> Result<(), String> {
+    let o = Opened::open(script, files)?;
+    o.save()?;
+    for &r in &o.given {
+        let review = &o.session.reviews[r];
+        println!("attached {} ({} suggestions)", review.path, review.items.len());
+        if !review.unmatched.is_empty() {
+            println!(
+                "  {} suggestions didn't match a line (`scriptorium review {script:?}` lists them)",
+                review.unmatched.len()
+            );
+        }
+        for w in &review.warnings {
+            println!("  warning: {w}");
+        }
+    }
+    Ok(())
+}
+
+fn remove_reviews(script: &str, files: &[&str]) -> Result<(), String> {
+    let dir = script_dir(script)?;
+    let session_path = dir.join(sessionfile::file_name_for(&file_name(Path::new(script))));
+    let json = std::fs::read_to_string(&session_path).map_err(|_| no_reviews(script))?;
+    let mut file = SessionFile::from_json(&json).map_err(|e| format!("{}: {e}", session_path.display()))?;
+    for f in files {
+        let at = Path::new(f).canonicalize().unwrap_or_else(|_| dir.join(f));
+        let before = file.reviews.len();
+        file.reviews.retain(|a| {
+            let p = sessionfile::resolve_path(&dir, &a.path);
+            a.path != *f && p.canonicalize().unwrap_or(p) != at
+        });
+        if file.reviews.len() == before {
+            return Err(format!("{f} isn't attached (see `scriptorium reviews {script:?}`)"));
+        }
+        println!("removed {f} (the script's text keeps its decisions)");
+    }
+    std::fs::write(&session_path, file.to_json()).map_err(|e| format!("{}: {e}", session_path.display()))
 }
 
 fn status_name(s: Status) -> String {
@@ -158,22 +323,26 @@ struct SuggestionRow {
     why: String,
 }
 
-fn suggestions(script: &str, review: &str, flags: &[&str]) -> Result<(), String> {
-    let (mut pending_only, mut json) = (false, false);
-    for f in flags {
-        match *f {
+fn suggestions(script: &str, args: &[&str]) -> Result<(), String> {
+    let (pick, rest) = take_review_flag(args)?;
+    let (mut pending_only, mut json, mut file) = (false, false, None);
+    for f in rest {
+        match f {
             "--pending" => pending_only = true,
             "--json" => json = true,
-            other => return Err(format!("unexpected argument {other:?}")),
+            other if other.starts_with('-') || file.is_some() => {
+                return Err(format!("unexpected argument {other:?}"));
+            }
+            review => file = Some(review),
         }
     }
-    let o = Opened::open(script, &[review])?;
+    let (o, r) = Opened::open_one(script, file, pick)?;
     let ctx = annotate(o.doc.script());
-    let rows: Vec<SuggestionRow> = o.session.reviews[0]
+    let rows: Vec<SuggestionRow> = o.session.reviews[r]
         .items
         .iter()
         .enumerate()
-        .filter(|(i, _)| !pending_only || o.session.status(&o.doc, 0, *i) == Status::Pending)
+        .filter(|(i, _)| !pending_only || o.session.status(&o.doc, r, *i) == Status::Pending)
         .map(|(i, it)| {
             let ix = o.doc.index_of(it.para).unwrap_or(it.index);
             SuggestionRow {
@@ -182,8 +351,8 @@ fn suggestions(script: &str, review: &str, flags: &[&str]) -> Result<(), String>
                 kind: o.doc.paragraphs()[ix].kind.name().to_string(),
                 scene: ctx[ix].scene.clone(),
                 speaker: ctx[ix].speaker.clone(),
-                status: status_name(o.session.status(&o.doc, 0, i)),
-                outdated: o.session.is_outdated(&o.doc, 0, i),
+                status: status_name(o.session.status(&o.doc, r, i)),
+                outdated: o.session.is_outdated(&o.doc, r, i),
                 fuzzy: it.fuzzy,
                 current: o.text(it.para),
                 before: it.before.clone(),
@@ -214,16 +383,23 @@ fn suggestions(script: &str, review: &str, flags: &[&str]) -> Result<(), String>
     Ok(())
 }
 
-fn decide(script: &str, review: &str, n: &str, decision: &[&str]) -> Result<(), String> {
-    let mut o = Opened::open(script, &[review])?;
-    let count = o.session.reviews[0].items.len();
+fn decide(script: &str, args: &[&str]) -> Result<(), String> {
+    let (pick, rest) = take_review_flag(args)?;
+    // `<review.txt> <n> ...` or just `<n> ...`.
+    let (file, n, decision) = match rest.as_slice() {
+        [n, decision @ ..] if n.parse::<usize>().is_ok() => (None, *n, decision),
+        [file, n, decision @ ..] => (Some(*file), *n, decision),
+        _ => return Err(format!("decide which suggestion?\n\n{USAGE}")),
+    };
+    let (mut o, r) = Opened::open_one(script, file, pick)?;
+    let count = o.session.reviews[r].items.len();
     let i = n
         .parse::<usize>()
         .ok()
         .filter(|n| (1..=count).contains(n))
         .ok_or(format!("no suggestion {n} (1 to {count})"))?
         - 1;
-    let options = o.session.item(0, i).options.len();
+    let options = o.session.item(r, i).options.len();
     let d = match decision {
         ["accept"] => Decision::Accept(0),
         ["accept", k] => {
@@ -240,10 +416,10 @@ fn decide(script: &str, review: &str, n: &str, decision: &[&str]) -> Result<(), 
         _ => return Err(format!("decide what? accept [<option>] | keep | undecide | rewrite <text>\n\n{USAGE}")),
     };
     let sel = o.sel();
-    o.session.decide(&mut o.doc, sel, 0, i, d).map_err(|e| e.to_string())?;
+    o.session.decide(&mut o.doc, sel, r, i, d).map_err(|e| e.to_string())?;
     o.save()?;
-    let item = o.session.item(0, i);
-    println!("#{} {}: {}", i + 1, status_name(o.session.status(&o.doc, 0, i)), o.text(item.para));
+    let item = o.session.item(r, i);
+    println!("#{} {}: {}", i + 1, status_name(o.session.status(&o.doc, r, i)), o.text(item.para));
     Ok(())
 }
 
@@ -349,10 +525,15 @@ fn suggest(review: &str, script: &str, rest: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn progress(script: &str, review: &str, rest: &[&str]) -> Result<(), String> {
-    let o = Opened::open(script, &[review])?;
-    let out = o.session.save_progress(&o.doc, 0);
-    match rest {
+fn progress(script: &str, args: &[&str]) -> Result<(), String> {
+    let (pick, rest) = take_review_flag(args)?;
+    let (file, rest) = match rest.as_slice() {
+        [f, rest @ ..] if !f.starts_with('-') => (Some(*f), rest.to_vec()),
+        rest => (None, rest.to_vec()),
+    };
+    let (o, r) = Opened::open_one(script, file, pick)?;
+    let out = o.session.save_progress(&o.doc, r);
+    match rest.as_slice() {
         [] => print!("{out}"),
         ["-o", file] => {
             std::fs::write(file, out).map_err(|e| format!("{file}: {e}"))?;
@@ -374,6 +555,11 @@ fn apply(script: &str, rest: &[&str]) -> Result<(), String> {
         }
     }
     let mut o = Opened::open(script, &reviews)?;
+    // Review files named here are attached, as on every command that takes
+    // them. Saved before --accept-all, which only shapes this output.
+    if !o.given.is_empty() {
+        o.save()?;
+    }
     if accept_all {
         let sel = o.sel();
         for r in 0..o.session.reviews.len() {
