@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use scriptorium_cli::SessionLock;
-use scriptorium_cli::fsio::{BUSY, NO_LOCKS};
+use scriptorium_cli::fsio::{LockError, NO_LOCKS};
 
 use crate::clock::IdSource;
 use crate::store::{StoreError, ThreadStore};
@@ -65,9 +65,9 @@ impl ThreadLock {
     pub(crate) fn acquire(path: &Path, id: &str, wait: Duration) -> Result<Self, StoreError> {
         match SessionLock::acquire(path, wait) {
             Ok(l) => Ok(Self { id: id.to_string(), held: Some(l) }),
-            Err(e) if e == BUSY => Err(StoreError::Busy),
-            Err(e) if e == NO_LOCKS => Ok(Self { id: id.to_string(), held: None }),
-            Err(e) => Err(StoreError::Io(e)),
+            Err(LockError::Busy) => Err(StoreError::Busy),
+            Err(LockError::NoLocks) => Ok(Self { id: id.to_string(), held: None }),
+            Err(LockError::Io(e)) => Err(StoreError::Io(e)),
         }
     }
 }

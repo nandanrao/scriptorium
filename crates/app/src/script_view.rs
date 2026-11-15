@@ -1087,7 +1087,7 @@ impl ScriptView {
         let at = scriptorium_cli::SessionLock::path_for(&self.script_path);
         match scriptorium_cli::SessionLock::acquire(&at, wait) {
             Ok(lock) => Some(Some(lock)),
-            Err(e) if e == scriptorium_cli::fsio::BUSY => None,
+            Err(scriptorium_cli::fsio::LockError::Busy) => None,
             Err(e) => {
                 crate::log::warn(&format!("couldn't lock the session ({e}); going on without the lock"));
                 Some(None)

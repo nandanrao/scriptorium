@@ -4455,6 +4455,7 @@ name = "scriptorium-cli"
 version = "0.3.0"
 dependencies = [
  "fs4",
+ "libc",
  "scriptorium-core",
  "scriptorium-fdx",
  "scriptorium-review",

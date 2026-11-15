@@ -64,10 +64,48 @@ pub const BUSY: &str = "the script is busy in another program; try again";
 /// What a program is told when the file system has no file locks.
 pub const NO_LOCKS: &str = "this folder doesn't support file locks; avoid running the app and Claude at the same time";
 
-#[cfg(unix)]
-const ENOLCK: i32 = 37;
-#[cfg(not(unix))]
-const ENOLCK: i32 = -1;
+/// Why [`SessionLock::acquire`] didn't lock. `Display` gives the message a
+/// person is shown: [`BUSY`], [`NO_LOCKS`], or what the failure was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockError {
+    /// Another program held the lock for the whole wait.
+    Busy,
+    /// The file system has no file locks (some network and FUSE mounts):
+    /// callers go on without the lock and log [`NO_LOCKS`].
+    NoLocks,
+    /// Anything else (the lock file couldn't be created, ...): the path and
+    /// the OS error.
+    Io(String),
+}
+
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LockError::Busy => f.write_str(BUSY),
+            LockError::NoLocks => f.write_str(NO_LOCKS),
+            LockError::Io(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for LockError {}
+
+/// Whether a failed lock means "this file system has no locks". The OS codes
+/// differ: ENOLCK is 37 on Linux but 77 on macOS and the BSDs (hence libc's
+/// constant, not a number), and Windows says ERROR_INVALID_FUNCTION (1) or
+/// ERROR_NOT_SUPPORTED (50) for a share that can't lock.
+fn is_no_locks(e: &io::Error) -> bool {
+    if e.kind() == io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(unix)]
+    let codes: &[i32] = &[libc::ENOLCK];
+    #[cfg(windows)]
+    let codes: &[i32] = &[1, 50];
+    #[cfg(not(any(unix, windows)))]
+    let codes: &[i32] = &[];
+    e.raw_os_error().is_some_and(|c| codes.contains(&c))
+}
 
 /// An OS advisory lock (flock on Unix, LockFileEx on Windows) on
 /// `<script>.scriptorium.lock` next to the script, held while a program reads,
@@ -95,21 +133,23 @@ impl SessionLock {
     }
 
     /// Lock the session of the script at `script`, waiting up to
-    /// [`LOCK_WAIT`] for another program to finish; [`BUSY`] if it doesn't.
-    pub fn for_script(script: &Path) -> Result<Self, String> {
+    /// [`LOCK_WAIT`] for another program to finish; [`LockError::Busy`] if
+    /// it doesn't.
+    pub fn for_script(script: &Path) -> Result<Self, LockError> {
         Self::acquire(&Self::path_for(script), LOCK_WAIT)
     }
 
     /// Lock `lock_path` (created if missing), trying until `wait` has passed
-    /// (`Duration::ZERO`: try once). Busy: [`BUSY`]; any other failure says
-    /// what it was.
-    pub fn acquire(lock_path: &Path, wait: Duration) -> Result<Self, String> {
+    /// (`Duration::ZERO`: try once). Still held elsewhere: [`LockError::Busy`];
+    /// no locks on this file system: [`LockError::NoLocks`]; anything else:
+    /// [`LockError::Io`] saying what it was.
+    pub fn acquire(lock_path: &Path, wait: Duration) -> Result<Self, LockError> {
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(lock_path)
-            .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+            .map_err(|e| LockError::Io(format!("{}: {e}", lock_path.display())))?;
         let until = Instant::now() + wait;
         loop {
             // Through the trait: newer toolchains have an inherent
@@ -119,13 +159,11 @@ impl SessionLock {
                 Err(fs4::TryLockError::WouldBlock) if Instant::now() < until => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(fs4::TryLockError::WouldBlock) => return Err(BUSY.to_string()),
-                Err(fs4::TryLockError::Error(e))
-                    if e.kind() == std::io::ErrorKind::Unsupported || e.raw_os_error() == Some(ENOLCK) =>
-                {
-                    return Err(NO_LOCKS.to_string());
+                Err(fs4::TryLockError::WouldBlock) => return Err(LockError::Busy),
+                Err(fs4::TryLockError::Error(e)) if is_no_locks(&e) => return Err(LockError::NoLocks),
+                Err(fs4::TryLockError::Error(e)) => {
+                    return Err(LockError::Io(format!("{}: {e}", lock_path.display())));
                 }
-                Err(fs4::TryLockError::Error(e)) => return Err(format!("{}: {e}", lock_path.display())),
             }
         }
     }
@@ -144,7 +182,9 @@ mod tests {
         let at = SessionLock::path_for(&script);
         assert_eq!(at.file_name().unwrap(), "film.scriptorium.lock");
         let held = SessionLock::acquire(&at, Duration::ZERO).unwrap();
-        assert_eq!(SessionLock::acquire(&at, Duration::from_millis(60)).unwrap_err(), BUSY);
+        let busy = SessionLock::acquire(&at, Duration::from_millis(60)).unwrap_err();
+        assert_eq!(busy, LockError::Busy);
+        assert_eq!(busy.to_string(), BUSY);
         // Released by another thread while this one waits: the wait gets it.
         let waiter = std::thread::spawn({
             let at = at.clone();
@@ -155,6 +195,17 @@ mod tests {
         waiter.join().unwrap().unwrap();
         assert!(at.exists(), "the lock file stays");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_locks_is_recognised_by_this_platforms_codes() {
+        assert!(is_no_locks(&io::Error::from(io::ErrorKind::Unsupported)));
+        #[cfg(unix)]
+        assert!(is_no_locks(&io::Error::from_raw_os_error(libc::ENOLCK)));
+        #[cfg(windows)]
+        assert!(is_no_locks(&io::Error::from_raw_os_error(50)) && is_no_locks(&io::Error::from_raw_os_error(1)));
+        assert!(!is_no_locks(&io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert_eq!(LockError::NoLocks.to_string(), NO_LOCKS);
     }
 
     #[test]

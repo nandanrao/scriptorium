@@ -28,7 +28,7 @@ use scriptorium_tools::{Ctx, Outcome, Spot, Target, block_entry, item_numbered, 
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::fsio::{SessionLock, write_atomic};
+use crate::fsio::{LockError, SessionLock, write_atomic};
 use crate::opened::{Opened, file_name, load, new_review_id, no_reviews, review_salt, script_dir};
 
 pub const USAGE: &str = "\
@@ -947,11 +947,11 @@ pub(crate) fn lock(script: &str) -> Result<Option<SessionLock>, String> {
     let at = Path::new(script).canonicalize().map_err(|e| format!("{script}: {e}"))?;
     match SessionLock::for_script(&at) {
         Ok(l) => Ok(Some(l)),
-        Err(e) if e == crate::fsio::NO_LOCKS => {
+        Err(e @ LockError::NoLocks) => {
             eprintln!("note: {e}");
             Ok(None)
         }
-        Err(e) => Err(e),
+        Err(e) => Err(e.to_string()),
     }
 }
 

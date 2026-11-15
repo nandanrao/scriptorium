@@ -23,5 +23,9 @@ scriptorium-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# ENOLCK differs by OS (37 on Linux, 77 on macOS): take it from libc.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true
