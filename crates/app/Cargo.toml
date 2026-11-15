@@ -28,7 +28,21 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features =
 scriptorium-agent.workspace = true
 scriptorium-chat.workspace = true
 serde_json.workspace = true
+# Unstyled behaviour layer of gpui-kit (Textarea, TextView markdown, Select,
+# Sheet); pins the same gpui-pre. Not gpui-component: we keep theme.rs's look.
+gpui-base = "=0.9.1"
 unicode-segmentation.workspace = true
+
+# Test tool: a virtual pointer for clicking in headless Sway (see the file).
+[[example]]
+name = "vpointer"
+path = "tests/tools/vpointer.rs"
+test = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Already in the tree through gpui's Wayland backend; no new crates.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [lints]
 workspace = true
