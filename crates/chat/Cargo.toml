@@ -1,0 +1,21 @@
+[package]
+name = "scriptorium-chat"
+description = "Chat threads for the built-in agent: thread files beside the script, per-thread locks, and the run loop shared by the CLI and the app. The core is pure; files and locks come with the shell."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["shell"]
+shell = ["dep:scriptorium-cli"]
+
+[dependencies]
+scriptorium-agent.workspace = true
+scriptorium-cli = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -28,6 +28,16 @@ pub struct ThreadFile {
     /// The review the agent's suggestions go into, once it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_id: Option<String>,
+    /// The thread's own review file, relative to the script's folder, once it
+    /// has one: lets the review be re-attached after a detach instead of a
+    /// second file being created. Additive (version stays 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_path: Option<String>,
+    /// The writer's answer when the agent asked to read the whole script:
+    /// `Some(true)` allowed, `Some(false)` declined ("Not now"), `None` never
+    /// asked. Remembered so the thread doesn't ask again. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whole_script: Option<bool>,
     /// The system prompt the thread was started with. Sent unchanged on every
     /// turn: system and tools must stay byte-identical within a thread (see
     /// [`crate::protocol::build_request`]), even after the built-in prompt changes.

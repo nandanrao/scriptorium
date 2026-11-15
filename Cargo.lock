@@ -4439,6 +4439,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scriptorium-chat"
+version = "0.3.0"
+dependencies = [
+ "scriptorium-agent",
+ "scriptorium-cli",
+ "serde_json",
+]
+
+[[package]]
 name = "scriptorium-cli"
 version = "0.3.0"
 dependencies = [
