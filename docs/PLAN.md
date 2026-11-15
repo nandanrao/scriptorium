@@ -23,6 +23,18 @@ Living notes on direction. Update this when a decision is made or reversed.
   gpui-kit (2026-11-14); the built-in-agent plan records the gpui-kit decision.
   Decided by the spike below. A web build may later come from `gpui_web`.
 
+- **Built-in agent** (2026-11-14), plan in
+  [plans/built-in-agent.md](plans/built-in-agent.md): step 0 and the agent
+  core are built; next the MCP server and app on the shared code, then the
+  `providers` crate and `scriptorium chat`. **The in-app chat panel is paused
+  for a future week** (design first, on gpui-kit, when resumed).
+
+- **`gpui-pre 0.3.12` lacks some newer Zed GPUI fixes** (checked 2026-11-14,
+  no regressions in our UI): combining-mark placement in the text system
+  (zed#66799; watch this for multilingual text), the shadow/clip/path
+  rendering rework, and new windows opening on the active display. They
+  arrive when gpui-kit moves to a newer snapshot.
+
 ## Spike: GPUI native editor (done, 2026-11-14: successful)
 
 **Purpose: decide the UI stack (GPUI native vs Tauri/web), nothing more.**

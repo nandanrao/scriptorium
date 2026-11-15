@@ -219,22 +219,31 @@ New step order: **0.** review ids + `scriptorium-tools` + live reads (with
 reviewers) → **1.** agent core (tests, turn loop) → **2.** providers + CLI chat
 → **3.** panel → **4.** polish.
 
-## Steps
+## Steps (status 2026-11-14)
 
-1. **`crates/agent`**: thread model, the two protocols (request builders +
-   SSE parsers), tool catalogue, turn state machine. Tests from recorded SSE
-   fixtures for each protocol, including tool calls split across chunks and
-   mid-stream errors. Shared tool executor extracted from the CLI; MCP server
-   moved onto it (its tests must keep passing).
-2. **`crates/providers` + CLI**: accounts config, keyring, API keys,
-   `scriptorium accounts` and `scriptorium chat`. Live smoke test per provider
-   with the user's keys (not in CI).
-3. **Agent panel in the app**: threads list, composer, streaming view, tool
-   rows, suggestions into the thread's review, settings sheet. Live executor.
-   Tested headless (Sway) per AGENTS.md.
+0. **Step 0** (review ids, live matching, tools crate, CLI lib): built,
+   reviewed, committed (c066c8a). Remaining: **P4** the MCP server links the CLI
+   lib in-process (stops spawning the binary; uses `add_host_fields`/
+   `add_before`); **P5** the app applies the host contract (`write_atomic`,
+   suggestion numbers by script position like the CLI, Add review via the
+   shared code). See step0-review-ids-and-tools.md.
+1. **`crates/agent`**: done (threads, both protocols, origin-gated replay, turn
+   driver with retries/cancel/round limit, thread files). Frozen.
+2. **`crates/providers` + CLI**: accounts config, keyring, API keys, price and
+   model-capability tables, HTTP streaming shell; `scriptorium accounts` and
+   `scriptorium chat`. Live smoke test per provider with the user's keys (not
+   in CI). **Next after step 0.**
+3. **Agent panel in the app: paused (user, 2026-11-14), for a future week.**
+   Don't design or build it yet. When resumed: design first (reviewed), on
+   gpui-kit (`gpui-base` + Input/TextView/MessageScroller, our own look via a
+   theme file), threads list, composer, streaming view, tool rows,
+   suggestions into the thread's review, settings sheet, live executor; tested
+   headless per AGENTS.md. GPUI is already on `gpui-pre` so gpui-kit can be
+   added directly; our fork (nandanrao/gpui-kit) is for upstream fixes.
 4. **Polish**: cost display, cancel/stop, retry, errors as notices, a first-use
    disclosure, prompt tuning for review quality (port the language-review
-   prompt from `script-review`).
+   prompt from `script-review`). Parts that don't need the panel can go with
+   step 2's CLI chat.
 
 After v1: OAuth sign-in (OpenRouter, then ChatGPT with its UI rules, as
 `scriptorium accounts login …` and buttons in settings).
@@ -244,8 +253,8 @@ next plan), modules, several agents editing at once.
 
 ## Open questions
 
-- Coordination: steps 1–3 touch no app code; step 4 changes `script_view.rs`
-  and `workspace.rs`, which the Mac-release work is also changing.
+- Coordination: the panel (step 3) changes `script_view.rs` and
+  `workspace.rs`; check for other sessions' work there when it resumes.
 
 ## Agent crate: final cleanup before freezing (after round 4 reviews)
 
