@@ -1,4 +1,5 @@
-//! A script opened with its saved session, the way the app opens it.
+//! A script opened with its saved session, the way the CLI commands and the
+//! chat host open it (the app has its own, see `script_view.rs`).
 //!
 //! The session (`<script>.scriptorium.json`) lists the review files attached
 //! to the script; [`Opened::open`] reads them (raw text, as on disk) and
@@ -14,7 +15,7 @@ use scriptorium_fdx::FdxFile;
 use scriptorium_review::Session;
 use scriptorium_review::sessionfile::{self, Resumed, SessionFile};
 
-use crate::fsio::write_atomic;
+use crate::write_atomic;
 
 /// A script, its review files and the saved session: the review files
 /// attached in the session, plus any given on the command line.

@@ -1,13 +1,21 @@
 [package]
 name = "scriptorium-fsio"
-description = "Scriptorium's shared file shell: atomic writes and the session lock, used by the CLI, the chat store and the app."
+description = "Scriptorium's shared file shell: atomic writes, the session lock, and (feature `opened`) a script opened with its saved session, used by the CLI, the chat host and the app."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# `opened`: a script opened with its saved session and review files, as the
+# CLI and the chat host open it. Pulls in the document and review crates.
+opened = ["dep:scriptorium-core", "dep:scriptorium-fdx", "dep:scriptorium-review"]
+
 [dependencies]
 fs4.workspace = true
+scriptorium-core = { workspace = true, optional = true }
+scriptorium-fdx = { workspace = true, optional = true }
+scriptorium-review = { workspace = true, optional = true }
 
 # ENOLCK differs by OS (37 on Linux, 77 on macOS): take it from libc.
 [target.'cfg(unix)'.dependencies]

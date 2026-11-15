@@ -4639,7 +4639,12 @@ name = "scriptorium-chat"
 version = "0.3.0"
 dependencies = [
  "scriptorium-agent",
+ "scriptorium-core",
+ "scriptorium-fdx",
  "scriptorium-fsio",
+ "scriptorium-providers",
+ "scriptorium-review",
+ "scriptorium-tools",
  "serde_json",
  "unicode-segmentation",
 ]
@@ -4681,6 +4686,9 @@ version = "0.3.0"
 dependencies = [
  "fs4",
  "libc",
+ "scriptorium-core",
+ "scriptorium-fdx",
+ "scriptorium-review",
 ]
 
 [[package]]
@@ -4688,6 +4696,7 @@ name = "scriptorium-mcp"
 version = "0.3.0"
 dependencies = [
  "scriptorium-cli",
+ "scriptorium-fsio",
  "scriptorium-tools",
  "serde_json",
 ]

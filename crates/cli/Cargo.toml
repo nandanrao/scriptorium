@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 scriptorium-core.workspace = true
 scriptorium-fdx.workspace = true
-scriptorium-fsio.workspace = true
+scriptorium-fsio = { workspace = true, features = ["opened"] }
 scriptorium-review.workspace = true
 scriptorium-tools.workspace = true
 serde.workspace = true

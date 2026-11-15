@@ -22,7 +22,7 @@ crates/
   core/   scriptorium-core   document model, outline (scenes/speakers), text, diff
   fdx/    scriptorium-fdx    Final Draft import + byte-preserving export
   review/ scriptorium-review review files, matching suggestions to lines, decisions, saved sessions
-  fsio/   scriptorium-fsio   atomic writes and the session lock, shared by cli, chat and app
+  fsio/   scriptorium-fsio   atomic writes, the session lock, `opened` (feature): the script opened as the CLI and chat host open it
   cli/    scriptorium-cli    `scriptorium` binary: headless access to everything
   app/    scriptorium-app    GPUI desktop app: script view, reviews, editing inside paragraphs
 ```

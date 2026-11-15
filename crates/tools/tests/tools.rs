@@ -7,7 +7,7 @@ use scriptorium_review::{Decision, Line, Review, Session};
 use scriptorium_tools::prompt::{SYSTEM, system, unknown_tools};
 use scriptorium_tools::{
     Append, Applied, Ctx, Failed, HostField, MAX_BATCH, Outcome, Proposal, Target, ToolError, add_before,
-    add_host_fields, apply, call, catalogue, find_review, item_numbered, item_numbers, script_size,
+    add_host_fields, apply, call, catalogue, find_review, item_numbered, item_numbers, may_append, script_size,
 };
 use serde_json::{Value, json};
 
@@ -1048,4 +1048,37 @@ fn the_system_prompt_names_only_tools_in_the_catalogue() {
     let prompt = "Use read_scene, then suggest_change. Not_a_tool or snake_ alone don't count.";
     assert_eq!(unknown_tools(prompt, &tools), ["read_scene"]);
     assert_eq!(unknown_tools(prompt, &[]), ["read_scene", "suggest_change"]);
+}
+
+/// The tools that only read. Every catalogued tool is either here or in
+/// `may_append`, never both, so a new tool must be sorted before it ships:
+/// hosts take the session lock only for `may_append` tools.
+const READS: &[&str] =
+    &["script_info", "list_paragraphs", "read_scene", "read_script", "list_reviews", "list_suggestions"];
+
+#[test]
+fn every_tool_that_can_append_is_in_may_append() {
+    let f = Fixture::new();
+    for spec in catalogue() {
+        let name = spec.name.as_str();
+        assert!(READS.contains(&name) != may_append(name), "{name}: sort it into READS or may_append");
+        // Read tools never append, whatever their arguments.
+        if READS.contains(&name) {
+            for args in [json!({}), json!({ "scene": 1 }), json!({ "summary": true }), json!({ "from": 1, "to": 3 })] {
+                if let Ok(o) = f.call(name, args) {
+                    assert!(matches!(o, Outcome::Text(_)), "{name} appended");
+                }
+            }
+        }
+    }
+    // And the appending tools really do.
+    assert!(matches!(
+        f.call("suggest_change", json!({ "paragraph_id": 1, "options": ["Laura grins."] })),
+        Ok(Outcome::Append(_))
+    ));
+    assert!(matches!(
+        f.call("suggest_changes", json!({ "suggestions": [{ "paragraph_id": 1, "options": ["Laura grins."] }] })),
+        Ok(Outcome::Append(_))
+    ));
+    assert!(!may_append("no_such_tool"));
 }
