@@ -4430,11 +4430,14 @@ version = "0.3.0"
 dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
+ "scriptorium-agent",
+ "scriptorium-chat",
  "scriptorium-cli",
  "scriptorium-core",
  "scriptorium-fdx",
  "scriptorium-review",
  "scriptorium-tools",
+ "serde_json",
  "unicode-segmentation",
 ]
 
