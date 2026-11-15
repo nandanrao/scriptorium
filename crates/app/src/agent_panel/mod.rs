@@ -3,17 +3,21 @@
 //! docs/plans/chat-panel.md.
 //!
 //! This module is the shell: the `AgentPanel` entity, its actions and key
-//! bindings, focus and undo routing. The parts come from their own files:
+//! bindings, focus and undo routing. The parts are child entities, each in
+//! its own file, made in [`AgentPanel::new`]:
 //!
 //! - `view_model.rs` (pure): a thread plus the streaming buffer become rows.
-//! - `messages.rs` (U3): the message list, drawn in [`AgentPanel::render`]'s
-//!   middle section (`render_messages`).
-//! - `composer.rs` (U6): the composer below it (`render_composer`), keeping
-//!   [`AgentPanel::composer`] as the one textarea focus and undo route to.
-//! - `driver.rs` (U4) and `live.rs` (U5): runs, over the hooks ScriptView
-//!   hands out (`hooks.rs`; `ScriptView::agent_ctx`, `agent_review`,
-//!   `agent_write_review`, `show_suggestion`).
-//! - `threads.rs` (U7): the thread list behind the header's title.
+//! - `messages.rs` (U3): [`messages::MessageView`], the message list.
+//! - `composer.rs` (U6): [`composer::Composer`], the one textarea focus and
+//!   undo route to; it observes [`accounts::AccountsChanged`] for the chip.
+//! - `threads.rs` (U7): [`threads::ThreadList`], the header's title and the
+//!   thread list behind it.
+//! - `driver.rs` (U4) and `live.rs` (U5): runs. The panel holds a weak handle
+//!   to its [`ScriptView`] and the script's path ([`AgentPanel::script`],
+//!   [`AgentPanel::script_path`]); tool calls run inside one update of the
+//!   script view, over its `pub(crate)` live-store helpers
+//!   (`ScriptView::try_lock_session`, `reload_or_busy`, `attach_review`,
+//!   `session_mut`, `editing_para`, `after_agent_change`, `show_suggestion`).
 //! - `accounts.rs` (U8): the AI accounts sheet, which the workspace draws over
 //!   the whole window ([`OpenAccounts`]), so it opens with no script too.
 //!
@@ -23,24 +27,29 @@
 //! Focus never moves into the panel on its own.
 
 pub mod accounts;
-pub mod hooks;
+pub mod composer;
+pub mod messages;
+pub mod threads;
 mod view_model;
 
+use std::path::{Path, PathBuf};
+
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Global, KeyBinding, SharedString, Window,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global, KeyBinding, SharedString, WeakEntity, Window,
     actions, div, prelude::*, px,
 };
-use gpui_base::Textarea;
-use gpui_base::input::TextareaState;
 
-use crate::script_view::{RedoAny, UndoAny};
+use crate::script_view::{RedoAny, ScriptView, UndoAny};
 use crate::theme::*;
+use composer::Composer;
+use messages::MessageView;
+use threads::ThreadList;
 
 actions!(
     agent,
     [
-        /// Ctrl/Cmd+L: open the panel and focus the composer; with the panel
-        /// focused, close it and give focus back to the script.
+        /// Ctrl/Cmd+L: open the panel and focus the composer; with the
+        /// composer focused, close it and give focus back to the script.
         ToggleAgentPanel,
         /// Escape in the panel: focus back to the script; the panel stays open.
         ReturnFocus,
@@ -62,13 +71,20 @@ actions!(
 /// The panel's width (drag-resizing is deferred).
 pub const WIDTH: f32 = 360.;
 
-/// Below this window width, the sidebar collapses to a rail while the panel
-/// is open (the editor's fit-to-width zoom absorbs the rest).
-pub const RAIL_BELOW: f32 = 1600.;
+/// The sidebar's and the review card's widths.
+pub const SIDEBAR_WIDTH: f32 = 270.;
+pub const CARD_WIDTH: f32 = 380.;
 
-/// Whether the sidebar shows as a rail.
-pub fn sidebar_collapsed(panel_open: bool, window_width: f32) -> bool {
-    panel_open && window_width < RAIL_BELOW
+/// The narrowest the editor gets before the sidebar gives way (the page at
+/// about 70 % zoom; its fit-to-width zoom absorbs the rest).
+pub const EDITOR_MIN: f32 = 600.;
+
+/// Whether the sidebar shows as a rail: the panel is open and the editor
+/// would be narrower than [`EDITOR_MIN`] beside the columns showing (the
+/// card shows only in a review view).
+pub fn sidebar_collapsed(panel_open: bool, card: bool, window_width: f32) -> bool {
+    let columns = SIDEBAR_WIDTH + WIDTH + if card { CARD_WIDTH } else { 0. };
+    panel_open && window_width - columns < EDITOR_MIN
 }
 
 /// Cmd on macOS, Ctrl elsewhere (as in main.rs).
@@ -78,28 +94,44 @@ macro_rules! sec {
     };
 }
 
-/// Registers gpui-base (its `Input`, `Select`, `Sheet` bindings) and picks
-/// the panel's font. Call before binding the app's keys, so ours, added
-/// after, win where both match at the same depth.
+#[cfg(not(target_os = "macos"))]
+/// The panel's text font on Linux, bundled: GPUI draws only the default
+/// instance of a variable font, and the usual system UI fonts (Fedora's,
+/// Adwaita Sans) are variable, so they show no bold or italic.
+const BUNDLED_FONT: &str = "Inter";
+
+/// Registers gpui-base (its `Input`, `Select`, `Sheet` bindings) and the
+/// panel's font. Call before binding the app's keys, so ours, added after,
+/// win where both match at the same depth.
 pub fn init(cx: &mut App) {
     gpui_base::init(cx);
-    let names = cx.text_system().all_font_names();
-    let font = pick_font(&names);
+    #[cfg(target_os = "macos")]
+    let font = ".SystemUIFont";
+    #[cfg(not(target_os = "macos"))]
+    let font = load_bundled_font(cx);
     crate::log::info(&format!("agent panel font: {font}"));
     cx.set_global(PanelFont(font.into()));
 }
 
-/// The system UI font on Linux (often Adwaita Sans, a variable font) shows
-/// no bold, which markdown needs: GPUI draws a variable font's default
-/// instance only. Take the first installed family that ships static bold and
-/// italic faces.
-fn pick_font(installed: &[String]) -> &'static str {
-    const CANDIDATES: &[&str] = if cfg!(target_os = "macos") {
-        &[".SystemUIFont"]
-    } else {
-        &["Noto Sans", "DejaVu Sans", "Liberation Sans", "Open Sans", "Ubuntu", "Arial"]
-    };
-    CANDIDATES.iter().copied().find(|c| installed.iter().any(|n| n == c)).unwrap_or(CANDIDATES[0])
+/// Inter (SIL OFL 1.1, assets/fonts/LICENSE-Inter.txt): static regular,
+/// italic, semibold, bold and bold italic faces.
+#[cfg(not(target_os = "macos"))]
+fn load_bundled_font(cx: &mut App) -> &'static str {
+    use std::borrow::Cow;
+    {
+        let fonts: Vec<Cow<'static, [u8]>> = vec![
+            Cow::Borrowed(include_bytes!("../../assets/fonts/Inter-Regular.ttf")),
+            Cow::Borrowed(include_bytes!("../../assets/fonts/Inter-Italic.ttf")),
+            Cow::Borrowed(include_bytes!("../../assets/fonts/Inter-SemiBold.ttf")),
+            Cow::Borrowed(include_bytes!("../../assets/fonts/Inter-Bold.ttf")),
+            Cow::Borrowed(include_bytes!("../../assets/fonts/Inter-BoldItalic.ttf")),
+        ];
+        if let Err(e) = cx.text_system().add_fonts(fonts) {
+            crate::log::warn(&format!("could not load {BUNDLED_FONT}: {e}"));
+            return ".SystemUIFont";
+        }
+    }
+    BUNDLED_FONT
 }
 
 struct PanelFont(SharedString);
@@ -146,29 +178,64 @@ pub fn bindings() -> Vec<KeyBinding> {
 pub enum AgentPanelEvent {
     /// Give focus back to the script: the card in a review view, else the editor.
     ReturnFocus,
+    /// The header's ×: close the panel (focus goes back to the script if it
+    /// was in the panel).
+    Close,
+    /// A notice for the status bar, e.g. how a run ended while the panel was
+    /// closed.
+    #[allow(dead_code)] // The driver (U4).
+    Say(SharedString),
 }
 
 pub struct AgentPanel {
     /// Tracks the whole column, so "focus is in the panel" is one check.
     focus: FocusHandle,
-    /// The header's thread title (U7 makes it the thread list's trigger).
-    title_focus: FocusHandle,
-    composer: Entity<TextareaState>,
+    script: WeakEntity<ScriptView>,
+    script_path: PathBuf,
+    threads: Entity<ThreadList>,
+    messages: Entity<MessageView>,
+    composer: Entity<Composer>,
 }
 
 impl EventEmitter<AgentPanelEvent> for AgentPanel {}
 
+#[allow(dead_code)] // Accessors for the driver, live store and parts (U3–U7).
 impl AgentPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let composer = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(1, 10).placeholder("Ask about the script, or ask for changes…")
-        });
-        Self { focus: cx.focus_handle(), title_focus: cx.focus_handle(), composer }
+    pub fn new(
+        script: WeakEntity<ScriptView>,
+        script_path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            focus: cx.focus_handle(),
+            script,
+            script_path,
+            threads: cx.new(|cx| ThreadList::new(window, cx)),
+            messages: cx.new(|cx| MessageView::new(window, cx)),
+            composer: cx.new(|cx| Composer::new(window, cx)),
+        }
     }
 
-    /// The composer's text field.
-    #[allow(dead_code)] // The composer and driver (U4, U6).
-    pub fn composer(&self) -> &Entity<TextareaState> {
+    /// The script view this panel belongs to (gone once the script closes).
+    pub fn script(&self) -> &WeakEntity<ScriptView> {
+        &self.script
+    }
+
+    /// The open script's `.fdx`, as opened.
+    pub fn script_path(&self) -> &Path {
+        &self.script_path
+    }
+
+    pub fn threads(&self) -> &Entity<ThreadList> {
+        &self.threads
+    }
+
+    pub fn messages(&self) -> &Entity<MessageView> {
+        &self.messages
+    }
+
+    pub fn composer(&self) -> &Entity<Composer> {
         &self.composer
     }
 
@@ -181,14 +248,15 @@ impl AgentPanel {
         self.focus.contains_focused(window, cx)
     }
 
-    fn composer_focused(&self, window: &Window, cx: &App) -> bool {
-        self.composer.focus_handle(cx).contains_focused(window, cx)
+    /// Whether the composer's text field has focus.
+    pub fn composer_focused(&self, window: &Window, cx: &App) -> bool {
+        self.composer.read(cx).is_focused(window, cx)
     }
 
     /// The panel's focus stops for Tab, in order. U6 and U7 add Send/Stop,
-    /// the model chip and the thread title's real trigger.
+    /// the model chip and the thread list's own stops.
     fn tab_stops(&self, cx: &App) -> Vec<FocusHandle> {
-        vec![self.composer.focus_handle(cx), self.title_focus.clone()]
+        vec![self.composer.read(cx).focus_handle(cx), self.threads.read(cx).focus_handle(cx)]
     }
 
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -206,7 +274,7 @@ impl AgentPanel {
 
     fn on_send(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
         // The driver (U4) and composer (U6) send; until then the draft stays.
-        let len = self.composer.read(cx).value().chars().count();
+        let len = self.composer.read(cx).text(cx).chars().count();
         crate::log::info(&format!("agent panel: send ({len} chars; not wired yet)"));
     }
 
@@ -237,8 +305,7 @@ impl AgentPanel {
         }
     }
 
-    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let title_focused = self.title_focus.is_focused(window);
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div()
             .flex_none()
             .h(px(38.))
@@ -248,19 +315,7 @@ impl AgentPanel {
             .gap_2()
             .border_b_1()
             .border_color(RULE)
-            .child(
-                div()
-                    .id("agent-title")
-                    .track_focus(&self.title_focus)
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .px_1()
-                    .rounded_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .when(title_focused, |d| d.bg(ACCENT_SOFT))
-                    .child("New conversation"),
-            )
+            .child(self.threads.clone())
             .child(div().text_size(px(11.)).text_color(INK_3).child(crate::menus::shortcut("l")))
             .child(
                 div()
@@ -271,56 +326,7 @@ impl AgentPanel {
                     .text_color(INK_2)
                     .hover(|s| s.bg(ACCENT_SOFT))
                     .child("×")
-                    .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(ToggleAgentPanel), cx))),
-            )
-    }
-
-    /// U3 replaces this with the message list.
-    fn render_messages(&self) -> impl IntoElement + use<> {
-        div().id("agent-messages").flex_1().min_h_0().overflow_y_scroll().p_4().flex().flex_col().gap_3().child(
-            div()
-                .text_color(INK_2)
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(div().font_weight(FontWeight::BOLD).child("Chat about the script."))
-                .child(div().child(
-                    "The agent reads the script and proposes changes into this conversation's own review. \
-                     You decide them on the review card, as with any review.",
-                ))
-                .child(
-                    div().italic().text_color(INK_3).child("Nothing is sent yet: the agent arrives in a later build."),
-                ),
-        )
-    }
-
-    /// U6 replaces this with the composer (Send/Stop, model chip, usage).
-    fn render_composer(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let focused = self.composer_focused(window, cx);
-        div()
-            .flex_none()
-            .p_2()
-            .border_t_1()
-            .border_color(RULE)
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .id("agent-composer")
-                    .key_context("AgentComposer")
-                    .p_2()
-                    .rounded_md()
-                    .bg(PAPER)
-                    .border_1()
-                    .border_color(if focused { ACCENT } else { RULE })
-                    .child(Textarea::new(&self.composer)),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(INK_3)
-                    .child("Enter send · Shift+Enter new line · Esc back to the script"),
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AgentPanelEvent::Close))),
             )
     }
 }
@@ -332,7 +338,7 @@ impl Focusable for AgentPanel {
 }
 
 impl Render for AgentPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("agent-panel")
             .key_context("AgentPanel")
@@ -355,9 +361,9 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| this.cycle_focus(false, window, cx)))
             .on_action(cx.listener(|this, _: &UndoAny, window, cx| this.undo_menu(false, window, cx)))
             .on_action(cx.listener(|this, _: &RedoAny, window, cx| this.undo_menu(true, window, cx)))
-            .child(self.render_header(window, cx))
-            .child(self.render_messages())
-            .child(self.render_composer(window, cx))
+            .child(self.render_header(cx))
+            .child(div().flex_1().min_h_0().child(self.messages.clone()))
+            .child(self.composer.clone())
     }
 }
 
@@ -366,19 +372,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sidebar_collapses_only_with_the_panel_open_in_a_narrow_window() {
-        assert!(sidebar_collapsed(true, 1500.));
-        assert!(!sidebar_collapsed(true, 1700.));
-        assert!(!sidebar_collapsed(false, 1500.));
-    }
-
-    #[test]
-    fn panel_font_is_the_first_installed_candidate() {
-        if cfg!(target_os = "macos") {
-            return;
-        }
-        let installed = ["Liberation Sans".to_string(), "Noto Sans".to_string()];
-        assert_eq!(pick_font(&installed), "Noto Sans");
-        assert_eq!(pick_font(&[]), "Noto Sans");
+    fn sidebar_collapses_when_the_editor_would_be_too_narrow() {
+        // Review view: sidebar, editor, card, panel.
+        assert!(sidebar_collapsed(true, true, 1500.));
+        assert!(!sidebar_collapsed(true, true, 1700.));
+        // The script view has no card: room to spare at 1500.
+        assert!(!sidebar_collapsed(true, false, 1500.));
+        assert!(sidebar_collapsed(true, false, 1100.));
+        assert!(!sidebar_collapsed(false, true, 1000.));
     }
 }

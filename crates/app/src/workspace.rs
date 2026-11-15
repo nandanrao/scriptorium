@@ -224,6 +224,10 @@ impl Workspace {
     // ---- the agent panel and AI accounts ---------------------------------------
 
     fn on_toggle_agent(&mut self, _: &ToggleAgentPanel, window: &mut Window, cx: &mut Context<Self>) {
+        // Under the accounts sheet, keys stay with the sheet.
+        if self.accounts.is_some() {
+            return;
+        }
         self.close_menu(window, cx);
         if self.view.is_none() {
             self.set_notice("Open a script to chat about it.", cx);

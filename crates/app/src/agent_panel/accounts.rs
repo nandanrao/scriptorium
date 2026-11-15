@@ -5,12 +5,27 @@
 //! gives focus back to what had it.
 //!
 //! Keep the API (`new`, `Focusable` for where focus goes on open, the
-//! [`Dismissed`] event) when filling it in.
+//! [`Dismissed`] event) when filling it in. When an account is added, removed
+//! or checked, call [`accounts_changed`]; whatever shows accounts (the
+//! composer's model chip) observes [`AccountsChanged`] and redraws.
 
-use gpui::{App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Window, div, prelude::*, px, rgba};
+use gpui::{App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, Global, Window, div, prelude::*, px, rgba};
 use gpui_base::Sheet;
 
 use crate::theme::*;
+
+/// Bumped each time the accounts change; observe it with
+/// `cx.observe_global::<AccountsChanged>(..)`.
+#[derive(Default)]
+pub struct AccountsChanged(pub u64);
+
+impl Global for AccountsChanged {}
+
+/// Tell every observer of [`AccountsChanged`] that the accounts changed.
+#[allow(dead_code)] // The accounts sheet (U8).
+pub fn accounts_changed(cx: &mut App) {
+    cx.update_default_global::<AccountsChanged, _>(|g, _| g.0 += 1);
+}
 
 /// The sheet asks to be closed.
 pub struct Dismissed;
