@@ -1,10 +1,17 @@
 //! Replay cassettes: recorded provider exchanges, for tests and fixtures.
 //!
-//! A cassette is JSON Lines, one [`Exchange`] per request, in order:
+//! A cassette is a sequence of JSON objects, one [`Exchange`] per request, in
+//! order. An exchange may span several lines:
 //!
 //! ```text
+//! // A tool round.
 //! {"expect": {"path": "/messages", "model": "claude-opus-5-5", "last_user": "tighten"},
-//!  "status": 200, "delay_ms": 20, "lines": ["event: message_start", "data: {...}", ""]}
+//!  "delay_ms": 20,
+//!  "lines": [
+//!   "event: message_start",
+//!   {"type": "message_start", "message": {"usage": {"input_tokens": 12}}},
+//!   ""
+//!  ]}
 //! {"expect": {"results": [{"id": "toolu_1", "contains": "Added 8"}]}, "status": 529, "retry_after": 1, "body": "{...}"}
 //! {"offline": "connection reset"}
 //! ```
@@ -15,14 +22,23 @@
 //!   call id whose content contains `contains`. So a test checks what the
 //!   model was told.
 //! - `status` (default 200). A success streams `lines`, waiting `delay_ms`
-//!   before each; an error status answers `body` (a string, or JSON written
-//!   inline) and `retry_after` (seconds, number or string).
+//!   before each. A line is a string, or a JSON object, which streams as
+//!   `data: <the object as compact JSON>` (its keys possibly reordered:
+//!   cassettes that need exact bytes use strings). An error status answers `body` (a
+//!   string, or JSON written inline) and `retry_after` (seconds, number or
+//!   string).
 //! - `offline` alone: the connection fails before any reply. With `lines`:
 //!   they stream, then the connection is cut off.
+//! - `bad_line` (with or without `lines`): after the lines, a line that isn't
+//!   text arrives (a parse error, as live).
 //!
-//! Blank lines and lines starting with `//` are skipped. This module is pure:
-//! it parses, checks and writes exchanges; [`Replay`](crate::shell::Replay)
-//! and the recorder in [`Http`](crate::shell::Http) do the I/O.
+//! Lines starting with `//` are comments. This module is pure: it parses,
+//! checks and writes exchanges; [`Replay`](crate::shell::Replay) and the
+//! recorder in [`Http`](crate::shell::Http) do the I/O.
+//!
+//! Recorded cassettes hold what was sent and received: the start of the
+//! writer's messages and of tool results (script text), and replies and
+//! error bodies in full. Never headers, so never a key.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,7 +57,8 @@ pub struct Exchange {
     pub status: Option<u16>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub delay_ms: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The body's lines, without line endings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "lines")]
     pub lines: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "text_or_json")]
     pub body: Option<String>,
@@ -49,6 +66,8 @@ pub struct Exchange {
     pub retry_after: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bad_line: Option<String>,
 }
 
 /// What a request must look like for an exchange to answer it. Empty
@@ -99,16 +118,38 @@ fn text_or_json<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>
     })
 }
 
-/// The exchanges in a cassette's text. Errors name the line.
+/// Lines as strings, or objects that stand for `data: <compact JSON>`.
+fn lines<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Vec::<Value>::deserialize(d)?
+        .into_iter()
+        .map(|v| match v {
+            Value::String(s) => Ok(s),
+            Value::Object(_) => Ok(format!("data: {v}")),
+            other => Err(serde::de::Error::custom(format!("a line is a string or an object, not {other}"))),
+        })
+        .collect()
+}
+
+/// The exchanges in a cassette's text. Errors name the exchange and the
+/// line it starts on.
 pub fn parse(text: &str) -> Result<Vec<Exchange>, String> {
+    // Comments become blank lines, so line numbers stay right.
+    let clean: String = text
+        .split_inclusive('\n')
+        .map(|l| if l.trim_start().starts_with("//") { if l.ends_with('\n') { "\n" } else { "" } } else { l })
+        .collect();
+    let line_at = |offset: usize| clean[..offset].matches('\n').count() + 1;
+    let mut stream = serde_json::Deserializer::from_str(&clean).into_iter::<Value>();
     let mut out = vec![];
-    for (i, line) in text.lines().enumerate() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with("//") {
-            continue;
-        }
-        let e: Exchange = serde_json::from_str(t).map_err(|e| format!("line {}: {e}", i + 1))?;
-        e.check().map_err(|m| format!("line {}: {m}", i + 1))?;
+    loop {
+        let before = stream.byte_offset();
+        let start = before + clean[before..].len() - clean[before..].trim_start().len();
+        let Some(next) = stream.next() else { break };
+        let n = out.len() + 1;
+        let at = |m: String| format!("exchange {n} (line {}): {m}", line_at(start));
+        let v = next.map_err(|e| format!("exchange {n}: line {}, column {}: {e}", e.line(), e.column()))?;
+        let e: Exchange = serde_json::from_value(v).map_err(|e| at(e.to_string()))?;
+        e.check().map_err(at)?;
         out.push(e);
     }
     Ok(out)
@@ -128,8 +169,11 @@ impl Exchange {
         if ok && self.body.is_some() {
             return Err("\"body\" on a success (a success streams \"lines\")".into());
         }
-        if self.offline.is_some() && self.status.is_some_and(|s| !(200..300).contains(&s)) {
-            return Err("\"offline\" with an error status".into());
+        if !ok && (self.offline.is_some() || self.bad_line.is_some()) {
+            return Err("\"offline\" or \"bad_line\" with an error status".into());
+        }
+        if self.offline.is_some() && self.bad_line.is_some() {
+            return Err("both \"offline\" and \"bad_line\"".into());
         }
         Ok(())
     }
@@ -144,10 +188,12 @@ impl Exchange {
                 body: self.body.clone().unwrap_or_default(),
             });
         }
-        match &self.offline {
-            Some(m) if self.lines.is_empty() => Reply::Fail(Failure::Offline(m.clone())),
-            Some(m) => Reply::Lines { lines: &self.lines, then: Some(Failure::CutOff(m.clone())) },
-            None => Reply::Lines { lines: &self.lines, then: None },
+        let lines = &self.lines[..];
+        match (&self.offline, &self.bad_line) {
+            (Some(m), _) if lines.is_empty() => Reply::Fail(Failure::Offline(m.clone())),
+            (Some(m), _) => Reply::Lines { lines, then: Some(Failure::CutOff(m.clone())) },
+            (None, Some(m)) => Reply::Lines { lines, then: Some(Failure::BadLine(m.clone())) },
+            (None, None) => Reply::Lines { lines, then: None },
         }
     }
 
@@ -158,10 +204,56 @@ impl Exchange {
         Exchange { expect: Expect::describe(req), ..Exchange::default() }
     }
 
-    /// One cassette line.
-    pub fn to_line(&self) -> String {
-        serde_json::to_string(self).expect("exchanges always serialize")
+    /// The exchange as cassette text, for reading and editing: one field per
+    /// line, one body line per line, `data:` lines holding a JSON object
+    /// written as the object. Ends with a newline.
+    pub fn to_text(&self) -> String {
+        let mut fields = vec![];
+        if !self.expect.is_empty() {
+            fields.push(format!("\"expect\": {}", json(&self.expect)));
+        }
+        if let Some(s) = self.status {
+            fields.push(format!("\"status\": {s}"));
+        }
+        if self.delay_ms != 0 {
+            fields.push(format!("\"delay_ms\": {}", self.delay_ms));
+        }
+        for (k, v) in [("retry_after", &self.retry_after), ("offline", &self.offline), ("bad_line", &self.bad_line)] {
+            if let Some(v) = v {
+                fields.push(format!("\"{k}\": {}", json(v)));
+            }
+        }
+        if let Some(b) = &self.body {
+            // An error body that is JSON is written as JSON.
+            let body = serde_json::from_str::<Value>(b)
+                .ok()
+                .filter(|v| v.is_object() && json(v) == *b)
+                .map_or_else(|| json(b), |v| v.to_string());
+            fields.push(format!("\"body\": {body}"));
+        }
+        if !self.lines.is_empty() {
+            let items: Vec<String> = self.lines.iter().map(|l| format!("  {}", line_text(l))).collect();
+            fields.push(format!("\"lines\": [\n{}\n ]", items.join(",\n")));
+        }
+        format!("{{{}}}\n", fields.join(",\n "))
     }
+}
+
+/// A body line as cassette JSON: `data: {object}` as the object when that
+/// replays as the same text, else a string.
+fn line_text(line: &str) -> String {
+    if let Some(payload) = line.strip_prefix("data: ")
+        && let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(payload)
+        && json(&v) == payload
+    {
+        return v.to_string();
+    }
+    Value::String(line.to_string()).to_string()
+}
+
+/// Compact JSON.
+fn json<T: Serialize + ?Sized>(v: &T) -> String {
+    serde_json::to_string(v).expect("cassette values always serialize")
 }
 
 impl Expect {
@@ -366,12 +458,60 @@ mod tests {
     }
 
     #[test]
-    fn parse_errors_name_the_line() {
-        let e = parse("\n{\"status\": 200}\n{\"nope\": 1}\n").unwrap_err();
-        assert!(e.starts_with("line 3:"), "{e}");
+    fn parse_errors_name_the_exchange_and_line() {
+        let e = parse("\n{\"status\": 200}\n// c\n{\"nope\": 1}\n").unwrap_err();
+        assert!(e.starts_with("exchange 2 (line 4):"), "{e}");
         let e = parse(r#"{"status": 500, "lines": ["x"]}"#).unwrap_err();
         assert!(e.contains("line 1") && e.contains("lines"), "{e}");
         assert!(parse(r#"{"body": "x"}"#).is_err());
+        let e = parse("{\"lines\": [\n\"a\",\n oops]}").unwrap_err();
+        assert!(e.contains("exchange 1") && e.contains("line 3"), "{e}");
+        assert!(parse(r#"{"lines": [1]}"#).is_err());
+        assert!(parse(r#"{"lines": ["a"], "offline": "x", "bad_line": "y"}"#).is_err());
+    }
+
+    #[test]
+    fn exchanges_span_lines_and_lines_can_be_objects() {
+        let text = r#"
+// first
+{"expect": {"model": "m"},
+ "lines": [
+  "event: message_start",
+  {"type": "message_start", "n": 1},
+  ""
+ ]}
+{"lines": ["data: 1"], "bad_line": "not UTF-8"}
+"#;
+        let x = parse(text).unwrap();
+        // Key order follows serde_json's map, so compare as JSON.
+        assert_eq!((x[0].lines.len(), &x[0].lines[0][..], &x[0].lines[2][..]), (3, "event: message_start", ""));
+        let data: Value = serde_json::from_str(x[0].lines[1].strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(data, json!({"type": "message_start", "n": 1}));
+        assert_eq!(x[1].reply(), Reply::Lines { lines: &x[1].lines, then: Some(Failure::BadLine("not UTF-8".into())) });
+    }
+
+    #[test]
+    fn to_text_is_readable_and_round_trips() {
+        let x = Exchange {
+            expect: Expect { model: Some("m".into()), ..Expect::default() },
+            lines: vec!["event: ping".into(), r#"data: {"a":1}"#.into(), "data: [DONE]".into(), "".into()],
+            ..Exchange::default()
+        };
+        let text = x.to_text();
+        assert_eq!(
+            text,
+            "{\"expect\": {\"model\":\"m\"},\n \"lines\": [\n  \"event: ping\",\n  {\"a\":1},\n  \"data: [DONE]\",\n  \"\"\n ]}\n"
+        );
+        let e = Exchange {
+            status: Some(529),
+            retry_after: Some("3".into()),
+            body: Some(r#"{"error":{"type":"overloaded_error"}}"#.into()),
+            ..Exchange::default()
+        };
+        let both = format!("{text}{}", e.to_text());
+        assert!(both.contains("\"body\": {\"error\""), "{both}");
+        let b = Exchange { lines: vec!["x".into()], bad_line: Some("bad".into()), ..Exchange::default() };
+        assert_eq!(parse(&format!("{both}{}", b.to_text())).unwrap(), vec![x, e, b]);
     }
 
     #[test]
@@ -408,7 +548,7 @@ mod tests {
         assert_eq!(x.expect.results.len(), 1);
         assert_eq!(x.expect.results[0].contains.as_deref(), Some("INT. KITCHEN - NIGHT\nAdded 8 lines"));
         x.expect.check(&anthropic()).unwrap();
-        let line = x.to_line();
+        let line = x.to_text();
         assert!(!line.contains("secret"));
         assert_eq!(parse(&line).unwrap(), vec![x]);
 

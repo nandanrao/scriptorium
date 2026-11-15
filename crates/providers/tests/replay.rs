@@ -3,12 +3,11 @@
 //! shared error mapping. No network.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use scriptorium_agent::turn::{Action, Input, Limits, Outcome, Run};
-use scriptorium_agent::{AgentError, ErrorKind, Protocol, ReplyParser, Thread, ToolResult};
-use scriptorium_providers::shell::{Flow, Replay, TimeScale, Transport};
+use scriptorium_agent::{AgentError, ErrorKind, Event, Protocol, Thread, ToolResult};
+use scriptorium_providers::shell::{CancelToken, Replay, TimeScale, Transport, receive};
 use scriptorium_providers::{Account, Provider, Resolved, build_request, resolve};
 
 fn cassette(name: &str) -> PathBuf {
@@ -18,28 +17,14 @@ fn cassette(name: &str) -> PathBuf {
 /// One request through `transport`, parsed.
 fn send(transport: &dyn Transport, resolved: &Resolved, thread: &Thread, texts: &mut Vec<String>) -> Input {
     let req = build_request(resolved, Some("sk-test"), "You help.", &[], thread).unwrap();
-    let mut parser = ReplyParser::new(resolved.protocol);
-    let mut failed = None;
-    let sent = transport.send(&req, &mut |line| match parser.line(line) {
-        Ok(events) => {
-            for e in events {
-                if let scriptorium_agent::Event::Text { text, .. } = e {
-                    texts.push(text);
-                }
-            }
-            Flow::Continue
-        }
-        Err(e) => {
-            failed = Some(e);
-            Flow::Stop
+    let got = receive(transport, &req, resolved.protocol, &CancelToken::new(), &mut |e| {
+        if let Event::Text { text, .. } = e {
+            texts.push(text.clone());
         }
     });
-    match (sent, failed) {
-        (_, Some(e)) | (Err(e), None) => Input::Failed(e),
-        (Ok(()), None) => match parser.finish() {
-            Ok(turn) => Input::Reply(turn),
-            Err(e) => Input::Failed(e),
-        },
+    match got {
+        Ok(r) => r.into_input(),
+        Err(e) => Input::Failed(e),
     }
 }
 
@@ -56,7 +41,7 @@ fn run(
     let mut action = r.start(thread);
     let mut waits = vec![];
     let mut texts = vec![];
-    let stop = AtomicBool::new(false);
+    let stop = CancelToken::new();
     loop {
         let input = match action {
             Action::Send => send(transport, resolved, thread, &mut texts),
@@ -98,7 +83,7 @@ fn anthropic_tool_round_with_an_overloaded_retry() {
     assert_eq!(waits, [4]);
     assert_eq!(texts.concat(), "Scene 3 is tighter now.");
     assert_eq!(thread.messages.last().unwrap().text(), "Scene 3 is tighter now.");
-    assert_eq!(replay.remaining(), 0);
+    replay.finish().unwrap();
 }
 
 #[test]
@@ -111,6 +96,7 @@ fn a_tool_result_the_cassette_doesnt_expect_is_a_loud_error() {
     assert!(thread.push_user("Please tighten scene 3."));
     let (outcome, _, _) = run(&replay, &resolved, &mut thread, TimeScale::INSTANT, |_| "EXT. BEACH".into());
     let Outcome::Error(e) = outcome else { panic!("{outcome:?}") };
+    assert!(replay.finish().is_err(), "the third exchange was never requested");
     let m = e.to_string();
     assert!(m.contains("exchange 2 of 3") && m.contains("INT. KITCHEN") && m.contains("EXT. BEACH"), "{m}");
 }
@@ -147,5 +133,5 @@ fn openai_compatible_offline_retries_then_errors() {
     assert!(thread.push_user("once more"));
     let (outcome, _, _) = run(&replay, &resolved, &mut thread, TimeScale::INSTANT, |_| unreachable!());
     assert!(matches!(outcome, Outcome::Error(AgentError::Parse(_))), "{outcome:?}");
-    assert_eq!(replay.remaining(), 0);
+    replay.finish().unwrap();
 }

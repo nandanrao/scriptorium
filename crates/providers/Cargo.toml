@@ -13,6 +13,8 @@ default = ["shell", "keyring"]
 shell = ["dep:ureq"]
 # Keys in the OS keyring (Secret Service, Keychain, Windows Credential
 # Manager). Without it keys come only from `SCRIPTORIUM_<PROVIDER>_KEY`.
+# On Linux libdbus is built from source (`vendored`), so building needs no
+# libdbus-1-dev.
 keyring = ["shell", "dep:keyring"]
 
 [dependencies]
@@ -22,7 +24,7 @@ serde_json.workspace = true
 ureq = { workspace = true, optional = true }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-keyring = { workspace = true, optional = true, features = ["sync-secret-service", "crypto-rust"] }
+keyring = { workspace = true, optional = true, features = ["sync-secret-service", "crypto-rust", "vendored"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { workspace = true, optional = true, features = ["apple-native"] }

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use scriptorium_agent::{AgentError, Request};
 
-use super::{Flow, Transport};
+use super::{CancelToken, Ended, Flow, Transport};
 use crate::cassette::Exchange;
 use crate::failure::Failure;
 
@@ -22,9 +22,14 @@ const MAX_ERROR_BODY: u64 = 1024 * 1024;
 /// Streams requests over HTTP(S). Honours `HTTPS_PROXY`/`ALL_PROXY`/
 /// `NO_PROXY`. Optionally records each exchange to a cassette
 /// ([`Http::record_to`]).
+///
+/// Each request gets its own connection, so cancelling one shuts down only
+/// that one: a TLS handshake, a wait for headers or a stalled read return
+/// at once. (A TCP connect in progress is not interrupted; it gives up after
+/// its 30 s timeout, and the result is ignored.)
 #[derive(Debug)]
 pub struct Http {
-    agent: ureq::Agent,
+    config: ureq::config::Config,
     recorder: Option<Mutex<File>>,
 }
 
@@ -45,13 +50,20 @@ impl Http {
             .timeout_per_read(Some(Duration::from_secs(300)))
             .user_agent(concat!("scriptorium/", env!("CARGO_PKG_VERSION")))
             .build();
-        Http { agent: ureq::Agent::new_with_config(config), recorder: None }
+        Http { config, recorder: None }
     }
 
     /// Also append every exchange to the cassette at `path` (created if
-    /// missing): the request's path, model, the start of its last user text
-    /// and new tool results, and the reply's status, lines or body. Never
-    /// headers, so never a key. For `scriptorium chat --record`.
+    /// missing), as readable [`cassette`](crate::cassette) text: the
+    /// request's path and model, the start of its last user message and of
+    /// each new tool result, and the reply's status and lines or error body.
+    /// Never headers, so never a key; but it does hold the writer's words,
+    /// script text from tool results, and replies, so treat a recording like
+    /// the script. A request cancelled mid-reply is recorded as cut off.
+    ///
+    /// Record one run at a time: a [`Replay`](super::Replay) answers in
+    /// order, so requests sent concurrently would record in an order a
+    /// replay can't reproduce.
     pub fn record_to(mut self, path: &Path) -> Result<Http, AgentError> {
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -62,17 +74,26 @@ impl Http {
         Ok(self)
     }
 
-    fn exchange(&self, req: &Request, line: &mut dyn FnMut(&str) -> Flow, rec: &mut Exchange) -> Result<(), Failure> {
+    fn exchange(
+        &self,
+        req: &Request,
+        cancel: &CancelToken,
+        line: &mut dyn FnMut(&str) -> Flow,
+        rec: &mut Exchange,
+    ) -> Result<Ended, Failure> {
+        let agent = ureq::Agent::new_with_config(self.config.clone());
+        let to_shut = agent.clone();
+        let _guard = cancel.on_cancel(move || to_shut.clone().shutdown());
         let host = host(&req.url);
         let offline = |e: ureq::Error| Failure::Offline(format!("couldn't reach {host}: {e}"));
         let response = if req.body.is_null() {
-            let mut r = self.agent.get(&req.url);
+            let mut r = agent.get(&req.url);
             for (k, v) in &req.headers {
                 r = r.header(k.as_str(), v.as_str());
             }
             r.call().map_err(offline)?
         } else {
-            let mut r = self.agent.post(&req.url);
+            let mut r = agent.post(&req.url);
             for (k, v) in &req.headers {
                 r = r.header(k.as_str(), v.as_str());
             }
@@ -93,13 +114,16 @@ impl Http {
         let mut reader = BufReader::new(response.into_body().into_reader());
         let mut buf = vec![];
         loop {
+            if cancel.is_cancelled() {
+                return Ok(Ended::Cancelled);
+            }
             buf.clear();
             let n = (&mut reader)
                 .take(MAX_LINE)
                 .read_until(b'\n', &mut buf)
                 .map_err(|e| Failure::CutOff(format!("{host}: {e}")))?;
             if n == 0 {
-                return Ok(());
+                return Ok(Ended::Finished);
             }
             if buf.last() != Some(&b'\n') && n as u64 == MAX_LINE {
                 return Err(Failure::BadLine(format!("a line of the reply is longer than {MAX_LINE} bytes")));
@@ -111,30 +135,48 @@ impl Http {
             rec.lines.push(text.to_string());
             if line(text) == Flow::Stop {
                 // Dropping the reader closes the connection.
-                return Ok(());
+                return Ok(Ended::Finished);
             }
         }
+    }
+
+    fn record(&self, rec: &mut Exchange, result: &Result<Ended, Failure>) -> std::io::Result<()> {
+        let Some(recorder) = &self.recorder else { return Ok(()) };
+        match result {
+            Err(Failure::Offline(m) | Failure::CutOff(m)) => rec.offline = Some(m.clone()),
+            Err(Failure::BadLine(m)) => rec.bad_line = Some(m.clone()),
+            Ok(Ended::Cancelled) => rec.offline = Some("stopped while recording".into()),
+            _ => {}
+        }
+        if rec.status.is_some_and(|s| (200..300).contains(&s)) {
+            rec.status = None;
+        }
+        let mut file = recorder.lock().unwrap_or_else(|e| e.into_inner());
+        file.write_all(rec.to_text().as_bytes())?;
+        file.flush()
     }
 }
 
 impl Transport for Http {
-    fn send(&self, req: &Request, line: &mut dyn FnMut(&str) -> Flow) -> Result<(), AgentError> {
+    fn send(
+        &self,
+        req: &Request,
+        cancel: &CancelToken,
+        line: &mut dyn FnMut(&str) -> Flow,
+    ) -> Result<Ended, AgentError> {
+        if cancel.is_cancelled() {
+            return Ok(Ended::Cancelled);
+        }
         let mut rec = Exchange::recording(req);
-        let result = self.exchange(req, line, &mut rec);
-        if let Some(recorder) = &self.recorder {
-            if let Err(Failure::Offline(m) | Failure::CutOff(m) | Failure::BadLine(m)) = &result {
-                rec.offline = Some(m.clone());
-                rec.status = rec.status.filter(|_| !rec.lines.is_empty());
-            }
-            if rec.status == Some(200) {
-                rec.status = None;
-            }
-            let mut file = recorder.lock().unwrap_or_else(|e| e.into_inner());
-            let written = writeln!(file, "{}", rec.to_line()).and_then(|()| file.flush());
-            // A failed recording is reported unless the request itself failed.
-            if let (Err(e), Ok(())) = (written, &result) {
-                return Err(Failure::File(format!("can't write the recording: {e}")).to_error());
-            }
+        let mut result = self.exchange(req, cancel, line, &mut rec);
+        // Whatever the shut-down connection reported, it was a cancel.
+        if result.is_err() && cancel.is_cancelled() {
+            result = Ok(Ended::Cancelled);
+        }
+        let written = self.record(&mut rec, &result);
+        // A failed recording is reported unless the request itself failed.
+        if let (Err(e), Ok(_)) = (written, &result) {
+            return Err(Failure::File(format!("can't write the recording: {e}")).to_error());
         }
         result.map_err(|f| f.to_error())
     }
@@ -152,8 +194,31 @@ mod tests {
     use crate::shell::{Replay, TimeScale};
     use scriptorium_agent::ErrorKind;
     use serde_json::json;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::thread::JoinHandle;
+    use std::time::Instant;
+
+    /// Reads one HTTP request from `s`: its head and body.
+    fn read_request(s: &TcpStream) -> String {
+        let mut reader = BufReader::new(s.try_clone().unwrap());
+        let mut head = String::new();
+        let mut len = 0;
+        loop {
+            let mut l = String::new();
+            reader.read_line(&mut l).unwrap();
+            if let Some(v) = l.to_ascii_lowercase().strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap();
+            }
+            head.push_str(&l);
+            if l == "\r\n" || l.is_empty() {
+                break;
+            }
+        }
+        let mut body = vec![0; len];
+        reader.read_exact(&mut body).unwrap();
+        head.push_str(&String::from_utf8_lossy(&body));
+        head
+    }
 
     /// A one-shot HTTP server on loopback that answers `response` (raw
     /// bytes) and returns the request it got.
@@ -162,26 +227,27 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let handle = std::thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(s.try_clone().unwrap());
-            let mut head = String::new();
-            let mut len = 0;
-            loop {
-                let mut l = String::new();
-                reader.read_line(&mut l).unwrap();
-                if let Some(v) = l.to_ascii_lowercase().strip_prefix("content-length:") {
-                    len = v.trim().parse().unwrap();
-                }
-                head.push_str(&l);
-                if l == "\r\n" || l.is_empty() {
-                    break;
-                }
-            }
-            let mut body = vec![0; len];
-            reader.read_exact(&mut body).unwrap();
-            head.push_str(&String::from_utf8_lossy(&body));
+            let head = read_request(&s);
             let _ = s.write_all(&response);
             let _ = s.flush();
             head
+        });
+        (url, handle)
+    }
+
+    /// A server that answers `response` and then holds the connection open
+    /// without a word until the client goes away.
+    fn serve_and_stall(response: Vec<u8>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            read_request(&s);
+            let _ = s.write_all(&response);
+            let _ = s.flush();
+            let mut sink = [0; 64];
+            // Returns when the client closes its end.
+            while matches!(s.read(&mut sink), Ok(n) if n > 0) {}
         });
         (url, handle)
     }
@@ -202,9 +268,9 @@ mod tests {
         }
     }
 
-    fn lines(http: &Http, req: &Request) -> (Vec<String>, Result<(), AgentError>) {
+    fn lines(t: &dyn Transport, req: &Request) -> (Vec<String>, Result<Ended, AgentError>) {
         let mut got = vec![];
-        let r = http.send(req, &mut |l| {
+        let r = t.send(req, &CancelToken::new(), &mut |l| {
             got.push(l.to_string());
             Flow::Continue
         });
@@ -215,12 +281,12 @@ mod tests {
     fn streams_lines() {
         let (url, server) = serve(ok(b"event: ping\r\ndata: {\"a\":\"\xc3\xa9\"}\n\ndata: [DONE]"));
         let (got, r) = lines(&Http::new(), &post(&url));
-        r.unwrap();
+        assert_eq!(r.unwrap(), Ended::Finished);
         assert_eq!(got, ["event: ping", "data: {\"a\":\"é\"}", "", "data: [DONE]"]);
         let request = server.join().unwrap();
         assert!(request.starts_with("POST /v1/messages "), "{request}");
         assert!(request.contains("x-api-key: sk-secret"));
-        assert!(request.ends_with(r#""model":"claude-opus-5-5"}"#) || request.contains("tighten it"));
+        assert!(request.contains("tighten it"));
     }
 
     #[test]
@@ -278,17 +344,63 @@ mod tests {
     }
 
     #[test]
-    fn stop_stops_reading() {
-        let (url, server) = serve(ok(b"a\nb\nc\n"));
+    fn flow_stop_stops_reading_a_body_held_open() {
+        // The server never ends the body; Stop after the first line returns.
+        let (url, server) =
+            serve_and_stall(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n6\r\na\nb\nc\n\r\n".to_vec());
         let mut got = vec![];
-        Http::new()
-            .send(&post(&url), &mut |l| {
+        let ended = Http::new()
+            .send(&post(&url), &CancelToken::new(), &mut |l| {
                 got.push(l.to_string());
                 Flow::Stop
             })
             .unwrap();
-        server.join().unwrap();
+        assert_eq!(ended, Ended::Finished);
         assert_eq!(got, ["a"]);
+        server.join().unwrap();
+    }
+
+    /// Cancels `cancel` after 100 ms, on another thread.
+    fn cancel_soon(cancel: &CancelToken) {
+        let c = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            c.cancel();
+        });
+    }
+
+    #[test]
+    fn cancel_interrupts_a_wait_for_headers() {
+        let (url, server) = serve_and_stall(vec![]);
+        let cancel = CancelToken::new();
+        cancel_soon(&cancel);
+        let t = Instant::now();
+        let ended = Http::new().send(&post(&url), &cancel, &mut |_| panic!("no line")).unwrap();
+        assert_eq!(ended, Ended::Cancelled);
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn cancel_interrupts_a_stalled_stream() {
+        let (url, server) =
+            serve_and_stall(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n8\r\ndata: 1\n\r\n".to_vec());
+        let cancel = CancelToken::new();
+        let mut got = vec![];
+        let t = Instant::now();
+        cancel_soon(&cancel);
+        let ended = Http::new()
+            .send(&post(&url), &cancel, &mut |l| {
+                got.push(l.to_string());
+                Flow::Continue
+            })
+            .unwrap();
+        assert_eq!(ended, Ended::Cancelled);
+        assert_eq!(got, ["data: 1"]);
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        server.join().unwrap();
+        // Already cancelled: nothing is sent.
+        assert_eq!(Http::new().send(&post(&url), &cancel, &mut |_| Flow::Continue).unwrap(), Ended::Cancelled);
     }
 
     #[test]
@@ -299,43 +411,38 @@ mod tests {
         let _ = std::fs::remove_file(&cassette);
         let http = Http::new().record_to(&cassette).unwrap();
 
-        let (url, server) = serve(ok(b"event: ping\ndata: {}\n\n"));
-        let req1 = post(&url);
-        let live1 = lines(&http, &req1);
-        server.join().unwrap();
+        let mut live = vec![];
+        let mut reqs = vec![];
         let body = r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#;
-        let (url, server) = serve(
+        for response in [
+            ok(b"event: ping\ndata: {}\n\n"),
             format!("HTTP/1.1 429 Too Many\r\nretry-after: 9\r\ncontent-length: {}\r\n\r\n{body}", body.len())
                 .into_bytes(),
-        );
-        let req2 = post(&url);
-        let live2 = lines(&http, &req2);
-        server.join().unwrap();
-        let (url, server) = serve(b"HTTP/1.1 200 OK\r\ncontent-length: 99\r\n\r\ndata: 1\n".to_vec());
-        let req3 = post(&url);
-        let live3 = lines(&http, &req3);
-        server.join().unwrap();
+            b"HTTP/1.1 200 OK\r\ncontent-length: 99\r\n\r\ndata: 1\n".to_vec(),
+            ok(b"data: 1\ndata: \xff\n"),
+        ] {
+            let (url, server) = serve(response);
+            let req = post(&url);
+            live.push(lines(&http, &req));
+            server.join().unwrap();
+            reqs.push(req);
+        }
 
         let text = std::fs::read_to_string(&cassette).unwrap();
         assert!(!text.contains("sk-secret"), "{text}");
-        assert_eq!(text.lines().count(), 3, "{text}");
+        assert!(text.contains("\"lines\": [\n  \"event: ping\",\n  {},"), "{text}");
         let replay = Replay::open(&cassette, TimeScale::INSTANT).unwrap();
-        assert_eq!(lines_replay(&replay, &req1), live1);
-        assert_eq!(lines_replay(&replay, &req2), live2);
-        let (got3, r3) = lines_replay(&replay, &req3);
-        assert_eq!(got3, live3.0);
-        assert_eq!(r3.unwrap_err().kind(), Some(ErrorKind::Offline));
-        assert_eq!(replay.remaining(), 0);
+        assert_eq!(replay.remaining(), 4);
+        let replayed: Vec<_> = reqs.iter().map(|r| lines(&replay, r)).collect();
+        assert_eq!(replayed[0], live[0]);
+        assert_eq!(replayed[1], live[1]);
+        for (r, l) in replayed.iter().zip(&live).skip(2) {
+            assert_eq!(r.0, l.0);
+            assert_eq!(r.1.as_ref().unwrap_err().kind(), l.1.as_ref().unwrap_err().kind());
+        }
+        assert!(matches!(replayed[3].1, Err(AgentError::Parse(_))), "a bad line replays as Parse");
+        replay.finish().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn lines_replay(r: &Replay, req: &Request) -> (Vec<String>, Result<(), AgentError>) {
-        let mut got = vec![];
-        let res = r.send(req, &mut |l| {
-            got.push(l.to_string());
-            Flow::Continue
-        });
-        (got, res)
     }
 
     #[test]

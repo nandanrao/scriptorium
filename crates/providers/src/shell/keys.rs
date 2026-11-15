@@ -4,8 +4,15 @@
 //! `SCRIPTORIUM_<ACCOUNT ID>_KEY`, then `SCRIPTORIUM_<PROVIDER>_KEY`). Never
 //! in a plain-text file.
 //!
-//! The keyring is asked first; the variable is the fallback, for machines
-//! without a keyring (CI, a bare D-Bus session, containers) and for agents.
+//! A variable that is set wins: it's the explicit choice (an agent, a test,
+//! CI, a bare D-Bus session), and when one is set the keyring isn't touched
+//! at all. Otherwise the keyring is asked.
+//!
+//! **Never call [`Keys`] on the UI thread.** Asking the keyring can block:
+//! a locked Secret Service collection waits for the writer to unlock it, and
+//! with no Secret Service on the bus a lookup can take about 25 s to fail.
+//! Keyring answers (including "couldn't ask") are cached for the process, so
+//! that happens at most once per account.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -135,30 +142,28 @@ impl Keys {
 
     /// The key, or why the keyring couldn't be asked.
     fn lookup(&self, account: &Account) -> (Option<(String, KeySource)>, Option<String>) {
-        let (stored, why) = match self.read(&account.id) {
-            Ok(k) => (k.and_then(nonempty), None),
-            Err(e) => (None, Some(e)),
-        };
-        if let Some(k) = stored {
-            return (Some((k, KeySource::Keyring)), None);
-        }
         for var in account.key_env_vars() {
             if let Some(k) = (self.env)(&var).and_then(nonempty) {
-                return (Some((k, KeySource::Env(var))), why);
+                return (Some((k, KeySource::Env(var))), None);
             }
         }
-        (None, why)
+        match self.read(&account.id) {
+            Ok(k) => (k.and_then(nonempty).map(|k| (k, KeySource::Keyring)), None),
+            Err(e) => (None, Some(e)),
+        }
     }
 
     /// Ok(None): the keyring has no entry. Err: it couldn't be asked.
     fn read(&self, id: &str) -> Result<Option<String>, String> {
         match &self.store {
             #[cfg(feature = "keyring")]
-            Store::System => match keyring::Entry::new(SERVICE, id).and_then(|e| e.get_password()) {
-                Ok(k) => Ok(Some(k)),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(e) => Err(e.to_string()),
-            },
+            Store::System => {
+                system::cached(id, || match keyring::Entry::new(SERVICE, id).and_then(|e| e.get_password()) {
+                    Ok(k) => Ok(Some(k)),
+                    Err(keyring::Error::NoEntry) => Ok(None),
+                    Err(e) => Err(e.to_string()),
+                })
+            }
             Store::None(why) => Err((*why).to_string()),
             Store::Memory(m) => Ok(m.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()),
         }
@@ -173,9 +178,13 @@ impl Keys {
         }
         match &self.store {
             #[cfg(feature = "keyring")]
-            Store::System => keyring::Entry::new(SERVICE, &account.id)
-                .and_then(|e| e.set_password(key))
-                .map_err(|e| system_error(account, e)),
+            Store::System => {
+                keyring::Entry::new(SERVICE, &account.id)
+                    .and_then(|e| e.set_password(key))
+                    .map_err(|e| system_error(account, e))?;
+                system::remember(&account.id, Ok(Some(key.to_string())));
+                Ok(())
+            }
             Store::None(why) => Err(KeyError::NoKeyring { env_vars: account.key_env_vars(), reason: (*why).into() }),
             Store::Memory(m) => {
                 m.lock().unwrap_or_else(|e| e.into_inner()).insert(account.id.clone(), key.to_string());
@@ -190,7 +199,10 @@ impl Keys {
         match &self.store {
             #[cfg(feature = "keyring")]
             Store::System => match keyring::Entry::new(SERVICE, &account.id).and_then(|e| e.delete_credential()) {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Ok(()) | Err(keyring::Error::NoEntry) => {
+                    system::remember(&account.id, Ok(None));
+                    Ok(())
+                }
                 Err(e) => Err(system_error(account, e)),
             },
             Store::None(_) => Ok(()),
@@ -199,6 +211,34 @@ impl Keys {
                 Ok(())
             }
         }
+    }
+}
+
+/// The process-wide cache of keyring answers, by account id.
+#[cfg(feature = "keyring")]
+mod system {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    type Answer = Result<Option<String>, String>;
+
+    fn cache() -> &'static Mutex<HashMap<String, Answer>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Answer>>> = OnceLock::new();
+        CACHE.get_or_init(Default::default)
+    }
+
+    /// The cached answer for `id`, or `ask` (outside the lock) and cache it.
+    pub fn cached(id: &str, ask: impl FnOnce() -> Answer) -> Answer {
+        if let Some(a) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(id) {
+            return a.clone();
+        }
+        let a = ask();
+        remember(id, a.clone());
+        a
+    }
+
+    pub fn remember(id: &str, a: Answer) {
+        cache().lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), a);
     }
 }
 
@@ -222,18 +262,21 @@ mod tests {
     }
 
     #[test]
-    fn keyring_first_then_the_variable() {
+    fn a_set_variable_wins_over_the_keyring() {
         let work = Account::new("work", "Work", Provider::Anthropic);
-        let home = Account::new("home", "Home", Provider::Anthropic);
-        let keys = Keys::in_memory(env(&[("SCRIPTORIUM_ANTHROPIC_KEY", " sk-env \n")]));
-        assert_eq!(keys.get(&work), Some(("sk-env".into(), KeySource::Env("SCRIPTORIUM_ANTHROPIC_KEY".into()))));
+        let home = Account::new("home", "Home", Provider::Openai);
+        let keys =
+            Keys::in_memory(env(&[("SCRIPTORIUM_ANTHROPIC_KEY", " sk-env \n"), ("SCRIPTORIUM_OPENAI_KEY", " ")]));
         keys.set(&work, "  sk-stored ").unwrap();
-        assert_eq!(keys.get(&work), Some(("sk-stored".into(), KeySource::Keyring)));
-        assert_eq!(keys.status(&work), KeyStatus::Keyring);
-        assert_eq!(keys.status(&home), KeyStatus::Env("SCRIPTORIUM_ANTHROPIC_KEY".into()));
-        keys.delete(&work).unwrap();
-        keys.delete(&work).unwrap();
-        assert_eq!(keys.get(&work).unwrap().1, KeySource::Env("SCRIPTORIUM_ANTHROPIC_KEY".into()));
+        assert_eq!(keys.get(&work), Some(("sk-env".into(), KeySource::Env("SCRIPTORIUM_ANTHROPIC_KEY".into()))));
+        assert_eq!(keys.status(&work), KeyStatus::Env("SCRIPTORIUM_ANTHROPIC_KEY".into()));
+        // A blank variable counts as unset.
+        keys.set(&home, "sk-stored").unwrap();
+        assert_eq!(keys.get(&home), Some(("sk-stored".into(), KeySource::Keyring)));
+        assert_eq!(keys.status(&home), KeyStatus::Keyring);
+        keys.delete(&home).unwrap();
+        keys.delete(&home).unwrap();
+        assert_eq!(keys.get(&home), None);
         assert_eq!(keys.set(&work, "  "), Err(KeyError::Empty));
     }
 

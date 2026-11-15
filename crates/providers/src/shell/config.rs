@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ProvidersError;
 use crate::account::AccountsFile;
@@ -55,13 +56,21 @@ pub fn save(path: &Path, file: &AccountsFile) -> Result<(), ProvidersError> {
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| err("create the folder for", e))?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| FILE_NAME.into());
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    // Unique per process and per call, so two saves never share a temp file.
+    static SAVES: AtomicU64 = AtomicU64::new(0);
+    let n = SAVES.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
     let write = || -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         f.write_all(file.to_json().as_bytes())?;
         f.write_all(b"\n")?;
         f.sync_all()?;
-        std::fs::rename(&tmp, path)
+        std::fs::rename(&tmp, path)?;
+        // Make the rename itself durable. (Directories can't be opened for
+        // syncing on Windows; there the rename is as durable as it gets.)
+        #[cfg(unix)]
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
     };
     write().map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
