@@ -153,6 +153,13 @@ impl fmt::Display for ToolError {
 
 impl std::error::Error for ToolError {}
 
+/// Whether tool `name` can return [`Outcome::Append`] (the suggesting
+/// tools). Hosts take the session lock only for these; every other tool
+/// only reads.
+pub fn may_append(name: &str) -> bool {
+    matches!(name, "suggest_change" | "suggest_changes")
+}
+
 /// Run tool `name` with `args` (a JSON object).
 pub fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<Outcome, ToolError> {
     let a = args::Args::new(args)?;
