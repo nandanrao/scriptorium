@@ -13,18 +13,27 @@
 //! (OpenAI, OpenRouter, and any other server, local ones included, by its
 //! base URL).
 //!
-//! This is the crate's pure core (AGENTS.md rule 1): values in, values out.
-//! API keys arrive as arguments; reading them from the keyring or the
-//! environment, the config file on disk, and HTTP belong to the shell.
+//! The modules above, [`cassette`] and [`failure`] are the crate's pure
+//! core (AGENTS.md rule 1): values in, values out. API keys arrive as
+//! arguments. Reading them from the keyring or the environment, the config
+//! file on disk, and HTTP belong to [`shell`] (feature `shell`, on by
+//! default), which carries requests through a [`shell::Transport`]: live
+//! ([`shell::Http`]) or from a cassette ([`shell::Replay`]). Both turn
+//! failures into errors through the one mapping, [`Failure::to_error`].
 
 pub mod account;
+pub mod cassette;
 pub mod cost;
+pub mod failure;
 pub mod models;
 pub mod presets;
 pub mod resolve;
+#[cfg(feature = "shell")]
+pub mod shell;
 
 pub use account::{Account, AccountsFile, Provider};
 pub use cost::{PriceBook, ThreadCost, reply_cost, thread_cost};
+pub use failure::Failure;
 pub use models::{Capabilities, Price, PriceTier, capabilities};
 pub use presets::{PRESETS, Preset};
 pub use resolve::{DEFAULT_MAX_TOKENS, Resolved, build_request, models_request, resolve};
