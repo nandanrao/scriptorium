@@ -1,0 +1,6 @@
+// Offline twice, then a plain text reply; then a 401.
+{"offline": "connection refused"}
+{"lines": ["data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}", ""], "offline": "connection reset"}
+{"expect": {"path": "/chat/completions", "model": "gpt-test", "last_user": "hello"}, "lines": ["data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}", "", "data: {\"choices\":[{\"delta\":{\"content\":\" there.\"},\"finish_reason\":\"stop\"}]}", "", "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}", "", "data: [DONE]", ""]}
+{"status": 401, "body": {"error": {"message": "Incorrect API key provided", "type": "invalid_request_error", "code": "invalid_api_key"}}}
+{"lines": ["data: {not json", ""]}

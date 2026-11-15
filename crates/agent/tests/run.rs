@@ -273,6 +273,15 @@ fn retries_honour_retry_after_cap_the_backoff_and_reset_after_a_reply() {
 }
 
 #[test]
+fn a_retry_after_of_zero_still_waits() {
+    let mut t = Thread::default();
+    assert!(t.push_user("Go."));
+    let mut run = Run::new(limits(), Protocol::Anthropic, origin());
+    run.start(&mut t);
+    assert_eq!(run.next(&mut t, Input::Failed(api(true, Some(0)))), Action::Wait { secs: 1 });
+}
+
+#[test]
 fn a_retry_after_beyond_the_cap_ends_the_run_with_the_error() {
     let mut t = Thread::default();
     assert!(t.push_user("Go."));

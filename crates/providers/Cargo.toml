@@ -1,15 +1,40 @@
 [package]
 name = "scriptorium-providers"
-description = "AI provider accounts for the built-in agent: settings, presets, model capabilities and prices, request assembly. The core is pure; keys, config files and HTTP come with the shell."
+description = "AI provider accounts for the built-in agent: settings, presets, model capabilities and prices, request assembly, and (the shell) the accounts file, keys and HTTP. The core is pure."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["shell", "keyring"]
+# The imperative shell: the accounts file on disk, keys, HTTP and replayed
+# transports. Without it the crate is its pure core (and builds for wasm32).
+shell = ["dep:ureq"]
+# Keys in the OS keyring (Secret Service, Keychain, Windows Credential
+# Manager). Without it keys come only from `SCRIPTORIUM_<PROVIDER>_KEY`.
+# On Linux libdbus is built from source (`vendored`), so building needs no
+# libdbus-1-dev.
+keyring = ["shell", "dep:keyring"]
+
 [dependencies]
 scriptorium-agent.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ureq = { workspace = true, optional = true }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+keyring = { workspace = true, optional = true, features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, optional = true, features = ["apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { workspace = true, optional = true, features = ["windows-native"] }
+
+[[test]]
+name = "replay"
+required-features = ["shell"]
 
 [lints]
 workspace = true

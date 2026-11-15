@@ -177,6 +177,11 @@ pub const MAX_BACKOFF_SECS: u64 = 30;
 /// later themselves) rather than leaving it waiting indefinitely.
 pub const MAX_RETRY_AFTER_SECS: u64 = 300;
 
+/// The shortest wait before a retry, in seconds, even when the provider says
+/// `retry-after: 0`, so a run never retries in a tight loop. (The shell adds
+/// jitter when it sleeps; this crate has no randomness.)
+pub const MIN_RETRY_SECS: u64 = 1;
+
 /// What the shell reports to [`Run::next`].
 // Built once per step and moved straight in: boxing the turn would only
 // make the shell's code noisier.
@@ -340,7 +345,7 @@ impl Run {
         // 1, 2, 4… seconds, capped.
         let backoff = 1u64.checked_shl(self.retries).unwrap_or(u64::MAX).min(MAX_BACKOFF_SECS);
         self.retries += 1;
-        Action::Wait { secs: retry_after.unwrap_or(backoff) }
+        Action::Wait { secs: retry_after.unwrap_or(backoff).max(MIN_RETRY_SECS) }
     }
 
     fn stop(&mut self, thread: &mut Thread, results: Vec<ToolResult>) -> Action {
