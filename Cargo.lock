@@ -4696,6 +4696,7 @@ name = "scriptorium-mcp"
 version = "0.3.0"
 dependencies = [
  "scriptorium-cli",
+ "scriptorium-fsio",
  "scriptorium-tools",
  "serde_json",
 ]

@@ -29,7 +29,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::fsio::{LockError, SessionLock, write_atomic};
-use crate::opened::{Opened, file_name, load, new_review_id, no_reviews, review_salt, script_dir};
+use scriptorium_fsio::opened::{Opened, file_name, load, new_review_id, no_reviews, review_salt, script_dir};
 
 pub const USAGE: &str = "\
 scriptorium: screenplay tools

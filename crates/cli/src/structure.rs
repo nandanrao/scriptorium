@@ -13,7 +13,7 @@ use scriptorium_review::file::{Case, parse_typed_lines};
 use serde::Serialize;
 
 use crate::commands::lock;
-use crate::opened::Opened;
+use scriptorium_fsio::opened::Opened;
 
 /// Where `insert` puts its paragraphs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

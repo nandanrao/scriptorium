@@ -16,9 +16,7 @@ pub mod commands;
 /// Moved to the `scriptorium-fsio` crate; re-exported so `scriptorium_cli::fsio`
 /// paths keep working. New code depends on `scriptorium-fsio` directly.
 pub use scriptorium_fsio as fsio;
-pub mod opened;
 pub mod structure;
 
 pub use commands::{Choice, SuggestionRef, USAGE, run, tool, tool_specs};
 pub use fsio::{SessionLock, write_atomic};
-pub use opened::Opened;

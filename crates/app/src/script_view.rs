@@ -86,7 +86,7 @@ pub struct Opened {
     notices: Vec<String>,
 }
 
-// This mirrors `scriptorium_cli::Opened` rather than using it: the app sets a
+// This mirrors `scriptorium_fsio::opened::Opened` rather than using it: the app sets a
 // session that can't be used aside and starts fresh (the CLI refuses, so it
 // never overwrites one), turns an unreadable review file into a notice (the
 // CLI fails), and needs `Seen` for the session file it read.

@@ -16,7 +16,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use scriptorium_cli::commands::{self, Choice, SuggestionRef};
-use scriptorium_cli::opened::script_dir;
+use scriptorium_fsio::opened::script_dir;
 use scriptorium_tools::{HostField, ToolSpec};
 use serde_json::{Map, Value, json};
 
