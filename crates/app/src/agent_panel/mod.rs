@@ -28,6 +28,8 @@
 
 pub mod accounts;
 pub mod composer;
+#[cfg(debug_assertions)]
+mod debug_fixture;
 pub mod messages;
 pub mod threads;
 mod view_model;
@@ -209,10 +211,10 @@ impl AgentPanel {
     ) -> Self {
         Self {
             focus: cx.focus_handle(),
-            script,
+            script: script.clone(),
             script_path,
             threads: cx.new(|cx| ThreadList::new(window, cx)),
-            messages: cx.new(|cx| MessageView::new(window, cx)),
+            messages: cx.new(|cx| MessageView::new(script.clone(), window, cx)),
             composer: cx.new(|cx| Composer::new(window, cx)),
         }
     }
@@ -256,7 +258,10 @@ impl AgentPanel {
     /// The panel's focus stops for Tab, in order. U6 and U7 add Send/Stop,
     /// the model chip and the thread list's own stops.
     fn tab_stops(&self, cx: &App) -> Vec<FocusHandle> {
-        vec![self.composer.read(cx).focus_handle(cx), self.threads.read(cx).focus_handle(cx)]
+        let mut stops = vec![self.composer.read(cx).focus_handle(cx)];
+        stops.extend(self.messages.read(cx).tab_stops());
+        stops.push(self.threads.read(cx).focus_handle(cx));
+        stops
     }
 
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
