@@ -4,8 +4,9 @@
 //! The shell owns one [`Stream`] per open thread and feeds it what the run
 //! reports ([`Stream::event`], [`Stream::wait`], [`Stream::fail`],
 //! [`Stream::stop`], [`Stream::clear`]). To paint, call [`rows`] with the
-//! thread, the stream and a [`Context`]; it rebuilds the whole list (cheap
-//! enough per frame) and gives every row a stable [`Key`], so the view can
+//! thread, the stream and a [`Context`] (or keep a [`RowCache`], which
+//! reuses the rows of finished messages across frames); every row has a
+//! stable [`Key`], so the view can
 //! keep one `TextViewState` per key across repaints and across the moment the
 //! pushed turn replaces the streaming rows.
 
@@ -13,8 +14,9 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use scriptorium_agent::{AgentError, Block, Event, Role, StopReason, Thread, Usage, turn};
+use scriptorium_agent::{AgentError, Block, Event, Message, Role, StopReason, Thread, Usage, turn};
 use scriptorium_chat::labels;
 use serde_json::Value;
 
@@ -70,30 +72,47 @@ pub struct ToolRow {
     /// The one-line label (`chat::labels`).
     pub label: String,
     /// Readable arguments for the expanded row; empty while they stream.
-    pub args: String,
+    pub args: Arc<str>,
     /// The result, split for "first 40 lines, then Show all"; `None` until it
     /// arrives (and for a call that never ran).
     pub result: Option<Preview>,
 }
 
-/// A result cut to its first lines.
+/// A result cut to its first lines: the whole text, shared, and where the
+/// shown part ends in it (no second copy).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {
-    pub shown: String,
+    full: Arc<str>,
+    /// Byte length of the shown prefix.
+    shown_len: usize,
     /// Lines left out; non-zero means offer "Show all".
     pub hidden: usize,
-    pub full: String,
 }
 
 impl Preview {
     pub fn new(text: &str, max_lines: usize) -> Self {
         let total = text.lines().count();
-        let shown = if total > max_lines {
-            text.lines().take(max_lines).collect::<Vec<_>>().join("\n")
+        let shown_len = if total <= max_lines {
+            text.len()
+        } else if max_lines == 0 {
+            0
         } else {
-            text.to_string()
+            // The end of line `max_lines`, without its line break. There are
+            // more lines after it, so its `\n` exists.
+            let end = text.match_indices('\n').nth(max_lines - 1).map_or(text.len(), |(i, _)| i);
+            text[..end].strip_suffix('\r').map_or(end, str::len)
         };
-        Preview { shown, hidden: total.saturating_sub(max_lines), full: text.to_string() }
+        Preview { full: text.into(), shown_len, hidden: total.saturating_sub(max_lines) }
+    }
+
+    /// The first lines.
+    pub fn shown(&self) -> &str {
+        &self.full[..self.shown_len]
+    }
+
+    /// The whole result, for "Show all".
+    pub fn full(&self) -> &str {
+        &self.full
     }
 }
 
@@ -102,16 +121,16 @@ impl Preview {
 pub enum Kind {
     /// The writer's message: plain text.
     User {
-        text: String,
+        text: Arc<str>,
     },
     /// Assistant text: rendered as Markdown. `streaming` while it grows.
     Text {
-        text: String,
+        text: Arc<str>,
         streaming: bool,
     },
     /// Collapsed "Reasoning". `hidden`: the provider redacted it.
     Reasoning {
-        text: String,
+        text: Arc<str>,
         hidden: bool,
         streaming: bool,
     },
@@ -282,83 +301,140 @@ pub struct Context<'a> {
 }
 
 /// The rows to show: the thread's messages, then the streaming reply, then
-/// the run's state line.
+/// the run's state line. Builds everything afresh; a view that repaints
+/// every frame keeps a [`RowCache`] instead.
 pub fn rows(thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
-    let results: HashMap<&str, (&str, bool)> = thread
-        .messages
-        .iter()
-        .flat_map(|m| m.blocks.iter())
-        .filter_map(|b| match b {
-            Block::ToolResult(r) => Some((r.id.as_str(), (r.content.as_str(), r.is_error))),
-            _ => None,
-        })
-        .collect();
-    let mut out = Vec::new();
-    for (mi, m) in thread.messages.iter().enumerate() {
-        if m.role == Role::User {
-            let text: String = m
-                .blocks
-                .iter()
-                .filter_map(|b| match b {
-                    Block::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if !text.trim().is_empty() {
-                out.push(Row { key: Key::User(mi), kind: Kind::User { text } });
-            }
+    RowCache::default().rows(thread, stream, cx)
+}
+
+/// [`rows`], remembering the rows of finished messages (every tool call
+/// answered), so a repaint copies their text only once. Cached rows share
+/// their text ([`Arc<str>`]), so handing them out again is cheap.
+///
+/// An entry is used only while its message is unchanged (compared in full,
+/// which allocates nothing), so a thread that is replaced, reloaded or has
+/// its last message withdrawn is still shown right. One cache per open
+/// thread view.
+#[derive(Debug, Default)]
+pub struct RowCache {
+    done: Vec<Option<(Message, Vec<Row>)>>,
+    /// The review name the cached tool labels were made with.
+    review: Option<String>,
+}
+
+impl RowCache {
+    pub fn rows(&mut self, thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
+        if self.review.as_deref() != cx.review {
+            self.done.clear();
+            self.review = cx.review.map(str::to_string);
         }
-        let mut keys = Keys::new(mi);
-        for (bi, b) in m.blocks.iter().enumerate() {
-            match (m.role, b) {
-                (Role::Assistant, Block::Text { text }) => {
-                    // Counted even when blank: it streamed as a part.
-                    let key = keys.block();
-                    if !text.trim().is_empty() {
-                        out.push(Row { key, kind: Kind::Text { text: text.clone(), streaming: false } });
-                    }
-                }
-                (Role::Assistant, Block::Thinking { text, .. }) => {
-                    out.push(Row {
-                        key: keys.block(),
-                        kind: Kind::Reasoning { text: text.clone(), hidden: false, streaming: false },
-                    });
-                }
-                (Role::Assistant, Block::Native { value, .. })
-                    if value.get("type").and_then(Value::as_str) == Some("redacted_thinking") =>
-                {
-                    out.push(Row {
-                        key: Key::Redacted { message: mi, block: bi },
-                        kind: Kind::Reasoning { text: String::new(), hidden: true, streaming: false },
-                    });
-                }
-                (Role::Assistant, Block::ToolCall(c)) => {
-                    let row = match results.get(c.id.as_str()) {
-                        Some(&(content, is_error)) => finished(&c.name, &c.input, &c.id, content, is_error, cx),
-                        None if cx.active && !stream.stopped => running(&c.name, &c.input, &c.id),
-                        None => not_run(&c.name, &c.id),
-                    };
-                    out.push(Row { key: keys.tool(&c.id), kind: Kind::Tool(row) });
-                }
-                (_, Block::Notice { text }) => out.push(Row {
-                    key: Key::Notice { message: mi, block: bi },
-                    kind: Kind::Notice { text: text.clone() },
-                }),
-                _ => {}
+        self.done.resize_with(thread.messages.len(), || None);
+        let results: HashMap<&str, (&str, bool)> = thread
+            .messages
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| match b {
+                Block::ToolResult(r) => Some((r.id.as_str(), (r.content.as_str(), r.is_error))),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::new();
+        for (mi, m) in thread.messages.iter().enumerate() {
+            if let Some((cached, rows)) = &self.done[mi]
+                && cached == m
+            {
+                out.extend(rows.iter().cloned());
+                continue;
             }
+            let rows = message_rows(mi, m, &results, stream, cx);
+            let finished = m.blocks.iter().all(|b| match b {
+                Block::ToolCall(c) => results.contains_key(c.id.as_str()),
+                _ => true,
+            });
+            out.extend(rows.iter().cloned());
+            self.done[mi] = finished.then(|| (m.clone(), rows));
+        }
+        stream_rows(thread.messages.len(), stream, &mut out);
+        out
+    }
+}
+
+/// The rows of message `mi`.
+fn message_rows(
+    mi: usize,
+    m: &Message,
+    results: &HashMap<&str, (&str, bool)>,
+    stream: &Stream,
+    cx: Context,
+) -> Vec<Row> {
+    let mut out = Vec::new();
+    if m.role == Role::User {
+        let text: String = m
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !text.trim().is_empty() {
+            out.push(Row { key: Key::User(mi), kind: Kind::User { text: text.into() } });
         }
     }
-    let mut keys = Keys::new(thread.messages.len());
+    let mut keys = Keys::new(mi);
+    for (bi, b) in m.blocks.iter().enumerate() {
+        match (m.role, b) {
+            (Role::Assistant, Block::Text { text }) => {
+                // Counted even when blank: it streamed as a part.
+                let key = keys.block();
+                if !text.trim().is_empty() {
+                    out.push(Row { key, kind: Kind::Text { text: text.as_str().into(), streaming: false } });
+                }
+            }
+            (Role::Assistant, Block::Thinking { text, .. }) => {
+                out.push(Row {
+                    key: keys.block(),
+                    kind: Kind::Reasoning { text: text.as_str().into(), hidden: false, streaming: false },
+                });
+            }
+            (Role::Assistant, Block::Native { value, .. })
+                if value.get("type").and_then(Value::as_str) == Some("redacted_thinking") =>
+            {
+                out.push(Row {
+                    key: Key::Redacted { message: mi, block: bi },
+                    kind: Kind::Reasoning { text: "".into(), hidden: true, streaming: false },
+                });
+            }
+            (Role::Assistant, Block::ToolCall(c)) => {
+                let row = match results.get(c.id.as_str()) {
+                    Some(&(content, is_error)) => finished(&c.name, &c.input, &c.id, content, is_error, cx),
+                    None if cx.active && !stream.stopped => running(&c.name, &c.input, &c.id),
+                    None => not_run(&c.name, &c.id),
+                };
+                out.push(Row { key: keys.tool(&c.id), kind: Kind::Tool(row) });
+            }
+            (_, Block::Notice { text }) => {
+                out.push(Row { key: Key::Notice { message: mi, block: bi }, kind: Kind::Notice { text: text.clone() } })
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The streaming reply (it will be message `message`) and the state lines.
+fn stream_rows(message: usize, stream: &Stream, out: &mut Vec<Row>) {
+    let mut keys = Keys::new(message);
     for p in &stream.parts {
         match p {
             Part::Text { text, .. } => {
-                out.push(Row { key: keys.block(), kind: Kind::Text { text: text.clone(), streaming: true } });
+                out.push(Row { key: keys.block(), kind: Kind::Text { text: text.as_str().into(), streaming: true } });
             }
             Part::Thinking { text, .. } => {
                 out.push(Row {
                     key: keys.block(),
-                    kind: Kind::Reasoning { text: text.clone(), hidden: false, streaming: true },
+                    kind: Kind::Reasoning { text: text.as_str().into(), hidden: false, streaming: true },
                 });
             }
             Part::Tool { id, name, bytes } => {
@@ -371,7 +447,7 @@ pub fn rows(thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
                         name: name.clone(),
                         state: ToolState::Streaming,
                         label,
-                        args: String::new(),
+                        args: "".into(),
                         result: None,
                     }
                 };
@@ -388,7 +464,6 @@ pub fn rows(thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
     if stream.stopped {
         out.push(Row { key: Key::Tail("stopping"), kind: Kind::Notice { text: "Stopping…".into() } });
     }
-    out
 }
 
 /// Hands out the keys of one message's rows, the same way for a streaming
@@ -431,7 +506,7 @@ fn finished(name: &str, input: &Value, id: &str, content: &str, is_error: bool, 
         name: name.into(),
         state,
         label,
-        args: args_text(input),
+        args: args_text(input).into(),
         result: Some(Preview::new(content, RESULT_LINES)),
     }
 }
@@ -442,7 +517,7 @@ fn running(name: &str, input: &Value, id: &str) -> ToolRow {
         name: name.into(),
         state: ToolState::Running,
         label: labels::running(name, input, None),
-        args: args_text(input),
+        args: args_text(input).into(),
         result: None,
     }
 }
@@ -453,7 +528,7 @@ fn not_run(name: &str, id: &str) -> ToolRow {
         name: name.into(),
         state: ToolState::NotRun,
         label: labels::NOT_RUN.into(),
-        args: String::new(),
+        args: "".into(),
         result: None,
     }
 }
@@ -661,7 +736,7 @@ mod tests {
         );
         let r = build(&t, &Stream::new(), false);
         assert_eq!(r.len(), 2);
-        assert_eq!(r[1].kind, Kind::Reasoning { text: String::new(), hidden: true, streaming: false });
+        assert_eq!(r[1].kind, Kind::Reasoning { text: "".into(), hidden: true, streaming: false });
         assert_eq!(Row::reasoning_title(true), "Reasoning (hidden by the provider)");
         assert_eq!(Row::reasoning_title(false), "Reasoning");
     }
@@ -699,7 +774,7 @@ mod tests {
         let Kind::Tool(row) = &r[1].kind else { panic!() };
         assert_eq!(row.state, ToolState::Done);
         assert!(row.label.starts_with("Proposed"), "{}", row.label);
-        assert_eq!(row.result.as_ref().unwrap().shown, "ok");
+        assert_eq!(row.result.as_ref().unwrap().shown(), "ok");
         // The Tool message adds no row of its own.
         assert_eq!(r.len(), 2);
     }
@@ -739,7 +814,7 @@ mod tests {
         let Kind::Tool(row) = &r[1].kind else { panic!() };
         assert_eq!(row.state, ToolState::Failed);
         assert_eq!(row.label, "read_scene failed: no such scene");
-        assert_eq!(row.result.as_ref().unwrap().full, "no such scene\nmore");
+        assert_eq!(row.result.as_ref().unwrap().full(), "no such scene\nmore");
     }
 
     #[test]
@@ -853,13 +928,42 @@ mod tests {
     fn long_results_are_cut_to_forty_lines() {
         let text: String = (1..=100).map(|n| format!("line {n}\n")).collect();
         let p = Preview::new(&text, RESULT_LINES);
-        assert_eq!(p.shown.lines().count(), 40);
+        assert_eq!(p.shown().lines().count(), 40);
+        assert!(p.shown().starts_with("line 1\n") && p.shown().ends_with("line 40"), "{}", p.shown());
         assert_eq!(p.hidden, 60);
-        assert_eq!(p.full, text);
+        assert_eq!(p.full(), text);
         let short = Preview::new("a\nb", RESULT_LINES);
-        assert_eq!((short.shown.as_str(), short.hidden), ("a\nb", 0));
+        assert_eq!((short.shown(), short.hidden), ("a\nb", 0));
         let exact: String = (1..=40).map(|n| format!("{n}\n")).collect();
         assert_eq!(Preview::new(&exact, 40).hidden, 0);
+        let crlf = Preview::new("a\r\nb\r\nc", 2);
+        assert_eq!((crlf.shown(), crlf.hidden), ("a\r\nb", 1));
+        assert_eq!((Preview::new("a\nb", 0).shown(), Preview::new("a\nb", 0).hidden), ("", 2));
+    }
+
+    #[test]
+    fn the_cache_reuses_finished_messages_and_drops_changed_ones() {
+        let mut cache = RowCache::default();
+        let cx = Context { active: true, review: Some("Dialogue pass") };
+        let mut t = thread_with_call("read_scene", None);
+        let first = cache.rows(&t, &Stream::new(), cx);
+        assert_eq!(first, rows(&t, &Stream::new(), cx));
+        // The unanswered call isn't cached; once answered, the row updates.
+        t.push_tool_results(vec![ToolResult { id: "c1".into(), content: "scene".into(), is_error: false }]).unwrap();
+        let answered = cache.rows(&t, &Stream::new(), cx);
+        assert_eq!(answered, rows(&t, &Stream::new(), cx));
+        let Kind::Tool(row) = &answered[1].kind else { panic!() };
+        assert_eq!(row.state, ToolState::Done);
+        // Cached now: the next frame shares the same text.
+        let again = cache.rows(&t, &Stream::new(), cx);
+        let (Kind::Tool(a), Kind::Tool(b)) = (&answered[1].kind, &again[1].kind) else { panic!() };
+        assert!(Arc::ptr_eq(&a.args, &b.args));
+        // A different thread in the same view, and another review name, are rebuilt.
+        let mut other = Thread::default();
+        assert!(other.push_user("other"));
+        assert_eq!(cache.rows(&other, &Stream::new(), cx), rows(&other, &Stream::new(), cx));
+        let cx2 = Context { review: None, ..cx };
+        assert_eq!(cache.rows(&t, &Stream::new(), cx2), rows(&t, &Stream::new(), cx2));
     }
 
     #[test]
