@@ -226,13 +226,69 @@ fn approx(tokens: usize) -> String {
     if tokens >= 1000 { format!("≈{}k tokens", (tokens + 500) / 1000) } else { format!("≈{tokens} tokens") }
 }
 
-pub(crate) fn read_script(ctx: &Ctx) -> String {
-    let (body, scenes) = script_body(ctx.doc, ctx.is_caps);
-    let tokens = body.chars().count().div_ceil(4);
-    format!(
-        "{}: {scenes} scenes, {} paragraphs, {}\n\n{body}",
-        ctx.script_name,
-        ctx.doc.paragraphs().len(),
-        approx(tokens)
-    )
+/// Default `read_script` budget in tokens (≈ four characters each): under the
+/// ~25k-token cap some MCP clients (Claude Code) put on a tool result.
+pub const READ_BUDGET: usize = 20_000;
+/// Smallest `max_tokens` taken (smaller asks are raised to this).
+pub const MIN_READ_BUDGET: usize = 1_000;
+
+/// The script, or the part of it from scene `from_scene` (1-based; default 1,
+/// which includes any lines before the first heading) that fits `max_tokens`
+/// (default [`READ_BUDGET`]); always at least one scene. When the whole script
+/// fits, the header is the summary line alone; otherwise it says which scenes
+/// this part covers and how to get the next.
+pub(crate) fn read_script(ctx: &Ctx, a: &Args) -> Result<String, ToolError> {
+    let doc = ctx.doc;
+    let cx = annotate(doc.script());
+    let scenes = Scenes::of(&cx);
+    let count = scenes.count();
+    let from = match a.opt_int("from_scene")? {
+        None => 1,
+        Some(n) if n >= 1 && (n as usize) <= count.max(1) => n as usize,
+        Some(n) => return Err(ToolError::Invalid(format!("no scene {n} (1 to {count})"))),
+    };
+    let budget = match a.opt_int("max_tokens")? {
+        None => READ_BUDGET,
+        Some(n) => usize::try_from(n).unwrap_or(0).max(MIN_READ_BUDGET),
+    };
+    let tokens_of = |s: &str| s.chars().count().div_ceil(4);
+    // Position in `ranges` of the first range to show: from scene 1 that is
+    // the preamble too.
+    let start = if from == 1 { 0 } else { from - 1 + usize::from(scenes.preamble) };
+    let mut parts: Vec<String> = vec![];
+    let mut used = 0;
+    let mut end = start;
+    while end < scenes.ranges.len() {
+        let part = render(doc, &scenes, end, ctx.is_caps);
+        let cost = tokens_of(&part) + usize::from(!parts.is_empty());
+        // At least one numbered scene, so the next part starts past this one.
+        let has_scene = end > start && !(scenes.preamble && end == 1);
+        if has_scene && used + cost > budget {
+            break;
+        }
+        used += cost;
+        parts.push(part);
+        end += 1;
+    }
+    let body = parts.join("\n\n");
+    let summary = |tokens: usize| {
+        format!("{}: {count} scenes, {} paragraphs, {}", ctx.script_name, doc.paragraphs().len(), approx(tokens))
+    };
+    if start == 0 && end == scenes.ranges.len() {
+        return Ok(format!("{}\n\n{body}", summary(tokens_of(&body))));
+    }
+    let total = script_size(doc, ctx.is_caps).1;
+    // Scene numbers shown: the last range's number (the preamble alone has none).
+    let last = scenes.number_of(end - 1).expect("a part ends with a numbered scene");
+    let covers = if from == last { format!("scene {from}") } else { format!("scenes {from}–{last}") };
+    let next = if end < scenes.ranges.len() {
+        format!("More follows: call read_script with from_scene {}.", last + 1)
+    } else {
+        "This part ends the script.".to_string()
+    };
+    Ok(format!(
+        "{} in all. This part: {covers} of {count} ({}). {next}\n\n{body}",
+        summary(total),
+        approx(tokens_of(&body))
+    ))
 }

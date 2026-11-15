@@ -15,6 +15,7 @@ name = "scriptorium"
 path = "src/main.rs"
 
 [dependencies]
+fs4.workspace = true
 scriptorium-core.workspace = true
 scriptorium-fdx.workspace = true
 scriptorium-review.workspace = true

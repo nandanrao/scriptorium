@@ -51,10 +51,44 @@ jobs:
           ditto -c -k --keepParent target/bundle/Scriptorium.app "$zip"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
 
+      - name: Build plugin binaries
+        env:
+          UNIVERSAL: ${{ inputs.universal && '1' || '0' }}
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: |
+          targets=(aarch64-apple-darwin)
+          [[ "$UNIVERSAL" == 1 ]] && targets+=(x86_64-apple-darwin)
+          rm -rf target/plugin-bin && mkdir -p target/plugin-bin
+          for t in "${targets[@]}"; do
+            cargo build --release --locked --target "$t" -p scriptorium-cli -p scriptorium-mcp
+          done
+          for bin in scriptorium scriptorium-mcp; do
+            inputs=()
+            for t in "${targets[@]}"; do inputs+=("target/$t/release/$bin"); done
+            lipo -create "${inputs[@]}" -output "target/plugin-bin/$bin"
+          done
+
+      - name: Zip plugin
+        id: plugin
+        run: |
+          version=$(cargo pkgid -p scriptorium-app | sed 's/.*@//')
+          plugin/package.sh target/plugin-pkg target/plugin-bin
+          codesign --force -s - target/plugin-pkg/scriptorium-plugin/bin/scriptorium
+          codesign --force -s - target/plugin-pkg/scriptorium-plugin/bin/scriptorium-mcp
+          zip="Scriptorium-plugin-$version-mac.zip"
+          ditto -c -k --keepParent target/plugin-pkg/scriptorium-plugin "$zip"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.zip.outputs.zip }}
           path: ${{ steps.zip.outputs.zip }}
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.plugin.outputs.zip }}
+          path: ${{ steps.plugin.outputs.zip }}
           if-no-files-found: error
 
       - name: GitHub Release
@@ -62,6 +96,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "${{ steps.zip.outputs.zip }}" \
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.zip.outputs.zip }}" "${{ steps.plugin.outputs.zip }}" \
             --title "Scriptorium $GITHUB_REF_NAME" \
-            --notes "Unsigned (ad-hoc) macOS build, macOS 13+. First launch: right-click Scriptorium.app > Open."
+            --notes "Unsigned (ad-hoc) macOS build, macOS 13+. First launch: see docs/testing-on-mac.md (it covers the xattr quarantine step)."

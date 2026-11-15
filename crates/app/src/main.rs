@@ -2,6 +2,7 @@
 //!
 //! Usage: `scriptorium-app [SCRIPT.fdx [REVIEW.txt ...]]`. See docs/PLAN.md.
 
+mod disk;
 mod editor;
 mod elements;
 mod layout;

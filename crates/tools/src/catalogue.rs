@@ -4,6 +4,8 @@
 pub use scriptorium_agent::ToolSpec;
 use serde_json::{Value, json};
 
+use crate::read::{MIN_READ_BUDGET, READ_BUDGET};
+
 /// Default and largest page for `list_paragraphs`: a feature film has a few
 /// thousand paragraphs, far more than is useful in one result.
 pub const PAGE: u64 = 200;
@@ -57,9 +59,15 @@ pub fn catalogue() -> Vec<ToolSpec> {
         ),
         spec(
             "read_script",
-            "The whole script as it reads now, every scene laid out as read_scene does. Long: prefer read_scene \
-             unless you need all of it.",
-            json!({}),
+            &format!(
+                "The script as it reads now, every scene laid out as read_scene does, in parts of at most \
+                 max_tokens (default {READ_BUDGET}): the first line says which scenes a part covers and the \
+                 from_scene to read the next one. Long: prefer read_scene unless you need all of it."
+            ),
+            json!({
+                "from_scene": { "type": "integer", "minimum": 1, "description": "Start at this scene (1 is the first, and includes any lines before it). Default 1." },
+                "max_tokens": { "type": "integer", "minimum": MIN_READ_BUDGET, "description": format!("Most tokens (about four characters each) in this part; always at least one whole scene. Default {READ_BUDGET}.") },
+            }),
             &[],
         ),
         spec(

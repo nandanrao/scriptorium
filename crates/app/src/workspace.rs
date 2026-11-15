@@ -52,7 +52,7 @@ impl Workspace {
         // Closing the window saves, like Quit.
         let ws = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
-            ws.update(cx, |w, cx| w.with_view(cx, |v, cx| v.save_now(cx))).ok();
+            ws.update(cx, |w, cx| w.with_view(cx, |v, cx| _ = v.save_now(cx))).ok();
             true
         });
         match script {
@@ -138,15 +138,13 @@ impl Workspace {
         }
         // Save first: reopening the same script must read what's on screen
         // (a pending autosave or a rewrite in progress), not an older session.
-        if let Some(old) = &self.view {
-            old.update(cx, |v, cx| v.save_now(cx));
-        }
+        let set_aside = self.view.clone().and_then(|old| old.update(cx, |v, cx| v.save_now(cx)));
         let opened = match Opened::load(&path, &reviews) {
             Ok(o) => o,
             Err(e) => {
                 // The current script stays open.
                 crate::log::warn(&format!("opening {}: {e}", path.display()));
-                self.set_notice(e, cx);
+                self.set_notice(set_aside.map_or(e.clone(), |a| format!("{e}  {a}")), cx);
                 return;
             }
         };
@@ -158,6 +156,9 @@ impl Workspace {
         self._observe = Some(cx.observe(&view, |_, _, cx| cx.notify()));
         self.view = Some(view);
         self.notice = "".into();
+        if let Some(a) = set_aside {
+            self.set_notice(a, cx);
+        }
         cx.notify();
     }
 
@@ -205,7 +206,7 @@ impl Workspace {
     }
 
     fn on_quit(&mut self, _: &SaveAndQuit, _: &mut Window, cx: &mut Context<Self>) {
-        self.with_view(cx, |v, cx| v.save_now(cx));
+        self.with_view(cx, |v, cx| _ = v.save_now(cx));
         cx.quit();
     }
 

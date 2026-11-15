@@ -1,37 +1,42 @@
 ---
 name: script-review
-description: Reviewing or revising a screenplay (Final Draft .fdx) with Scriptorium — proposing line changes for the writer to decide, a dialogue or grammar pass, checking a review's progress, or applying decisions. Use whenever the user asks for notes, fixes or a pass on their script.
+description: Reviewing or revising a screenplay (Final Draft .fdx) with Scriptorium — proposing line changes for the writer to decide, a dialogue or grammar pass, checking a review's progress, or applying decisions. Use whenever the user asks for fixes, changes or a pass on their script.
 ---
 
 # Reviewing a screenplay with Scriptorium
 
-The writer decides; you propose. Scriptorium shows each suggestion inside the
-script, and the writer accepts one of your options, keeps their line, or
-rewrites it. Work through the `scriptorium` tools; never edit the .fdx file
-yourself (Scriptorium preserves Final Draft's formatting byte for byte).
+The writer decides; you propose. Work through the `scriptorium` tools and never
+edit the .fdx file yourself (Scriptorium keeps Final Draft's formatting byte
+for byte).
 
-## A pass on the script
+Before starting, make sure you have the script's path; if you don't, ask the
+writer for it, and pass it as an absolute path. If the writer asks for
+feedback, notes or opinions rather than changes, answer in chat and don't
+propose anything.
 
-1. `script_info` for the shape of the script, then `list_paragraphs` filtered
-   by scene, speaker, kind or text. Don't page through the whole script unless
-   the pass needs it.
-2. For each line worth changing, `suggest_change` with the paragraph id, one to
-   three replacement options (whole line, best first) and a short `why`. Put a
-   pass in one review file named for it, e.g. `dialogue-pass.review.txt`, next
-   to the script.
-3. `attach_reviews` with that file once, so it appears in the app.
-4. Tell the writer how many suggestions you made and that they're waiting in
-   Scriptorium. Don't decide them yourself.
+## Running a pass
 
-Keep suggestions to one paragraph each, and keep the writer's voice: change
-what the pass is about and nothing else. Character names (Character elements)
-are shown in capitals; a change that only alters letter case there is refused
-as invisible.
+1. Get the shape of the script, then read what the pass needs: one scene at a
+   time for focused work, filtered paragraph lists to find lines across the
+   script, the whole script (it comes in parts) only when the pass covers all
+   of it. Reads always show the script as it is now, including the writer's
+   decisions, so read again rather than trusting what you read earlier.
+2. Send the pass in one batch, into one review file named for it, e.g.
+   `dialogue-pass.review.txt`. Always give `review_file`; it lives next to the
+   script and is created and attached for you. Check the result for lines that
+   failed, and fix or drop them.
+3. Tell the writer briefly what you proposed, without repeating the proposals,
+   and that they can open the script in the Scriptorium app to decide; it
+   picks up your changes as they happen.
+
+Change what the pass is about and nothing else; keep the writer's voice. One
+suggestion per line per review.
 
 ## When the writer asks you to decide or edit
 
-`list_suggestions` (with `pending_only`) shows what's left, numbered from 1.
-`decide_suggestion` accepts an option, keeps the line, or rewrites it.
-`edit_paragraph` changes a line directly. Everything is undoable with `undo`,
-and the app sees it immediately. `write_script` writes the revised script as a
-new .fdx; the original is never touched.
+Only then decide suggestions or edit lines yourself; refer to a suggestion by
+its stable `"e<entry>"` if others may have been added since you listed them.
+Everything can be undone, and the app sees it immediately. `write_script`
+writes the revised script as a new `<name> (scriptorium).fdx` next to the
+original, replacing an earlier one of that name; the original is never
+touched.

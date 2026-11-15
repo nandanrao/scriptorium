@@ -23,11 +23,22 @@ Living notes on direction. Update this when a decision is made or reversed.
   gpui-kit (2026-11-14); the built-in-agent plan records the gpui-kit decision.
   Decided by the spike below. A web build may later come from `gpui_web`.
 
+- **v0.2.0** (2026-11-15): a working version used through the Claude plugin
+  (Claude Code / Cowork suggest via MCP; the writer decides in the app, which
+  picks up outside changes live; a session lock keeps writers from
+  overwriting each other). Mac release zips: the app and the plugin.
+- **v0.3.0 scope** (user, 2026-11-15): full script editing that saves to the
+  .fdx (add, remove, split, join lines, change a line's type), then block
+  suggestions (replace N lines with M; cuts and additions) applied through the
+  same edit steps as typing. Plan: [plans/block-suggestions.md](plans/block-suggestions.md)
+  (under review). No revision marks, no locked scene numbers, `[cut]` marks a
+  removal; the script view keeps its dots, the card shows the change.
 - **Built-in agent** (2026-11-14), plan in
   [plans/built-in-agent.md](plans/built-in-agent.md): step 0 and the agent
-  core are built; next the MCP server and app on the shared code, then the
-  `providers` crate and `scriptorium chat`. **The in-app chat panel is paused
-  for a future week** (design first, on gpui-kit, when resumed).
+  core are built; next the MCP server and app on the shared code, for a
+  working version used through the plugins. **Paused for a future week:** the
+  `providers` crate, `scriptorium chat` and the in-app chat panel (design
+  first, on gpui-kit, when resumed).
 
 - **`gpui-pre 0.3.12` lacks some newer Zed GPUI fixes** (checked 2026-11-14,
   no regressions in our UI): combining-mark placement in the text system
@@ -296,8 +307,11 @@ Open, shown as "to decide" in the mockup:
   `progress`, `apply`, `review`.
 
 Known gaps:
-- The app and the CLI both write the session file; if both run at once, the
-  last writer wins. The app should notice the file changing and reload.
+- (Addressed in P5) The app and the CLI both write the session file. The app
+  now checks the session and review files every second and before each save
+  (`crates/app/src/disk.rs`); if another program wrote them, it reloads and
+  replays its own unsaved events on top (dropped, with a notice, if they
+  clash). Two CLI runs at once still race: last writer wins.
 - If a review file changes (edited, or progress written into it), its id
   changes and its decisions no longer show as decisions (the text changes stay).
 - Paragraph ids are positions in the `.fdx`, which is fine while paragraphs

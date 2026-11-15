@@ -1,8 +1,23 @@
-//! The tools: each one's schema, and how it maps onto a `scriptorium` command.
+//! The tools: the shared catalogue from `scriptorium_tools` (run through
+//! [`scriptorium_cli::tool`]), plus the tools only MCP has, which call the
+//! CLI's typed commands in-process.
+//!
+//! Paths: `script` is taken as given (relative to the server's folder, which
+//! in Cowork and Claude Desktop isn't the script's, so the schema asks for an
+//! absolute path). Every other path (`review_file`, `review`, attach/detach
+//! `files`, `output`) is relative to the script's folder: that is where the
+//! model expects them, whatever folder the server was started in.
+//!
+//! A `review_file` in a folder that doesn't exist yet: the folder is created
+//! when it is inside the script's folder (e.g. `reviews/dialogue.review.txt`);
+//! anywhere else it is an error, so a typo never scatters folders around the
+//! disk.
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Component, Path, PathBuf};
 
+use scriptorium_cli::commands::{self, Choice, SuggestionRef};
+use scriptorium_cli::opened::script_dir;
+use scriptorium_tools::{HostField, ToolSpec};
 use serde_json::{Map, Value, json};
 
 pub enum Failure {
@@ -17,98 +32,62 @@ impl From<String> for Failure {
     }
 }
 
-const SCRIPT: &str = "Path to the screenplay (.fdx). Relative paths are resolved from the folder the server runs in.";
-const REVIEW: &str =
-    "Which attached review to use, by name or file. Leave out when only one review is attached to the script.";
+const SCRIPT: &str = "Absolute path to the screenplay (.fdx). A relative path is taken from the folder the server \
+                      was started in, which usually isn't the script's.";
+const REVIEW: &str = "Which attached review to use, by name or file (a path relative to the script's folder). Leave \
+                      out when only one review is attached to the script.";
+const REVIEW_FILE: &str = "The review file to add to, e.g. \"dialogue-pass.review.txt\": a path relative to the \
+                           script's folder (or absolute), created and attached if missing. Always give one, named \
+                           for the pass, and keep it for the whole pass.";
+const FILES: &str = "Review files: paths relative to the script's folder, or absolute.";
 
-/// Default and largest page for `list_paragraphs`: a feature film has a few
-/// thousand paragraphs, far more than is useful in one tool result.
-const PAGE: u64 = 200;
-const MAX_PAGE: u64 = 1000;
+/// The shared tools that only read.
+const READ_ONLY: &[&str] =
+    &["script_info", "list_paragraphs", "read_scene", "read_script", "list_reviews", "list_suggestions"];
+
+/// The shared catalogue with MCP's fields: `script` on every tool,
+/// `review_file` on the suggesting tools, `before` on `suggest_change`.
+fn shared() -> Vec<ToolSpec> {
+    let mut specs = scriptorium_tools::catalogue();
+    for spec in &mut specs {
+        if spec.name == "suggest_change" {
+            scriptorium_tools::add_before(spec);
+        }
+        scriptorium_tools::add_host_fields(spec, &[HostField::Script, HostField::ReviewFile]);
+        spec.schema["properties"]["script"]["description"] = json!(SCRIPT);
+        if spec.schema["properties"].get("review_file").is_some() {
+            spec.schema["properties"]["review_file"]["description"] = json!(REVIEW_FILE);
+        }
+    }
+    specs
+}
 
 pub fn list() -> Vec<Value> {
     let script = json!({ "type": "string", "description": SCRIPT });
     let review = json!({ "type": "string", "description": REVIEW });
     let read_only = json!({ "readOnlyHint": true });
     let undoable = json!({ "readOnlyHint": false, "destructiveHint": false });
-    vec![
-        tool(
-            "script_info",
-            "Summary of a screenplay: paragraph, scene and word counts, element types, and the characters with the most dialogue.",
-            json!({ "script": script }),
-            &["script"],
-            &read_only,
-        ),
-        tool(
-            "list_paragraphs",
-            "The script's paragraphs with their ids, element type (Scene Heading, Action, Character, Dialogue, ...), \
-             scene and speaker. Filter it; results are paged. Ids are what edit_paragraph and suggest_change take.",
-            json!({
-                "script": script,
-                "contains": { "type": "string", "description": "Only paragraphs whose text contains this (ignoring case)." },
-                "scene": { "type": "string", "description": "Only paragraphs in scenes whose heading contains this (ignoring case)." },
-                "speaker": { "type": "string", "description": "Only paragraphs spoken by this character (ignoring case)." },
-                "kind": { "type": "string", "description": "Only this element type, e.g. \"Dialogue\"." },
-                "offset": { "type": "integer", "minimum": 0, "description": "Skip this many matches (for paging)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": MAX_PAGE, "description": format!("At most this many (default {PAGE}).") },
-            }),
-            &["script"],
-            &read_only,
-        ),
-        tool(
-            "list_reviews",
-            "The review files attached to the script, with how many suggestions are decided.",
-            json!({ "script": script }),
-            &["script"],
-            &read_only,
-        ),
-        tool(
-            "review_summary",
-            "For each attached review: suggestion counts, decisions so far, and suggestions whose line wasn't found in the script.",
-            json!({ "script": script }),
-            &["script"],
-            &read_only,
-        ),
+    let mut tools: Vec<Value> = shared()
+        .into_iter()
+        .map(|s| {
+            let annotations = if READ_ONLY.contains(&s.name.as_str()) { &read_only } else { &undoable };
+            json!({ "name": s.name, "description": s.description, "inputSchema": s.schema, "annotations": annotations })
+        })
+        .collect();
+    tools.extend([
         tool(
             "attach_reviews",
-            "Attach review files (SCRIPT REVIEW v1 text files) to the script so they show up in the app and in these tools.",
-            json!({ "script": script, "files": { "type": "array", "items": { "type": "string" }, "minItems": 1 } }),
+            "Attach review files (SCRIPT REVIEW v1 text files) to the script so they show up in the app and in these \
+             tools. suggest_change and suggest_changes attach their review_file themselves.",
+            json!({ "script": script, "files": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": FILES } }),
             &["script", "files"],
             &undoable,
         ),
         tool(
             "detach_reviews",
             "Detach review files from the script. Decisions already made stay in the script's text.",
-            json!({ "script": script, "files": { "type": "array", "items": { "type": "string" }, "minItems": 1 } }),
+            json!({ "script": script, "files": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": FILES } }),
             &["script", "files"],
-            &undoable,
-        ),
-        tool(
-            "list_suggestions",
-            "A review's suggestions, numbered from 1 in script order, as JSON: status, the paragraph's current text, \
-             the proposed options, and why. `outdated` means the line changed after the suggestion was written.",
-            json!({
-                "script": script,
-                "review": review,
-                "pending_only": { "type": "boolean", "description": "Only suggestions nobody has decided yet." },
-            }),
-            &["script"],
-            &read_only,
-        ),
-        tool(
-            "suggest_change",
-            "Propose a change to one line by adding a suggestion to a review file (created if missing). The person \
-             decides it in the app. Checks the line exists and that the change would be visible. Prefer this over \
-             edit_paragraph. Attach a new review file with attach_reviews so it shows up in the app.",
-            json!({
-                "script": script,
-                "review_file": { "type": "string", "description": "The review file to add to, e.g. \"dialogue-pass.review.txt\"." },
-                "paragraph_id": { "type": "integer", "description": "The line to change (from list_paragraphs). Give this or `before`." },
-                "before": { "type": "string", "description": "The line's current text, to find it by. Give this or `paragraph_id`." },
-                "options": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "One or more replacement texts for the whole line." },
-                "why": { "type": "string", "description": "A short reason shown to the person." },
-            }),
-            &["script", "review_file", "options"],
             &undoable,
         ),
         tool(
@@ -118,7 +97,12 @@ pub fn list() -> Vec<Value> {
             json!({
                 "script": script,
                 "review": review,
-                "n": { "type": "integer", "minimum": 1, "description": "The suggestion's number from list_suggestions." },
+                "n": {
+                    "type": ["integer", "string"],
+                    "minimum": 1,
+                    "description": "The suggestion's number `n` from list_suggestions, or \"e<entry>\" with its stable \
+                                    `entry` (e.g. \"e3\"), which doesn't shift when suggestions are added.",
+                },
                 "decision": { "type": "string", "enum": ["accept", "keep", "rewrite", "undecide"] },
                 "option": { "type": "integer", "minimum": 1, "description": "With accept: which option (default 1)." },
                 "text": { "type": "string", "description": "With rewrite: the new text for the line." },
@@ -151,12 +135,13 @@ pub fn list() -> Vec<Value> {
              next to the original, replaced if it exists). The original is never overwritten.",
             json!({
                 "script": script,
-                "output": { "type": "string", "description": "Where to write, instead of the default." },
+                "output": { "type": "string", "description": "Where to write, instead of the default: a path relative to the script's folder, or absolute." },
             }),
             &["script"],
             &json!({ "readOnlyHint": false, "destructiveHint": true }),
         ),
-    ]
+    ]);
+    tools
 }
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str], annotations: &Value) -> Value {
@@ -169,133 +154,157 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str], ann
 }
 
 pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
-    let a = Args(args.as_object().cloned().unwrap_or_default());
-    let script = || a.str("script");
-    let review_flag = |cmd: &mut Vec<String>| {
-        if let Some(r) = a.opt_str("review") {
-            cmd.extend(["--review".into(), r]);
-        }
-    };
-    let cmd: Vec<String> = match name {
-        "script_info" => vec!["info".into(), script()?],
-        "list_paragraphs" => return list_paragraphs(&a),
-        "list_reviews" => vec!["reviews".into(), script()?],
-        "review_summary" => vec!["review".into(), script()?],
+    let mut a = Args(args.as_object().cloned().unwrap_or_default());
+    if let Some(script) = a.opt_str("script") {
+        a.0.insert("script".into(), Value::String(expand_home(&script)));
+    }
+    let mut notes = vec![];
+    // MCP-only tools first, through the CLI's typed commands.
+    let result = match name {
         "attach_reviews" | "detach_reviews" => {
-            let verb = if name == "attach_reviews" { "add" } else { "remove" };
+            let script = a.str("script")?;
             let files = a.strs("files")?;
             if files.is_empty() {
                 return Err("give at least one file".to_string().into());
             }
-            [vec!["reviews".into(), script()?, verb.into()], files].concat()
-        }
-        "list_suggestions" => {
-            let mut c = vec!["suggestions".into(), script()?, "--json".into()];
-            if a.bool("pending_only") {
-                c.push("--pending".into());
+            let files: Vec<String> = files.iter().map(|f| in_script_dir(&script, f)).collect::<Result<_, _>>()?;
+            let files: Vec<&str> = files.iter().map(String::as_str).collect();
+            if name == "attach_reviews" {
+                commands::add_reviews(&script, &files, &mut notes)
+            } else {
+                commands::remove_reviews(&script, &files)
             }
-            review_flag(&mut c);
-            c
-        }
-        "suggest_change" => {
-            let mut c = vec!["suggest".into(), a.str("review_file")?, script()?];
-            match (a.opt_int("paragraph_id"), a.opt_str("before")) {
-                (Some(id), None) => c.extend(["--para".into(), id.to_string()]),
-                (None, Some(b)) => c.extend(["--before".into(), b]),
-                _ => return Err("give exactly one of paragraph_id or before".to_string().into()),
-            }
-            let options = a.strs("options")?;
-            if options.is_empty() {
-                return Err("give at least one option".to_string().into());
-            }
-            for o in options {
-                c.extend(["--after".into(), o]);
-            }
-            if let Some(why) = a.opt_str("why") {
-                c.extend(["--why".into(), why]);
-            }
-            c
         }
         "decide_suggestion" => {
-            let mut c = vec!["decide".into(), script()?];
-            review_flag(&mut c);
-            c.push(a.int("n")?.to_string());
-            match a.str("decision")?.as_str() {
-                "accept" => {
-                    c.push("accept".into());
-                    if let Some(k) = a.opt_int("option") {
-                        c.push(k.to_string());
-                    }
+            let script = a.str("script")?;
+            // A review named by a file in the script's folder is that file;
+            // otherwise it's an attached review's name.
+            let review = match a.opt_str("review") {
+                Some(r) => {
+                    let at = in_script_dir(&script, &r)?;
+                    Some(if Path::new(&at).is_file() { at } else { r })
                 }
-                "rewrite" => c.extend(["rewrite".into(), a.str("text")?]),
-                d @ ("keep" | "undecide") => c.push(d.into()),
+                None => None,
+            };
+            let n = a.suggestion_ref("n")?;
+            let choice = match a.str("decision")?.as_str() {
+                "accept" => Choice::Accept(a.opt_positive("option")?),
+                "keep" => Choice::Keep,
+                "rewrite" => Choice::Rewrite(a.str("text")?),
+                "undecide" => Choice::Undecide,
                 d => return Err(format!("unknown decision {d:?}: accept, keep, rewrite or undecide").into()),
-            }
-            c
+            };
+            commands::decide(&script, review.as_deref(), n, choice, &mut notes)
         }
-        "edit_paragraph" => vec!["edit".into(), script()?, a.int("paragraph_id")?.to_string(), a.str("text")?],
-        "undo" | "redo" => vec![name.into(), script()?],
+        "edit_paragraph" => {
+            let id =
+                a.0.get("paragraph_id")
+                    .and_then(Value::as_u64)
+                    .ok_or("missing `paragraph_id` (a paragraph id)".to_string())?;
+            commands::edit(&a.str("script")?, id, &a.str("text")?, &[], &mut notes)
+        }
+        "undo" | "redo" => commands::undo_redo(&a.str("script")?, name == "redo", &[], &mut notes),
         "write_script" => {
-            let mut c = vec!["apply".into(), script()?];
-            if let Some(o) = a.opt_str("output") {
-                c.extend(["-o".into(), o]);
+            let script = a.str("script")?;
+            let output = a.opt_str("output").map(|o| in_script_dir(&script, &o)).transpose()?;
+            commands::apply(&script, &[], false, output.as_deref().map(Path::new), &mut notes)
+        }
+        _ if scriptorium_tools::catalogue().iter().any(|s| s.name == name) => {
+            let mut rest = a.0.clone();
+            rest.remove("script");
+            if let Some(f) = rest.get("review_file").and_then(Value::as_str) {
+                let at = review_file_at(&a.str("script")?, f)?;
+                rest.insert("review_file".into(), Value::String(at));
             }
-            c
+            return shared_tool(name, &a, Value::Object(rest));
         }
         _ => return Err(Failure::UnknownTool),
     };
-    run(&cmd)
+    finish(result, &notes)
 }
 
-fn list_paragraphs(a: &Args) -> Result<String, Failure> {
-    let out = run(&["dump".into(), a.str("script")?, "--json".into()])?;
-    let rows: Vec<Value> = serde_json::from_str(&out).map_err(|e| format!("unexpected output from dump: {e}"))?;
-    let lower = |k: &str| a.opt_str(k).map(|s| s.to_lowercase());
-    let (contains, scene, speaker, kind) = (lower("contains"), lower("scene"), lower("speaker"), lower("kind"));
-    let field = |row: &Value, k: &str| row.get(k).and_then(Value::as_str).unwrap_or("").to_lowercase();
-    let matches: Vec<&Value> = rows
-        .iter()
-        .filter(|r| contains.as_ref().is_none_or(|c| field(r, "text").contains(c.as_str())))
-        .filter(|r| scene.as_ref().is_none_or(|s| field(r, "scene").contains(s.as_str())))
-        .filter(|r| speaker.as_ref().is_none_or(|s| field(r, "speaker") == *s))
-        .filter(|r| kind.as_ref().is_none_or(|k| field(r, "kind") == *k))
-        .collect();
-    let offset = a.opt_int("offset").unwrap_or(0).max(0) as usize;
-    let limit = a.opt_int("limit").map_or(PAGE, |l| l.clamp(1, MAX_PAGE as i64) as u64) as usize;
-    let page: Vec<&Value> = matches.iter().skip(offset).take(limit).copied().collect();
-    let more = offset + page.len() < matches.len();
-    Ok(json!({ "total": matches.len(), "offset": offset, "more": more, "paragraphs": page }).to_string())
+/// A leading `~` or `~/` as `$HOME` (models write `~/Scripts/x.fdx`, and no
+/// shell is involved to expand it). Anything else, including `~name`, as given.
+fn expand_home(path: &str) -> String {
+    expand_home_with(path, std::env::var("HOME").ok().as_deref())
 }
 
-/// Runs `scriptorium <args>`; stdout on success, stdout and stderr on failure.
-fn run(args: &[String]) -> Result<String, Failure> {
-    let bin = cli_binary();
-    let out = Command::new(&bin)
-        .args(args.iter())
-        .output()
-        .map_err(|e| format!("can't run {}: {e}. Set SCRIPTORIUM_BIN to the scriptorium binary.", bin.display()))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).trim_end().to_string();
-    if out.status.success() {
-        // Notes on stderr (e.g. an attached review that can't be read) matter to the model too.
-        Ok(if stderr.is_empty() { stdout } else { format!("{stdout}\n\n{stderr}") })
+fn expand_home_with(path: &str, home: Option<&str>) -> String {
+    match (home, path.strip_prefix('~')) {
+        (Some(h), Some("")) if !h.is_empty() => h.to_string(),
+        (Some(h), Some(rest)) if !h.is_empty() && rest.starts_with('/') => format!("{}{rest}", h.trim_end_matches('/')),
+        _ => path.to_string(),
+    }
+}
+
+/// `path` (from a tool argument) as a path from the server's folder: as
+/// given when absolute, else joined to the script's folder.
+fn in_script_dir(script: &str, path: &str) -> Result<String, String> {
+    let path = &expand_home(path);
+    if Path::new(path).is_absolute() {
+        return Ok(path.to_string());
+    }
+    Ok(script_dir(script)?.join(path).to_string_lossy().into_owned())
+}
+
+/// A `review_file` resolved like [`in_script_dir`], creating its folder if
+/// it's missing and inside the script's folder (see the module docs).
+fn review_file_at(script: &str, file: &str) -> Result<String, String> {
+    let at = in_script_dir(script, file)?;
+    let parent = match Path::new(&at).parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => return Ok(at),
+    };
+    if parent.is_dir() {
+        return Ok(at);
+    }
+    let dir = script_dir(script)?;
+    if normalize(&parent).starts_with(&dir) {
+        std::fs::create_dir_all(&parent).map_err(|e| format!("can't create the folder {}: {e}", parent.display()))?;
+        Ok(at)
     } else {
-        Err(Failure::Tool([stdout, stderr].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n")))
+        Err(format!(
+            "the folder {} doesn't exist; put review_file in the script's folder (or a folder inside it), or in a \
+             folder that exists",
+            parent.display()
+        ))
     }
 }
 
-/// `$SCRIPTORIUM_BIN`, else `scriptorium` next to this server (how the plugin
-/// and the app ship them), else `scriptorium` on the PATH.
-fn cli_binary() -> PathBuf {
-    if let Some(p) = std::env::var_os("SCRIPTORIUM_BIN") {
-        return p.into();
+/// `p` with `.` and `..` taken out, without touching the disk (the folder
+/// doesn't exist yet, so it can't be canonicalized).
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
     }
-    let name = format!("scriptorium{}", std::env::consts::EXE_SUFFIX);
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|d| d.join(&name)))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| name.into())
+    out
+}
+
+/// Runs a shared tool on `a`'s script with `args` (without `script`, and with
+/// `review_file` already resolved against the script's folder).
+fn shared_tool(name: &str, a: &Args, args: Value) -> Result<String, Failure> {
+    let script = a.str("script")?;
+    let mut notes = vec![];
+    let result = scriptorium_cli::tool(&script, name, &args, None, &mut notes);
+    finish(result, &notes)
+}
+
+/// The tool result: the output, or the error, with any notes (e.g. an
+/// attached review that can't be read) after it; they matter to the model too.
+fn finish(result: Result<String, String>, notes: &[String]) -> Result<String, Failure> {
+    let notes = notes.iter().map(|n| format!("note: {n}")).collect::<Vec<_>>().join("\n");
+    let join = |text: String| {
+        let text = text.trim_end().to_string();
+        if notes.is_empty() { text } else { format!("{text}\n\n{notes}") }
+    };
+    result.map(join).map_err(|e| Failure::Tool(join(e)))
 }
 
 /// A tool call's arguments, with errors phrased for the model.
@@ -308,17 +317,86 @@ impl Args {
     fn str(&self, k: &str) -> Result<String, String> {
         self.opt_str(k).ok_or(format!("missing `{k}` (a string)"))
     }
-    fn opt_int(&self, k: &str) -> Option<i64> {
-        self.0.get(k).and_then(Value::as_i64)
+    /// A whole number from 1, if given.
+    fn opt_positive(&self, k: &str) -> Result<Option<usize>, String> {
+        match self.0.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .filter(|n| *n > 0)
+                .and_then(|n| usize::try_from(n).ok())
+                .map(Some)
+                .ok_or(format!("`{k}` must be a whole number from 1")),
+        }
     }
-    fn int(&self, k: &str) -> Result<i64, String> {
-        self.opt_int(k).ok_or(format!("missing `{k}` (a whole number)"))
-    }
-    fn bool(&self, k: &str) -> bool {
-        self.0.get(k).and_then(Value::as_bool).unwrap_or(false)
+    /// A suggestion number (from 1), or `e<entry>` for its stable place in
+    /// the file. Nothing else: not `-1`, `2.5`, `"3"` or `"x"`.
+    fn suggestion_ref(&self, k: &str) -> Result<SuggestionRef, String> {
+        let bad = || format!("`{k}` must be a suggestion number from 1, or \"e<entry>\" (e.g. \"e3\")");
+        match self.0.get(k) {
+            Some(Value::Number(n)) => match n.as_u64().filter(|n| *n > 0).and_then(|n| usize::try_from(n).ok()) {
+                Some(n) => Ok(SuggestionRef::Number(n)),
+                None => Err(bad()),
+            },
+            Some(Value::String(s)) => match SuggestionRef::parse(s) {
+                Some(r @ SuggestionRef::Entry(_)) => Ok(r),
+                _ => Err(bad()),
+            },
+            _ => Err(bad()),
+        }
     }
     fn strs(&self, k: &str) -> Result<Vec<String>, String> {
         let list = self.0.get(k).and_then(Value::as_array).ok_or(format!("missing `{k}` (a list of strings)"))?;
         list.iter().map(|v| v.as_str().map(str::to_string).ok_or(format!("`{k}` must be strings"))).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_leading_tilde_is_the_home_folder() {
+        assert_eq!(expand_home_with("~/Scripts/a.fdx", Some("/Users/w")), "/Users/w/Scripts/a.fdx");
+        assert_eq!(expand_home_with("~", Some("/Users/w/")), "/Users/w/");
+        assert_eq!(expand_home_with("~bob/a.fdx", Some("/Users/w")), "~bob/a.fdx");
+        assert_eq!(expand_home_with("a/~/b", Some("/Users/w")), "a/~/b");
+        assert_eq!(expand_home_with("~/a", None), "~/a");
+        assert_eq!(in_script_dir("/x/film.fdx", "~/r.review.txt").map(|p| p.starts_with('~')), Ok(false));
+    }
+
+    #[test]
+    fn names_are_unique_and_every_tool_takes_script() {
+        let tools = list();
+        let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for t in &tools {
+            let schema = &t["inputSchema"];
+            assert_eq!(schema["properties"]["script"]["description"], SCRIPT, "{}", t["name"]);
+            assert!(schema["required"].as_array().unwrap().contains(&json!("script")), "{}", t["name"]);
+        }
+        names.sort_unstable();
+        let n = names.len();
+        names.dedup();
+        assert_eq!(names.len(), n);
+    }
+
+    #[test]
+    fn instructions_name_only_real_tools() {
+        let specs: Vec<ToolSpec> = list()
+            .into_iter()
+            .map(|t| ToolSpec {
+                name: t["name"].as_str().unwrap().into(),
+                description: String::new(),
+                schema: Value::Null,
+            })
+            .collect();
+        // Snake-case words that aren't tools must be parameters some tool takes.
+        let unknown = scriptorium_tools::prompt::unknown_tools(crate::INSTRUCTIONS, &specs);
+        let params: Vec<String> = list()
+            .iter()
+            .flat_map(|t| t["inputSchema"]["properties"].as_object().unwrap().keys().cloned().collect::<Vec<_>>())
+            .collect();
+        let neither: Vec<&String> = unknown.iter().filter(|w| !params.contains(w)).collect();
+        assert!(neither.is_empty(), "{neither:?}");
     }
 }

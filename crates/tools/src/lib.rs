@@ -28,7 +28,7 @@ use serde_json::Value;
 pub use catalogue::{
     HostField, MAX_BATCH, MAX_OPTIONS, MAX_PAGE, PAGE, ToolSpec, add_before, add_host_fields, catalogue,
 };
-pub use read::{NOT_EDITABLE, script_size};
+pub use read::{MIN_READ_BUDGET, NOT_EDITABLE, READ_BUDGET, script_size};
 pub use reviews::{find_review, item_numbered, item_numbers};
 pub use suggest::apply;
 
@@ -158,7 +158,7 @@ pub fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<Outcome, ToolError> {
         "script_info" => Ok(Outcome::Text(read::script_info(ctx))),
         "list_paragraphs" => read::list_paragraphs(ctx, &a).map(Outcome::Text),
         "read_scene" => read::read_scene(ctx, &a).map(Outcome::Text),
-        "read_script" => Ok(Outcome::Text(read::read_script(ctx))),
+        "read_script" => read::read_script(ctx, &a).map(Outcome::Text),
         "list_reviews" => Ok(Outcome::Text(reviews::list_reviews(ctx, a.bool("summary")?))),
         "list_suggestions" => reviews::list_suggestions(ctx, &a).map(Outcome::Text),
         "suggest_change" => suggest::suggest_change(ctx, &a),

@@ -1,10 +1,11 @@
 //! `scriptorium-mcp`: Scriptorium as MCP tools, for Claude in Cowork, Claude
 //! Desktop and Claude Code (shipped inside the Scriptorium plugin).
 //!
-//! Every tool runs the `scriptorium` CLI. That keeps one code path for agents
-//! (AGENTS.md rule 5): the server can do exactly what the CLI can, works on the
-//! same session file as the app, and needs no changes when the CLI grows a
-//! feature beyond adding a tool here.
+//! Every tool runs in-process through the `scriptorium_cli` library, the same
+//! code the `scriptorium` command line runs. That keeps one code path for
+//! agents (AGENTS.md rule 5): the server can do exactly what the CLI can, works
+//! on the same session file as the app, and shares its reading and suggesting
+//! tools (`scriptorium_tools`) with the app's built-in agent.
 //!
 //! Transport: MCP over stdio, one JSON-RPC message per line. Hand-written on
 //! serde_json because the server only needs `initialize`, `tools/list` and
@@ -20,18 +21,17 @@ use serde_json::{Value, json};
 /// any of them works; the client's choice is echoed back when it's listed here.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// Shown to the model when it connects: how to use the tools well.
+/// Shown to the model when it connects: what the tools are for, and the few
+/// rules that matter in every session. How to run a pass is in the plugin's
+/// skill; each tool's details are in its description.
 const INSTRUCTIONS: &str = "\
-Scriptorium holds screenplays (Final Draft .fdx files) and reviews of them. A review is a list of \
-suggested changes to lines; a person decides each one in the Scriptorium app (accept, keep their own \
-line, or rewrite). The app and these tools share one saved session next to the script, so the person \
-sees your work and you see theirs.
-
-Prefer proposing over editing: use suggest_change to add suggestions to a review file and let the person \
-decide in the app, unless they asked you to decide or edit directly. Find paragraphs with \
-list_paragraphs (filter it: scripts have thousands of paragraphs) and refer to them by id. Every change \
-made through decide_suggestion or edit_paragraph can be undone with undo. Scripts are never \
-overwritten: write_script writes a new .fdx next to the original.";
+Scriptorium reviews screenplays (Final Draft .fdx): read the script, propose line changes into a review file, \
+and the writer decides each one in the Scriptorium app, which shares a saved session with these tools.
+Propose, don't edit: use suggest_changes or suggest_change; decide or edit (decide_suggestion, edit_paragraph) \
+only when the writer asks you to.
+When the writer asks for feedback rather than changes, answer in chat instead of proposing.
+Always give review_file when proposing, named for the pass (e.g. dialogue-pass.review.txt).
+Pass the script as an absolute path; if you don't know where the script is, ask the writer for its path.";
 
 fn main() {
     let stdin = std::io::stdin();
@@ -75,7 +75,7 @@ fn handle(msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match tools::call(name, &args) {
+            match guarded(|| tools::call(name, &args)) {
                 Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
                 // Tool failures go back to the model as results it can read and act on.
                 Err(tools::Failure::Tool(text)) => {
@@ -89,6 +89,42 @@ fn handle(msg: &Value) -> Option<Value> {
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
 
+/// Runs one tool call, turning a panic into a tool error, so a bug in one
+/// call never takes the server (and every later call) down. The panic's
+/// message also goes to stderr through the default hook.
+fn guarded(f: impl FnOnce() -> Result<String, tools::Failure>) -> Result<String, tools::Failure> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|panic| {
+        let what = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic".into());
+        Err(tools::Failure::Tool(format!("internal error: {what}")))
+    })
+}
+
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_call_is_a_tool_error() {
+        let r = guarded(|| panic!("boom {}", 1));
+        assert!(matches!(r, Err(tools::Failure::Tool(t)) if t == "internal error: boom 1"));
+        let r = guarded(|| std::panic::panic_any(7_u8));
+        assert!(matches!(r, Err(tools::Failure::Tool(t)) if t == "internal error: a panic"));
+        assert!(matches!(guarded(|| Ok("fine".into())), Ok(t) if t == "fine"));
+    }
+
+    #[test]
+    fn instructions_stay_short() {
+        assert!(INSTRUCTIONS.lines().count() <= 7, "{INSTRUCTIONS}");
+        for must in ["review_file", "feedback", "ask the writer for its path"] {
+            assert!(INSTRUCTIONS.contains(must), "{must}");
+        }
+    }
 }

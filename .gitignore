@@ -3,5 +3,6 @@
 *.review.txt
 *.review.original.txt
 *.scriptorium.json
+*.scriptorium.lock
 *.json.old
 *(scriptorium).fdx

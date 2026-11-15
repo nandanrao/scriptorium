@@ -8,7 +8,9 @@
 //! applies one step through the same `scriptorium_review::Session` the app
 //! uses, and saves it back (review files first, then the session). A session
 //! that can't be replayed is never overwritten. Commands that only read never
-//! write anything.
+//! write anything. A command that writes holds the script's [`SessionLock`]
+//! from opening the session to saving it, so another program (the app,
+//! another command) never writes it in between.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -26,7 +28,7 @@ use scriptorium_tools::{Ctx, Outcome, Target, item_numbered, item_numbers};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::fsio::write_atomic;
+use crate::fsio::{SessionLock, write_atomic};
 use crate::opened::{Opened, file_name, load, new_review_id, no_reviews, review_salt, script_dir};
 
 pub const USAGE: &str = "\
@@ -124,12 +126,15 @@ fn review_command(cmd: &str, args: &[&str], notes: &mut Vec<String>) -> Result<S
         ("reviews", [script, "add", files @ ..]) if !files.is_empty() => add_reviews(script, files, notes),
         ("reviews", [script, "remove", files @ ..]) if !files.is_empty() => remove_reviews(script, files),
         ("suggestions", [script, rest @ ..]) => suggestions(script, rest, notes),
-        ("decide", [script, rest @ ..]) => decide(script, rest, notes),
-        ("edit", [script, id, text, rest @ ..]) => edit(script, id, text, &review_flags(rest)?, notes),
-        ("undo" | "redo", [script, rest @ ..]) => undo(script, cmd == "redo", &review_flags(rest)?, notes),
+        ("decide", [script, rest @ ..]) => decide_command(script, rest, notes),
+        ("edit", [script, id, text, rest @ ..]) => {
+            let para = id.parse::<u64>().map_err(|_| format!("paragraph id must be a number, got {id:?}"))?;
+            edit(script, para, text, &review_flags(rest)?, notes)
+        }
+        ("undo" | "redo", [script, rest @ ..]) => undo_redo(script, cmd == "redo", &review_flags(rest)?, notes),
         ("suggest", [review, script, rest @ ..]) => suggest(review, script, rest, notes),
         ("progress", [script, rest @ ..]) => progress(script, rest, notes),
-        ("apply", [script, rest @ ..]) => apply(script, rest, notes),
+        ("apply", [script, rest @ ..]) => apply_command(script, rest, notes),
         ("tool", rest) => tool_command(rest, notes),
         _ => Err(format!("wrong arguments for `{cmd}`\n\n{USAGE}")),
     }
@@ -257,7 +262,10 @@ fn list_reviews(script: &str, notes: &mut Vec<String>) -> Result<String, String>
     Ok(out)
 }
 
-fn add_reviews(script: &str, files: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+/// Attach review files (paths from the current folder) to `script`, saving
+/// the session; the result lists each with its suggestion count.
+pub fn add_reviews(script: &str, files: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+    let _lock = lock(script)?;
     let o = Opened::open(script, files, notes)?;
     o.save()?;
     let mut out = String::new();
@@ -278,10 +286,12 @@ fn add_reviews(script: &str, files: &[&str], notes: &mut Vec<String>) -> Result<
     Ok(out)
 }
 
-fn remove_reviews(script: &str, files: &[&str]) -> Result<String, String> {
+/// Detach review files (as attached, or paths from the current folder).
+pub fn remove_reviews(script: &str, files: &[&str]) -> Result<String, String> {
+    let _lock = lock(script)?;
     let dir = script_dir(script)?;
     let session_path = dir.join(sessionfile::file_name_for(&file_name(Path::new(script))));
-    let json = std::fs::read_to_string(&session_path).map_err(|_| no_reviews(script))?;
+    let json = std::fs::read_to_string(&session_path).map_err(|_| format!("no review files attached to {script}"))?;
     let mut file = SessionFile::from_json(&json).map_err(|e| format!("{}: {e}", session_path.display()))?;
     let mut out = String::new();
     for f in files {
@@ -292,7 +302,7 @@ fn remove_reviews(script: &str, files: &[&str]) -> Result<String, String> {
             a.path != *f && p.canonicalize().unwrap_or(p) != at
         });
         if file.reviews.len() == before {
-            return Err(format!("{f} isn't attached (see `scriptorium reviews {script:?}`)"));
+            return Err(format!("{f} isn't attached to {script} (list_reviews shows what is)"));
         }
         let _ = writeln!(out, "removed {f} (the script's text keeps its decisions)");
     }
@@ -371,7 +381,7 @@ fn suggestions(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<S
             review => file = Some(review),
         }
     }
-    let (o, r) = Opened::open_one(script, file, pick, notes)?;
+    let (o, r) = Opened::open_one(script, file, pick, true, notes)?;
     let ctx = annotate(o.doc.script());
     let items = &o.session.reviews[r].items;
     let numbers = item_numbers(&o.doc, items);
@@ -425,43 +435,101 @@ fn entry_ref(s: &str) -> Option<usize> {
     s.strip_prefix('e').and_then(|d| d.parse::<usize>().ok())
 }
 
-fn decide(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+/// Which suggestion [`decide`] decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuggestionRef {
+    /// Its number `n` (from 1, in script order, as `suggestions` lists them).
+    Number(usize),
+    /// `e<entry>`: its stable place in the review file.
+    Entry(usize),
+}
+
+impl SuggestionRef {
+    /// `3` or `e3`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match entry_ref(s) {
+            Some(e) => Some(Self::Entry(e)),
+            None => s.parse::<usize>().ok().map(Self::Number),
+        }
+    }
+}
+
+/// What [`decide`] does with a suggestion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Choice {
+    /// Take an option, numbered from 1 (`None`: the first).
+    Accept(Option<usize>),
+    /// Keep the line as it is.
+    Keep,
+    /// Replace the line with this text.
+    Rewrite(String),
+    /// Take the decision back.
+    Undecide,
+}
+
+/// `decide <script> [<review>] [--review <r>] <n> <decision...>`.
+fn decide_command(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     let (pick, rest) = take_review_flag(args)?;
-    let is_ref = |s: &str| s.parse::<usize>().is_ok() || entry_ref(s).is_some();
     // `<review.txt> <n> ...` or just `<n> ...`.
     let (file, n, decision) = match rest.as_slice() {
-        [n, decision @ ..] if is_ref(n) => (None, *n, decision),
+        [n, decision @ ..] if SuggestionRef::parse(n).is_some() => (None, *n, decision),
         [file, n, decision @ ..] => (Some(*file), *n, decision),
         _ => return Err(format!("decide which suggestion?\n\n{USAGE}")),
     };
-    let (mut o, r) = Opened::open_one(script, file, pick, notes)?;
+    let n = SuggestionRef::parse(n).ok_or(format!("no suggestion {n}: give its number, or e<entry>"))?;
+    let choice = match decision {
+        ["accept"] => Choice::Accept(None),
+        ["accept", k] => Choice::Accept(Some(k.parse::<usize>().map_err(|_| format!("no option {k}"))?)),
+        ["keep"] => Choice::Keep,
+        ["undecide"] => Choice::Undecide,
+        ["rewrite", text] => Choice::Rewrite(text.to_string()),
+        _ => return Err(format!("decide what? accept [<option>] | keep | undecide | rewrite <text>\n\n{USAGE}")),
+    };
+    decide_in(script, file, pick, true, n, choice, notes)
+}
+
+/// Decide one suggestion of `review` (an attached review's name or file, or
+/// a review file, absolute or from the script's folder; never from the
+/// current folder; `None`: the only attached review), and save. Returns the suggestion's new status and line.
+pub fn decide(
+    script: &str,
+    review: Option<&str>,
+    n: SuggestionRef,
+    choice: Choice,
+    notes: &mut Vec<String>,
+) -> Result<String, String> {
+    decide_in(script, None, review, false, n, choice, notes)
+}
+
+fn decide_in(
+    script: &str,
+    file: Option<&str>,
+    pick: Option<&str>,
+    from_cwd: bool,
+    n: SuggestionRef,
+    choice: Choice,
+    notes: &mut Vec<String>,
+) -> Result<String, String> {
+    let _lock = lock(script)?;
+    let (mut o, r) = Opened::open_one(script, file, pick, from_cwd, notes)?;
     let count = o.session.reviews[r].items.len();
-    let i = match entry_ref(n) {
-        Some(e) => o.session.reviews[r].items.iter().position(|it| it.entry == e).ok_or(format!(
+    let i = match n {
+        SuggestionRef::Entry(e) => o.session.reviews[r].items.iter().position(|it| it.entry == e).ok_or(format!(
             "no suggestion e{e} in {} (it isn't in the file, or didn't match a line)",
             o.session.reviews[r].name
         ))?,
-        None => n
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| item_numbered(&o.doc, &o.session.reviews[r].items, n))
-            .ok_or(format!("no suggestion {n} (1 to {count})"))?,
+        SuggestionRef::Number(n) => {
+            item_numbered(&o.doc, &o.session.reviews[r].items, n).ok_or(format!("no suggestion {n} (1 to {count})"))?
+        }
     };
     let options = o.session.item(r, i).options.len();
-    let d = match decision {
-        ["accept"] => Decision::Accept(0),
-        ["accept", k] => {
-            let k = k
-                .parse::<usize>()
-                .ok()
-                .filter(|k| (1..=options).contains(k))
-                .ok_or(format!("no option {k} (1 to {options})"))?;
-            Decision::Accept(k - 1)
-        }
-        ["keep"] => Decision::KeepMine,
-        ["undecide"] => Decision::Undecided,
-        ["rewrite", text] => Decision::Rewrite(text.to_string()),
-        _ => return Err(format!("decide what? accept [<option>] | keep | undecide | rewrite <text>\n\n{USAGE}")),
+    let d = match choice {
+        Choice::Accept(None) => Decision::Accept(0),
+        Choice::Accept(Some(k)) if (1..=options).contains(&k) => Decision::Accept(k - 1),
+        Choice::Accept(Some(k)) => return Err(format!("no option {k} (1 to {options})")),
+        Choice::Keep => Decision::KeepMine,
+        Choice::Undecide => Decision::Undecided,
+        Choice::Rewrite(text) => Decision::Rewrite(text),
     };
     let sel = o.sel();
     o.session.decide(&mut o.doc, sel, r, i, d).map_err(|e| e.to_string())?;
@@ -471,11 +539,15 @@ fn decide(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<String
     Ok(format!("#{n} {}: {}\n", status_name(o.session.status(&o.doc, r, i)), o.text(item.para)))
 }
 
-fn edit(script: &str, id: &str, text: &str, reviews: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+/// Replace paragraph `para`'s whole text, and save. `reviews` (paths from the
+/// current folder) are attached too.
+pub fn edit(script: &str, para: u64, text: &str, reviews: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+    let _lock = lock(script)?;
     let mut o = Opened::open(script, reviews, notes)?;
-    let para = ParaId(id.parse::<u64>().map_err(|_| format!("paragraph id must be a number, got {id:?}"))?);
+    let id = para;
+    let para = ParaId(para);
     if o.doc.paragraph(para).is_none() {
-        return Err(format!("no paragraph {id} (see `scriptorium dump`)"));
+        return Err(format!("no paragraph {id} (use list_paragraphs to find ids)"));
     }
     if text.contains('\n') {
         return Err("one paragraph at a time: the text can't contain newlines".into());
@@ -486,7 +558,10 @@ fn edit(script: &str, id: &str, text: &str, reviews: &[&str], notes: &mut Vec<St
     Ok(format!("¶{id}: {}\n", o.text(para)))
 }
 
-fn undo(script: &str, redo: bool, reviews: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+/// Undo (or redo) the last change to the script, and save. `reviews` (paths
+/// from the current folder) are attached too.
+pub fn undo_redo(script: &str, redo: bool, reviews: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+    let _lock = lock(script)?;
     let mut o = Opened::open(script, reviews, notes)?;
     let paras = o.doc.next_undo_paras(redo);
     let done = if redo { o.doc.redo() } else { o.doc.undo() };
@@ -520,6 +595,7 @@ fn suggest(review: &str, script: &str, rest: &[&str], notes: &mut Vec<String>) -
     // Matched and numbered against the live document (the saved session), as
     // every other command sees the script; the session is only saved if the
     // review file is attached (to record its new text).
+    let _lock = lock(script)?;
     let mut o = Opened::open(script, &[], notes)?;
     let fdx = &o.fdx;
     let caps = |k: &ElementKind| fdx.is_caps(k.name());
@@ -602,7 +678,9 @@ fn progress(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<Stri
         [f, rest @ ..] if !f.starts_with('-') => (Some(*f), rest.to_vec()),
         rest => (None, rest.to_vec()),
     };
-    let (mut o, r) = Opened::open_one(script, file, pick, notes)?;
+    // Only `-o` can write the review file and the session.
+    let _lock = if rest.is_empty() { None } else { Some(lock(script)?) };
+    let (mut o, r) = Opened::open_one(script, file, pick, true, notes)?;
     let out = o.session.save_progress(&o.doc, r);
     match rest.as_slice() {
         [] => Ok(out),
@@ -628,19 +706,35 @@ fn progress(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<Stri
     }
 }
 
-fn apply(script: &str, rest: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+fn apply_command(script: &str, rest: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     let (mut reviews, mut accept_all, mut out) = (vec![], false, None);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match *a {
             "--accept-all" => accept_all = true,
-            "-o" => out = Some(it.next().ok_or("-o needs a file name")?.to_string()),
+            "-o" => out = Some(Path::new(*it.next().ok_or("-o needs a file name")?)),
             r => reviews.push(r),
         }
     }
-    let mut o = Opened::open(script, &reviews, notes)?;
+    apply(script, &reviews, accept_all, out, notes)
+}
+
+/// Write the script with the session's decisions and edits to `output`
+/// (default "<script> (scriptorium).fdx" next to it, replaced if it exists);
+/// never over the script itself. `accept_all` also takes option 1 of every
+/// pending suggestion, in this output only. `reviews` (paths from the
+/// current folder) are attached first.
+pub fn apply(
+    script: &str,
+    reviews: &[&str],
+    accept_all: bool,
+    output: Option<&Path>,
+    notes: &mut Vec<String>,
+) -> Result<String, String> {
+    let _lock = lock(script)?;
+    let mut o = Opened::open(script, reviews, notes)?;
     // Review files named here are attached, as on every command that takes
-    // them. Saved before --accept-all, which only shapes this output.
+    // them. Saved before accept_all, which only shapes this output.
     if !o.given.is_empty() {
         o.save()?;
     }
@@ -655,15 +749,31 @@ fn apply(script: &str, rest: &[&str], notes: &mut Vec<String>) -> Result<String,
         }
     }
     let input = Path::new(script);
-    let out = out.map(PathBuf::from).unwrap_or_else(|| output_path(input));
+    let out = output.map(Path::to_path_buf).unwrap_or_else(|| output_path(input));
     if out.canonicalize().ok() == input.canonicalize().ok() {
-        return Err("refusing to overwrite the original script; pass -o with another name".into());
+        return Err("refusing to overwrite the original script; give an output with another name".into());
     }
     let raw = o.fdx.write_script(o.doc.script()).map_err(|e| e.to_string())?;
     let original = o.fdx.to_script();
     let changed = o.doc.paragraphs().iter().zip(&original.paragraphs).filter(|(a, b)| a.text() != b.text()).count();
     write_atomic(&out, raw.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
     Ok(format!("wrote {} ({changed} paragraphs changed)\n", out.display()))
+}
+
+/// The session lock of `script`, for a command that writes (see the module
+/// docs); a script that isn't there fails as opening it would.
+/// The script's session lock; None (with a note on stderr) when the file
+/// system has no locks, as the app goes on. Busy past the wait is an error.
+fn lock(script: &str) -> Result<Option<SessionLock>, String> {
+    let at = Path::new(script).canonicalize().map_err(|e| format!("{script}: {e}"))?;
+    match SessionLock::for_script(&at) {
+        Ok(l) => Ok(Some(l)),
+        Err(e) if e == crate::fsio::NO_LOCKS => {
+            eprintln!("note: {e}");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// "<name> (scriptorium).fdx" next to the script, as the app writes it.
@@ -770,6 +880,7 @@ pub fn tool(
     notes: &mut Vec<String>,
 ) -> Result<String, String> {
     let mut args = args.clone();
+    let _lock = if READ_ONLY_TOOLS.contains(&name) { None } else { Some(lock(script)?) };
     let mut o = if READ_ONLY_TOOLS.contains(&name) {
         Opened::open_read_only(script, notes)?
     } else {
@@ -813,7 +924,10 @@ pub fn tool(
     // (only then can its file have changed since it was read).
     let (mut r, was_attached) = match &append.target {
         Target::Own => {
-            return Err("no review to add to: give --review-file <review.txt> (several or none are attached)".into());
+            return Err(
+                "no review to add to (several or none are attached): give review_file, the review file to add to"
+                    .into(),
+            );
         }
         Target::Review { index, .. } => (*index, true),
         Target::File(stored) => match scriptorium_tools::find_review(&o.session, stored) {

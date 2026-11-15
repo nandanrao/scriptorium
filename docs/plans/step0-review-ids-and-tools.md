@@ -347,3 +347,23 @@ In `crates/tools/src/prompt.rs`:
 3. Add to the read_scene bullet: "For an overview, script_info is cheap."
 4. Add to the first paragraph: "If the writer asks for feedback rather than
    edits, answer in chat; propose changes when they ask for them."
+
+## Follow-ups (from the P5 review)
+
+P5 moved the pure sync logic (`Seen`, `check`, `review_changed`, `rebuild`,
+`with_unsaved`) into `scriptorium_review::sessionfile::sync`. Still to do:
+- `Opened::open_with(script, extra, Policy { unusable_session: Refuse |
+  SetAside | ShowAsWritten, unreadable_review: Fail | Note })` in the CLI
+  shell, replacing its `read_only` flag and the app's own `Opened` (the CLI
+  refuses an unusable session, the app sets it aside, `info`/`dump` show it
+  as written).
+- `Opened::reload(unsaved)`: resume again and put a host's unsaved events
+  back with `sync::with_unsaved`, so the app and the MCP server share it.
+- `aside_path` in the CLI (today only the app sets sessions aside).
+- A CLI way to start fresh (set the session aside on purpose), for an agent
+  that finds the session unusable.
+- A CLI "changed since I read it?" guard using `Seen` for commands that read,
+  think, then write (MCP tools mainly), so they reload instead of
+  overwriting the app's save.
+- No file lock yet: two writers saving within the same instant can still
+  lose one write. Accepted risk; both sides re-check before writing.

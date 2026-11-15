@@ -1,10 +1,13 @@
 //! Writing files so a reader (the app, another CLI run, an agent) never sees
-//! half of one, and a crash mid-write leaves the old file in place.
+//! half of one, and a crash mid-write leaves the old file in place; and
+//! [`SessionLock`], which keeps two programs from writing a script's session
+//! at once.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Makes each temporary name unique within the process, so two threads
 /// writing the same file never share one.
@@ -52,9 +55,107 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
+/// How long a program waits for another to finish with a script's session.
+pub const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// What a program that couldn't get the lock in time is told.
+pub const BUSY: &str = "the script is busy in another program; try again";
+
+/// What a program is told when the file system has no file locks.
+pub const NO_LOCKS: &str = "this folder doesn't support file locks; avoid running the app and Claude at the same time";
+
+#[cfg(unix)]
+const ENOLCK: i32 = 37;
+#[cfg(not(unix))]
+const ENOLCK: i32 = -1;
+
+/// An OS advisory lock (flock on Unix, LockFileEx on Windows) on
+/// `<script>.scriptorium.lock` next to the script, held while a program reads,
+/// changes and writes the script's session (`<script>.scriptorium.json`) and
+/// its review files, so two writers never each write the session without the
+/// other's changes. Every writer takes it: the CLI and the MCP server around
+/// a whole command, the app from checking the files on disk through writing.
+/// Released when dropped (or when the program exits, however it exits).
+///
+/// The lock file is never deleted (deleting it would let two programs lock
+/// different files); it's empty, and can be deleted when nothing is running.
+/// Within one process, don't take a second lock on the same script while
+/// holding one: it waits for the first.
+#[derive(Debug)]
+pub struct SessionLock {
+    _file: File,
+}
+
+impl SessionLock {
+    /// The lock file for the script at `script` (a path to the script file).
+    pub fn path_for(script: &Path) -> PathBuf {
+        let name = script.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
+        script.with_file_name(format!("{stem}.scriptorium.lock"))
+    }
+
+    /// Lock the session of the script at `script`, waiting up to
+    /// [`LOCK_WAIT`] for another program to finish; [`BUSY`] if it doesn't.
+    pub fn for_script(script: &Path) -> Result<Self, String> {
+        Self::acquire(&Self::path_for(script), LOCK_WAIT)
+    }
+
+    /// Lock `lock_path` (created if missing), trying until `wait` has passed
+    /// (`Duration::ZERO`: try once). Busy: [`BUSY`]; any other failure says
+    /// what it was.
+    pub fn acquire(lock_path: &Path, wait: Duration) -> Result<Self, String> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)
+            .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+        let until = Instant::now() + wait;
+        loop {
+            // Through the trait: newer toolchains have an inherent
+            // `File::try_lock`, and rust-version (1.88) doesn't.
+            match fs4::FileExt::try_lock(&file) {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(fs4::TryLockError::WouldBlock) if Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(fs4::TryLockError::WouldBlock) => return Err(BUSY.to_string()),
+                Err(fs4::TryLockError::Error(e))
+                    if e.kind() == std::io::ErrorKind::Unsupported || e.raw_os_error() == Some(ENOLCK) =>
+                {
+                    return Err(NO_LOCKS.to_string());
+                }
+                Err(fs4::TryLockError::Error(e)) => return Err(format!("{}: {e}", lock_path.display())),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lock_is_exclusive_and_released_on_drop() {
+        let dir = std::env::temp_dir().join(format!("scriptorium-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("film.fdx");
+        let at = SessionLock::path_for(&script);
+        assert_eq!(at.file_name().unwrap(), "film.scriptorium.lock");
+        let held = SessionLock::acquire(&at, Duration::ZERO).unwrap();
+        assert_eq!(SessionLock::acquire(&at, Duration::from_millis(60)).unwrap_err(), BUSY);
+        // Released by another thread while this one waits: the wait gets it.
+        let waiter = std::thread::spawn({
+            let at = at.clone();
+            move || SessionLock::acquire(&at, Duration::from_secs(5)).map(drop)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        drop(held);
+        waiter.join().unwrap().unwrap();
+        assert!(at.exists(), "the lock file stays");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn writes_replaces_and_leaves_no_temp() {

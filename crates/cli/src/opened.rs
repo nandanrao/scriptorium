@@ -153,38 +153,66 @@ impl Opened {
 
     /// Open, and pick the one review a command works on: the file given
     /// (positionally or with `--review`), else the only one attached.
+    ///
+    /// `--review` (`pick`) is, in this order: a file, when absolute; a file
+    /// in the script's folder, when relative; an attached review's name or
+    /// stored path; and, only with `from_cwd`, a file from the current folder
+    /// (the command line's convention). The MCP server passes `from_cwd`
+    /// false, so it never attaches a file from its own folder.
     pub fn open_one(
         script: &str,
         file: Option<&str>,
         pick: Option<&str>,
+        from_cwd: bool,
         notes: &mut Vec<String>,
     ) -> Result<(Self, usize), String> {
-        // `--review` names an attached review, or is a file to open.
-        let pick_is_file = pick.is_some_and(|p| Path::new(p).is_file());
-        let extra: Vec<&str> = file.into_iter().chain(pick.filter(|_| pick_is_file)).collect();
-        let o = Self::open(script, &extra, notes)?;
+        let dir = script_dir(script)?;
+        let in_dir = pick.and_then(|p| {
+            let at = Path::new(p);
+            let at = if at.is_absolute() { at.to_path_buf() } else { dir.join(at) };
+            at.is_file().then(|| at.to_string_lossy().into_owned())
+        });
+        let extra: Vec<&str> = file.into_iter().chain(in_dir.as_deref()).collect();
+        // Kept aside until it's settled which open is used.
+        let mut first = vec![];
+        let o = Self::open(script, &extra, &mut first)?;
+        if let Some(p) = pick
+            && from_cwd
+            && o.given.is_empty()
+            && o.find_attached(p).is_none()
+            && Path::new(p).is_file()
+        {
+            // Not attached, nor in the script's folder: a file from here.
+            drop(o);
+            let o = Self::open(script, &[p], notes)?;
+            let r = o.given[0];
+            return Ok((o, r));
+        }
+        notes.append(&mut first);
         let r = if let Some(&r) = o.given.first() {
             r
         } else if let Some(p) = pick {
-            let p_lower = p.to_lowercase();
-            o.session
-                .reviews
-                .iter()
-                .position(|r| {
-                    r.path == p
-                        || r.name.to_lowercase() == p_lower
-                        || file_name(Path::new(&r.path)).to_lowercase() == p_lower
-                        || file_name(Path::new(&r.path)).to_lowercase().starts_with(&p_lower)
-                })
-                .ok_or_else(|| format!("no attached review matches {p:?}. Attached: {}", o.names()))?
+            o.find_attached(p).ok_or_else(|| format!("no attached review matches {p:?}. Attached: {}", o.names()))?
         } else {
             match o.session.reviews.len() {
-                0 => return Err(no_reviews(script)),
+                0 => return Err(format!("no review files attached to {script}; attach one first")),
                 1 => 0,
-                _ => return Err(format!("several reviews are attached; pick one with --review: {}", o.names())),
+                _ => return Err(format!("several reviews are attached; name one with review: {}", o.names())),
             }
         };
         Ok((o, r))
+    }
+
+    /// The attached review `p` names: its stored path, its name, or its file
+    /// name (or the start of it), ignoring case.
+    fn find_attached(&self, p: &str) -> Option<usize> {
+        let p_lower = p.to_lowercase();
+        self.session.reviews.iter().position(|r| {
+            r.path == p
+                || r.name.to_lowercase() == p_lower
+                || file_name(Path::new(&r.path)).to_lowercase() == p_lower
+                || file_name(Path::new(&r.path)).to_lowercase().starts_with(&p_lower)
+        })
     }
 
     pub fn names(&self) -> String {

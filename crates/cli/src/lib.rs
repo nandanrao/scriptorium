@@ -7,13 +7,14 @@
 //!
 //! - [`opened`]: a script opened with its saved session and review files.
 //! - [`fsio`]: atomic writes; every file this crate writes goes through
-//!   [`fsio::write_atomic`].
+//!   [`fsio::write_atomic`]. Every command that writes holds the script's
+//!   [`fsio::SessionLock`] from opening the session to saving it.
 //! - [`commands`]: each command, returning the text it prints.
 
 pub mod commands;
 pub mod fsio;
 pub mod opened;
 
-pub use commands::{USAGE, run, tool, tool_specs};
-pub use fsio::write_atomic;
+pub use commands::{Choice, SuggestionRef, USAGE, run, tool, tool_specs};
+pub use fsio::{SessionLock, write_atomic};
 pub use opened::Opened;

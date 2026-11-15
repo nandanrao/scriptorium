@@ -12,10 +12,10 @@
 //! J/K next/previous… Clicking the script focuses the editor for typing; Esc
 //! comes back to the card.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, MouseButton,
@@ -25,11 +25,13 @@ use gpui::{
 use scriptorium_core::diff::{WordOp, word_diff};
 use scriptorium_core::doc::Event;
 use scriptorium_core::outline::{ParaContext, annotate};
-use scriptorium_core::{Document, ParaId};
+use scriptorium_core::{Document, ParaId, Script};
 use scriptorium_fdx::FdxFile;
-use scriptorium_review::sessionfile::{self, Resumed, SessionFile};
+use scriptorium_review::sessionfile::{self, Change, Disk, Resumed, Seen, SessionFile};
 use scriptorium_review::{Decision, Review, Session, Status};
+use scriptorium_tools::item_numbers;
 
+use crate::disk::{self, Plan};
 use crate::editor::{Decor, EditorEvent, Mark, ScriptEditor};
 use crate::layout;
 use crate::theme::*;
@@ -73,9 +75,17 @@ pub struct Opened {
     session_path: PathBuf,
     /// The script's folder, canonical: review paths are stored relative to it.
     dir: PathBuf,
+    /// The session file as read (to notice another program changing it).
+    seen: Seen,
+    /// Review files attached now that the session file doesn't list yet.
+    unsynced: Vec<PathBuf>,
     notices: Vec<String>,
 }
 
+// This mirrors `scriptorium_cli::Opened` rather than using it: the app sets a
+// session that can't be used aside and starts fresh (the CLI refuses, so it
+// never overwrites one), turns an unreadable review file into a notice (the
+// CLI fails), and needs `Seen` for the session file it read.
 impl Opened {
     /// Read the script, the review files attached to it last time plus
     /// `review_paths`, and the saved session. Only a script that can't be read
@@ -85,50 +95,35 @@ impl Opened {
         let raw = std::fs::read_to_string(&script_path).map_err(|e| format!("{}: {e}", file_name(&script_path)))?;
         let fdx = FdxFile::parse(raw.clone())
             .map_err(|e| format!("{}: {}", file_name(&script_path), capitalize(&e.to_string())))?;
-        let script = fdx.to_script();
-        let script_name = file_name(&script_path);
         let dir = script_path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let session_path = dir.join(sessionfile::file_name_for(&script_name));
-        let saved = std::fs::read_to_string(&session_path).ok();
-        let mut notices = vec![];
-
-        let attached: Vec<String> = saved
-            .as_deref()
-            .and_then(|j| SessionFile::from_json(j).ok())
-            .map(|f| f.reviews.into_iter().map(|a| a.path).collect())
-            .unwrap_or_default();
-        let mut paths: Vec<PathBuf> = attached
+        let session_path = dir.join(sessionfile::file_name_for(&file_name(&script_path)));
+        let (mut opened, mut seen, mut notices) =
+            resume_from_disk(&script_path, &raw, &fdx, &session_path, review_paths);
+        let listed: Vec<String> = match &opened.how {
+            Resumed::Resumed { .. } => std::fs::read_to_string(&session_path)
+                .ok()
+                .and_then(|j| SessionFile::from_json(&j).ok())
+                .map(|f| f.reviews.into_iter().map(|a| a.path).collect())
+                .unwrap_or_default(),
+            _ => vec![],
+        };
+        let unsynced = opened
+            .session
+            .reviews
             .iter()
-            .map(|stored| {
-                let p = sessionfile::resolve_path(&dir, stored);
-                p.canonicalize().unwrap_or(p)
-            })
+            .filter(|r| !listed.contains(&r.path))
+            .map(|r| sessionfile::resolve_path(&dir, &r.path))
             .collect();
-        for p in review_paths {
-            let p = p.canonicalize().unwrap_or_else(|_| p.clone());
-            if !paths.contains(&p) {
-                paths.push(p);
-            }
-        }
-        let mut sources = vec![];
-        for p in paths {
-            match read_review(&p, &dir) {
-                Ok(source) => sources.push(source),
-                Err(e) => notices.push(format!("{e}. It was taken off this script's reviews.")),
-            }
-        }
-        let caps = |k: &scriptorium_core::ElementKind| fdx.is_caps(k.name());
-        let mut opened = sessionfile::resume(sources, script, &raw, saved.as_deref(), &caps, &script_name);
-        for review in &opened.session.reviews {
-            notices.append(&mut review_notes(review));
-        }
         match &opened.how {
             Resumed::Fresh => {}
             Resumed::Resumed { .. } => notices.insert(0, "Picked up where you left off.".into()),
             Resumed::Discarded(why) => {
-                let aside = aside_path(&session_path);
+                let aside = disk::set_aside_path(&dir, &file_name(&script_path));
                 let kept = match std::fs::rename(&session_path, &aside) {
-                    Ok(()) => format!("The old session was kept as {}.", file_name(&aside)),
+                    Ok(()) => {
+                        seen = Seen::default();
+                        format!("The old session was kept as {}.", file_name(&aside))
+                    }
                     Err(e) => format!("Couldn't keep the old session as {}: {e}.", aside.display()),
                 };
                 crate::log::warn(&format!("session {} discarded: {why}. {kept}", session_path.display()));
@@ -136,22 +131,64 @@ impl Opened {
             }
         }
         notices.append(&mut opened.notes);
-        Ok(Self { script_path, raw, fdx, opened, session_path, dir, notices })
+        Ok(Self { script_path, raw, fdx, opened, session_path, dir, seen, unsynced, notices })
     }
 }
 
-/// Where to keep a session that can't be used: `X.scriptorium.json.old`, or
-/// `X.scriptorium.2.json.old`, `.3.`… so an earlier one is never overwritten.
-fn aside_path(session_path: &Path) -> PathBuf {
-    let name = file_name(session_path);
-    let stem = name.strip_suffix(".json").unwrap_or(&name);
-    (1..)
-        .map(|n| match n {
-            1 => session_path.with_file_name(format!("{stem}.json.old")),
-            n => session_path.with_file_name(format!("{stem}.{n}.json.old")),
+/// Resume the session saved next to the script with the review files it
+/// attaches plus `review_paths` (as opening does, and again when another
+/// program changed the files). Writes nothing. Returns the resumed session
+/// (its `notes` not yet shown), the session file as read, and notices about
+/// review files.
+fn resume_from_disk(
+    script_path: &Path,
+    raw: &str,
+    fdx: &FdxFile,
+    session_path: &Path,
+    review_paths: &[PathBuf],
+) -> (sessionfile::ResumedSession, Seen, Vec<String>) {
+    let dir = script_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let script_name = file_name(script_path);
+    // The time first: a write between the two shows as a newer time later.
+    let mtime = modified(session_path);
+    let saved = std::fs::read_to_string(session_path).ok();
+    let seen = Seen::read(mtime, saved.as_deref());
+    let mut notices = vec![];
+    let attached: Vec<String> = saved
+        .as_deref()
+        .and_then(|j| SessionFile::from_json(j).ok())
+        .map(|f| f.reviews.into_iter().map(|a| a.path).collect())
+        .unwrap_or_default();
+    let mut paths: Vec<PathBuf> = attached
+        .iter()
+        .map(|stored| {
+            let p = sessionfile::resolve_path(&dir, stored);
+            p.canonicalize().unwrap_or(p)
         })
-        .find(|p| !p.exists())
-        .expect("some name is free")
+        .collect();
+    for p in review_paths {
+        let p = p.canonicalize().unwrap_or_else(|_| p.clone());
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+    let mut sources = vec![];
+    for p in paths {
+        match read_review(&p, &dir) {
+            Ok(source) => sources.push(source),
+            Err(e) => notices.push(format!("{e}. It was taken off this script's reviews.")),
+        }
+    }
+    let caps = |k: &scriptorium_core::ElementKind| fdx.is_caps(k.name());
+    let opened = sessionfile::resume(sources, fdx.to_script(), raw, saved.as_deref(), &caps, &script_name);
+    for review in &opened.session.reviews {
+        notices.append(&mut review_notes(review));
+    }
+    (opened, seen, notices)
+}
+
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// Read one review file, to open with the script.
@@ -242,17 +279,43 @@ pub struct ScriptView {
     row_of_item: Vec<Vec<usize>>,
     item_by_para: Vec<HashMap<ParaId, usize>>,
     queue_scroll: UniformListScrollHandle,
+    /// The status bar's message (cleared by the next key the writer presses).
     notice: SharedString,
-    /// Log length when the .fdx was last written.
-    applied_at: Option<usize>,
+    /// An error the writer may not have seen yet: shown beside `notice`, and
+    /// never replaced by a background notice (a reload), only by the writer's
+    /// next action.
+    error: SharedString,
+    /// The notice for recent reloads, merged while it's on screen, so an agent
+    /// writing every second gives one growing notice, not a new one each time.
+    reload_note: Option<(Instant, disk::Summary)>,
+    /// Notes about review files already shown (a reload doesn't repeat them).
+    shown_notes: HashSet<String>,
+    /// The script as last written to the .fdx.
+    applied: Option<Rc<Script>>,
     autosave: Option<Task<()>>,
+    /// The session file as the app last read or wrote it, and the log length
+    /// it holds: events after that are the app's own, not yet saved.
+    seen_session: Seen,
+    synced: usize,
+    /// Review files attached here since the session file was last read or
+    /// written: a reload keeps these (and only these) attached.
+    attached_since_sync: Vec<PathBuf>,
+    /// Another program wrote a session the app can't use (why): the app stops
+    /// saving over it until the file is usable again (or removed).
+    stuck: Option<String>,
+    /// Looks at the files every so often (see `crate::disk`).
+    _watch: Task<()>,
     _subscription: Subscription,
 }
 
+/// How often the app looks for changes another program made to its files.
+const WATCH_EVERY: Duration = Duration::from_millis(1000);
+
 impl ScriptView {
     pub fn new(opened: Opened, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Opened { script_path, raw, fdx, opened, session_path, dir, notices } = opened;
+        let Opened { script_path, raw, fdx, opened, session_path, dir, seen, unsynced, notices } = opened;
         let sessionfile::ResumedSession { session, doc, base, .. } = opened;
+        let synced = doc.log().len();
         let originals: HashMap<ParaId, String> = fdx.to_script().paragraphs.iter().map(|p| (p.id, p.text())).collect();
         let ctx = annotate(&fdx.to_script());
         let caps: Vec<bool> = fdx.paragraphs().iter().map(|p| fdx.is_caps(&p.kind)).collect();
@@ -266,6 +329,14 @@ impl ScriptView {
 
         let editor = cx.new(|cx| ScriptEditor::new(doc, cx));
         let subscription = cx.subscribe_in(&editor, window, Self::on_editor_event);
+        let watch = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(WATCH_EVERY).await;
+                if this.update(cx, |w, cx| w.watch_files(cx)).is_err() {
+                    break;
+                }
+            }
+        });
         let n = session.reviews.len();
         let mut this = Self {
             editor,
@@ -290,18 +361,29 @@ impl ScriptView {
             item_by_para: vec![],
             queue_scroll: UniformListScrollHandle::new(),
             notice: notices.join("  ").into(),
-            applied_at: None,
+            error: "".into(),
+            reload_note: None,
+            shown_notes: notices.iter().cloned().collect(),
+            applied: None,
             autosave: None,
+            seen_session: seen,
+            synced,
+            attached_since_sync: unsynced,
+            stuck: None,
+            _watch: watch,
             _subscription: subscription,
         };
-        this.build_rows();
+        this.build_rows(cx);
         let first = if n > 0 { View::Review(0) } else { View::Script };
         this.set_view(first, window, cx);
         this
     }
 
     /// The per-review sidebar rows and lookups, after the reviews change.
-    fn build_rows(&mut self) {
+    /// Items are listed in script order, the order their numbers follow
+    /// (`scriptorium_tools::item_numbers`, as the CLI and tools number them).
+    fn build_rows(&mut self, cx: &App) {
+        let doc = self.doc(cx);
         let ctx = &self.ctx;
         let scene_name = |ix: usize| -> SharedString {
             let s = &ctx[ix].scene;
@@ -309,15 +391,16 @@ impl ScriptView {
         };
         let (mut rows, mut row_of_item, mut item_by_para) = (vec![], vec![], vec![]);
         for review in &self.session.reviews {
-            let (mut rs, mut of) = (vec![], vec![]);
+            let (mut rs, mut of) = (vec![], vec![0; review.items.len()]);
             let mut last_scene: Option<&str> = None;
-            for (i, item) in review.items.iter().enumerate() {
+            for i in in_script_order(doc, &review.items) {
+                let item = &review.items[i];
                 let scene = ctx[item.index].scene.as_str();
                 if last_scene != Some(scene) {
                     rs.push(Row::Scene(scene_name(item.index)));
                     last_scene = Some(scene);
                 }
-                of.push(rs.len());
+                of[i] = rs.len();
                 rs.push(Row::Item(i));
             }
             rows.push(Rc::new(rs));
@@ -335,8 +418,40 @@ impl ScriptView {
     }
 
     pub fn set_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.notice = text.into();
+        self.say(text);
         cx.notify();
+    }
+
+    /// A message in answer to something the writer did: it replaces any
+    /// other (the writer has been looking at the screen).
+    fn say(&mut self, text: impl Into<SharedString>) {
+        self.notice = text.into();
+        self.error = "".into();
+        self.reload_note = None;
+    }
+
+    /// Something went wrong (possibly in the background, like an autosave).
+    fn say_error(&mut self, text: impl Into<SharedString>) {
+        let text = text.into();
+        crate::log::error(&text);
+        self.error = text;
+    }
+
+    /// What a reload brought in: merged with the previous reload's notice
+    /// while that is still recent and showing; never hides an error.
+    fn say_reloaded(&mut self, summary: disk::Summary) {
+        const MERGE_FOR: Duration = Duration::from_secs(20);
+        let summary = match self.reload_note.take() {
+            Some((at, mut prev)) if at.elapsed() < MERGE_FOR => {
+                prev.merge(summary);
+                prev
+            }
+            _ => summary,
+        };
+        if let Some(text) = summary.render() {
+            self.notice = text.into();
+            self.reload_note = Some((Instant::now(), summary));
+        }
     }
 
     /// File › Add review: open each file against the script (by `PARA:` as
@@ -353,6 +468,9 @@ impl ScriptView {
                 continue;
             }
             let p = p.canonicalize().unwrap_or_else(|_| p.clone());
+            // Held from reading the file through pinning its id, so a
+            // concurrent CLI/MCP append isn't overwritten.
+            let lock = self.lock_session(scriptorium_cli::fsio::LOCK_WAIT);
             let source = match read_review(&p, &self.dir) {
                 Ok(s) => s,
                 Err(e) => {
@@ -380,13 +498,21 @@ impl ScriptView {
                 }
             };
             notes.append(&mut more);
+            self.attached_since_sync.push(p.clone());
             // Attached: pin the review's id into a file that has no `Id:`
             // header, so later edits to the file don't orphan its decisions.
-            if let Some(text) = Rc::make_mut(&mut self.session).reviews[r].pin_id()
-                && let Err(e) = std::fs::write(&p, text)
-            {
-                notes.push(format!("Couldn't write the review's Id: into {}: {e}", p.display()));
+            // Written now, before the session that names it (host contract).
+            if let Some(text) = Rc::make_mut(&mut self.session).reviews[r].pin_id() {
+                if lock.is_none() {
+                    notes.push(format!(
+                        "{} is busy in another program; its Id: wasn't written (it is attached).",
+                        file_name(&p)
+                    ));
+                } else if let Err(e) = scriptorium_cli::write_atomic(&p, text.as_bytes()) {
+                    notes.push(format!("Couldn't write the review's Id: into {}: {e}", p.display()));
+                }
             }
+            drop(lock);
             if restored > 0 {
                 let session = self.session.clone();
                 self.editor.update(cx, |e, cx| {
@@ -402,26 +528,56 @@ impl ScriptView {
             }
             first.get_or_insert(r);
         }
-        self.build_rows();
+        self.build_rows(cx);
         if let Some(r) = first {
             self.set_view(View::Review(r), window, cx);
             self.schedule_autosave(cx);
         }
-        self.notice = notes.join("  ").into();
+        self.shown_notes.extend(notes.iter().cloned());
+        self.say(notes.join("  "));
         cx.notify();
     }
 
     /// Before the window closes or switches script: finish a rewrite, save.
-    pub fn save_now(&mut self, cx: &mut Context<Self>) {
+    /// Never drops the writer's work silently: if it can't be saved to the
+    /// session file (another program left one that can't be used, or the
+    /// write failed), it is written beside it as
+    /// `X.scriptorium.set-aside-<time>.json`. Returns what to tell the writer.
+    pub fn save_now(&mut self, cx: &mut Context<Self>) -> Option<String> {
         self.commit_rewrite_quietly(cx);
         self.autosave = None;
-        self.save_session(cx);
+        // Worth waiting a moment for another program to finish writing; if
+        // it doesn't, the work is set aside below.
+        self.save_session_within(scriptorium_cli::fsio::LOCK_WAIT, cx);
+        if self.doc(cx).log().len() <= self.synced {
+            return None;
+        }
+        let doc = self.doc(cx).clone();
+        Some(self.set_aside(&doc, "couldn't be saved to the session file", true))
+    }
+
+    /// Write the app's session for `doc` aside (see [`Self::save_now`]),
+    /// log where, and return a notice saying so.
+    /// `loud`: also show it as an error (a reload's own notice already says
+    /// where the lost text went, so it passes false).
+    fn set_aside(&mut self, doc: &Document, why: &str, loud: bool) -> String {
+        let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log()).to_json();
+        let path = disk::set_aside_path(&self.dir, &file_name(&self.script_path));
+        let msg = match scriptorium_cli::write_atomic(&path, json.as_bytes()) {
+            Ok(()) => format!("Your unsaved work {why}; it was kept in {}.", file_name(&path)),
+            Err(e) => format!("Your unsaved work {why}, and keeping it in {} failed too: {e}", path.display()),
+        };
+        crate::log::warn(&format!("{msg} ({})", path.display()));
+        if loud {
+            self.error = msg.clone().into();
+        }
+        msg
     }
 
     /// The toolbar's summary of what's changed and whether it's been written.
     pub fn save_state(&self, cx: &App) -> String {
         let changed = self.changed_lines(cx);
-        let written = self.applied_at == Some(self.doc(cx).log().len());
+        let written = self.applied.as_deref() == Some(self.doc(cx).script());
         match (changed, written) {
             (0, _) => "Same as the original".to_string(),
             (1, true) => format!("1 line changed · written to {}", file_name(&output_path(&self.script_path))),
@@ -527,7 +683,7 @@ impl ScriptView {
 
     fn decide(&mut self, decision: Decision, window: &mut Window, cx: &mut Context<Self>) {
         let Some((r, i)) = self.current() else { return };
-        self.notice = "".into();
+        self.say("");
         self.rewriting = None;
         let session = self.session.clone();
         self.editor.update(cx, |e, cx| e.run(cx, |doc, sel| session.decide(doc, sel, r, i, decision)));
@@ -561,7 +717,7 @@ impl ScriptView {
             e.cursor_to_end(para, cx);
         });
         self.rewriting = Some(Rewriting { r, i, depth });
-        self.notice = "".into();
+        self.say("");
         let focus = self.editor.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
         self.refresh(cx);
@@ -659,12 +815,12 @@ impl ScriptView {
                     window.focus(&self.focus, cx);
                     self.advance(r, i, cx);
                 } else {
-                    self.notice = "Enter doesn't add paragraphs yet. Esc goes back to the review.".into();
+                    self.say("Enter doesn't add paragraphs yet. Esc goes back to the review.");
                     cx.notify();
                 }
             }
             EditorEvent::Notice(text) => {
-                self.notice = text.clone().into();
+                self.say(text.clone());
                 cx.notify();
             }
         }
@@ -680,33 +836,302 @@ impl ScriptView {
     }
 
     /// Write the event log next to the script, so the session can be resumed.
+    /// If another program (the CLI, an agent through the MCP server) changed
+    /// the session or a review file since the app last read or wrote it, the
+    /// app reloads them instead, keeping its own unsaved changes on top.
+    /// While another program holds the session lock, the app doesn't wait
+    /// for it: it tries again shortly.
     fn save_session(&mut self, cx: &mut Context<Self>) {
-        let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, self.doc(cx).log()).to_json();
-        if let Err(e) = std::fs::write(&self.session_path, json) {
-            crate::log::error(&format!("saving {}: {e}", self.session_path.display()));
-            self.notice = format!("Couldn't save the session to {}: {e}", self.session_path.display()).into();
-            cx.notify();
+        if !self.save_session_within(Duration::ZERO, cx) {
+            self.schedule_autosave(cx);
         }
+    }
+
+    /// [`Self::save_session`], waiting up to `wait` for another program
+    /// holding the session lock. False: it was still busy; nothing was done.
+    fn save_session_within(&mut self, wait: Duration, cx: &mut Context<Self>) -> bool {
+        if self.stuck.is_some() {
+            return true;
+        }
+        // Held from looking at the files through writing them, so no other
+        // program writes in between (see `scriptorium_cli::SessionLock`).
+        let Some(_lock) = self.lock_session(wait) else { return false };
+        match self.disk_plan().1 {
+            Plan::Save => self.write_session(cx),
+            Plan::Reload => self.reload(cx),
+            // Finishing the rewrite saves again.
+            Plan::Wait => {}
+        }
+        true
+    }
+
+    fn write_session(&mut self, cx: &mut Context<Self>) {
+        let doc = self.doc(cx);
+        let len = doc.log().len();
+        let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log()).to_json();
+        match scriptorium_cli::write_atomic(&self.session_path, json.as_bytes()) {
+            Ok(()) => {
+                self.seen_session = Seen::wrote(&json);
+                self.synced = len;
+                self.attached_since_sync.clear();
+            }
+            Err(e) => {
+                self.say_error(format!("Couldn't save the session to {}: {e}", self.session_path.display()));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Take the script's session lock, waiting up to `wait`. None: another
+    /// program holds it. A lock that can't be taken for another reason (the
+    /// folder is read-only, the file system has no locks) is logged and the
+    /// app goes on unlocked, as it did before there was a lock.
+    fn lock_session(&self, wait: Duration) -> Option<Option<scriptorium_cli::SessionLock>> {
+        let at = scriptorium_cli::SessionLock::path_for(&self.script_path);
+        match scriptorium_cli::SessionLock::acquire(&at, wait) {
+            Ok(lock) => Some(Some(lock)),
+            Err(e) if e == scriptorium_cli::fsio::BUSY => None,
+            Err(e) => {
+                crate::log::warn(&format!("couldn't lock the session ({e}); going on without the lock"));
+                Some(None)
+            }
+        }
+    }
+
+    /// Compare the session file and each review file with what the app
+    /// holds: whether the session file changed, and what to do.
+    fn disk_plan(&mut self) -> (bool, Plan) {
+        let path = &self.session_path;
+        let session = sessionfile::check(&self.seen_session, modified(path), || std::fs::read_to_string(path).ok());
+        if let Disk::Touched(seen) = &session {
+            self.seen_session = seen.clone();
+        }
+        let reviews_changed = self.session.reviews.iter().any(|r| {
+            let at = sessionfile::resolve_path(&self.dir, &r.path);
+            sessionfile::review_changed(r.text(), std::fs::read_to_string(at).ok().as_deref())
+        });
+        (session == Disk::Changed, disk::plan(&session, reviews_changed, self.rewriting.is_some()))
+    }
+
+    /// Every so often: pick up what another program wrote, so a suggestion an
+    /// agent adds shows up without waiting for the next edit here. While the
+    /// session file can't be used, only a new version of it (or its removal)
+    /// is worth another look.
+    fn watch_files(&mut self, cx: &mut Context<Self>) {
+        // Another program is writing: look again next time.
+        let Some(_lock) = self.lock_session(Duration::ZERO) else { return };
+        if self.stuck.is_some() && !self.session_path.exists() {
+            crate::log::info(&format!("{} was removed; saving again", self.session_path.display()));
+            self.stuck = None;
+            self.write_session(cx);
+            cx.notify();
+            return;
+        }
+        let (session_changed, plan) = self.disk_plan();
+        if plan == Plan::Reload && (self.stuck.is_none() || session_changed) {
+            self.reload(cx);
+        }
+    }
+
+    /// Resume again from the files on disk (the script itself is the one
+    /// opened: neither the app nor the CLI writes it), put the app's unsaved
+    /// events back on top (see `sessionfile::with_unsaved`), keep the view
+    /// where it was, and say what changed. The undo history is the session
+    /// file's, so undo can take back the other program's steps too, in order,
+    /// as the CLI's `undo` does. Work that couldn't be put back is named in
+    /// the notice and the log, and the app's whole session as it was is
+    /// written aside. Call it holding the session lock (it writes the merge).
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        let old_doc = self.doc(cx).clone();
+        let (opened, seen, notes) = resume_from_disk(&self.script_path, &self.raw, &self.fdx, &self.session_path, &[]);
+        if let Resumed::Discarded(why) = &opened.how {
+            if self.stuck.is_none() {
+                crate::log::warn(&format!(
+                    "session {} changed on disk and can't be used: {why}",
+                    self.session_path.display()
+                ));
+            }
+            self.stuck = Some(why.clone());
+            // Look again only when it changes again.
+            self.seen_session = seen;
+            cx.notify();
+            return;
+        }
+        if self.stuck.take().is_some() {
+            crate::log::info(&format!("{} is usable again", self.session_path.display()));
+        }
+        // Only what the file still holds of the app's log is synced: a program
+        // that read the file before the app's last save and wrote after it
+        // dropped the app's newest events, which are then unsaved work again.
+        let synced = sessionfile::still_synced(self.synced, old_doc.log(), opened.doc.log());
+        if synced < self.synced.min(old_doc.log().len()) {
+            crate::log::warn(&format!(
+                "another program wrote {} without {} of the app's saved changes; putting them back",
+                self.session_path.display(),
+                self.synced.min(old_doc.log().len()) - synced
+            ));
+        }
+        let (start, unsaved) = match sessionfile::rebuild(&old_doc, synced) {
+            Ok(d) => (d, &old_doc.log()[synced..]),
+            Err(e) => {
+                // Can't happen for the app's own log; if it does, keep the work aside.
+                crate::log::error(&format!("couldn't rebuild the session at event {synced}: {e}"));
+                self.set_aside(&old_doc, "couldn't be put back after a reload", true);
+                (old_doc.clone(), &[][..])
+            }
+        };
+        // Where the view was, by review id and file entry (both survive a reload).
+        let at = |session: &Session, r: usize, i: Option<usize>| {
+            (session.reviews[r].id.clone(), i.map(|i| session.item(r, i).entry))
+        };
+        let was: Vec<(String, Option<usize>)> =
+            (0..self.session.reviews.len()).map(|r| at(&self.session, r, self.cur[r])).collect();
+        let view_id = self.review().map(|r| self.session.reviews[r].id.clone());
+        let was_current = self.current().map(|(r, i)| at(&self.session, r, Some(i)));
+
+        let sessionfile::ResumedSession { mut session, doc: reloaded, base, notes: more, .. } = opened;
+        let new_synced = reloaded.log().len();
+        let replayed = sessionfile::with_unsaved(start.clone(), unsaved, reloaded.clone());
+        let mut notes: Vec<String> = notes.into_iter().chain(more).collect();
+        // Reviews attached here since the last save stay attached (their
+        // saved decisions are among the unsaved events just replayed); any
+        // other review the session file no longer lists was detached there.
+        let script = self.fdx.to_script();
+        let script_name = file_name(&self.script_path);
+        let mut still = vec![];
+        for p in std::mem::take(&mut self.attached_since_sync) {
+            match read_review(&p, &self.dir) {
+                Ok(src) => {
+                    let fdx = &self.fdx;
+                    let review = Review::open_live(
+                        src.name,
+                        &src.text,
+                        &script,
+                        &replayed.doc,
+                        |k| fdx.is_caps(k.name()),
+                        &script_name,
+                    )
+                    .with_path(src.path);
+                    // Already attached by the other program: nothing to keep.
+                    if session.add(review).is_ok() {
+                        still.push(p);
+                    }
+                }
+                Err(e) => notes.push(format!("{e}. It was taken off this script's reviews.")),
+            }
+        }
+        self.attached_since_sync = still;
+
+        let mut summary = disk::summarize(&self.session, &start, &session, &reloaded);
+        summary.kept = count_changes(&session, &replayed.kept);
+        summary.lost = self.describe_lost(&session, &replayed.doc, &replayed.lost);
+        notes.retain(|n| self.shown_notes.insert(n.clone()));
+        summary.notes = notes;
+        let lost = !replayed.lost.is_empty();
+        if lost {
+            for c in &replayed.lost {
+                match c {
+                    Change::Para(id, text) => crate::log::warn(&format!(
+                        "reload: your change to paragraph {} clashed with another program's and wasn't applied. Your text: {text}",
+                        id.0
+                    )),
+                    Change::Meta(key) => crate::log::warn(&format!(
+                        "reload: your decision {key} clashed with another program's and wasn't applied"
+                    )),
+                }
+            }
+            self.set_aside(&old_doc, "clashed with another program's changes", false);
+        }
+
+        let hi = self.hi;
+        self.session = Rc::new(session);
+        self.base = base;
+        self.seen_session = seen;
+        self.synced = new_synced;
+        self.rewriting = None;
+        let doc = replayed.doc;
+        self.editor.update(cx, |e, cx| {
+            e.run(cx, |d, sel| {
+                *d = doc;
+                Ok(d.clamp_selection(sel))
+            })
+        });
+        self.cur = self
+            .session
+            .reviews
+            .iter()
+            .map(|r| {
+                let (_, entry) = was.iter().find(|(id, _)| *id == r.id)?;
+                r.items.iter().position(|it| Some(it.entry) == *entry)
+            })
+            .collect();
+        self.view = view_id
+            .and_then(|id| self.session.reviews.iter().position(|r| r.id == id))
+            .map_or(View::Script, View::Review);
+        self.build_rows(cx);
+        if let Some(r) = self.review()
+            && self.cur[r].is_none()
+        {
+            self.cur[r] = self.session.next_pending(self.doc(cx), r, None);
+        }
+        // The highlighted option stays if the card shows the same suggestion.
+        let same = self.current().map(|(r, i)| at(&self.session, r, Some(i))) == was_current && was_current.is_some();
+        self.hi = match self.current() {
+            Some((r, i)) if same => hi.min(self.session.item(r, i).options.len().saturating_sub(1)),
+            _ => 0,
+        };
+
+        crate::log::info(&format!(
+            "reloaded {}: {}",
+            self.session_path.display(),
+            summary.render().unwrap_or_default()
+        ));
+        self.say_reloaded(summary);
+        // The kept changes (and reviews attached here) aren't on disk yet.
+        if self.doc(cx).log().len() > new_synced || !self.attached_since_sync.is_empty() {
+            self.write_session(cx);
+        }
+        self.refresh(cx);
+    }
+
+    /// The writer's changes a reload couldn't apply, for the notice: the text
+    /// of each line, or which decision for a decision alone.
+    fn describe_lost(&self, session: &Session, doc: &Document, lost: &[Change]) -> Vec<String> {
+        let paras: HashSet<ParaId> =
+            lost.iter().filter_map(|c| if let Change::Para(id, _) = c { Some(*id) } else { None }).collect();
+        lost.iter()
+            .filter_map(|c| match c {
+                Change::Para(_, text) => Some(text.clone()),
+                Change::Meta(key) => {
+                    let (r, i) = item_with_key(session, key)?;
+                    let item = session.item(r, i);
+                    (!paras.contains(&item.para)).then(|| {
+                        let n = item_numbers(doc, &session.reviews[r].items)[i];
+                        format!("your decision on {} #{n}", session.reviews[r].name)
+                    })
+                }
+            })
+            .collect()
     }
 
     pub fn apply_to_fdx(&mut self, _: &ApplyToFdx, _: &mut Window, cx: &mut Context<Self>) {
         self.commit_rewrite_quietly(cx);
         let out = output_path(&self.script_path);
-        let doc = self.doc(cx);
-        let len = doc.log().len();
-        self.notice = match self.fdx.write_script(doc.script()) {
-            Ok(raw) => match std::fs::write(&out, raw) {
+        let script = self.doc(cx).script().clone();
+        let said = match self.fdx.write_script(&script) {
+            Ok(raw) => match scriptorium_cli::write_atomic(&out, raw.as_bytes()) {
                 Ok(()) => {
-                    self.applied_at = Some(len);
-                    format!("Wrote {}. The original is untouched.", file_name(&out)).into()
+                    self.applied = Some(Rc::new(script));
+                    format!("Wrote {}. The original is untouched.", file_name(&out))
                 }
                 Err(e) => {
                     crate::log::error(&format!("writing {}: {e}", out.display()));
-                    format!("Couldn't write {}: {e}", out.display()).into()
+                    format!("Couldn't write {}: {e}", out.display())
                 }
             },
-            Err(e) => format!("Not written: {e}").into(),
+            Err(e) => format!("Not written: {e}"),
         };
+        self.say(said);
         self.save_session(cx);
         cx.notify();
     }
@@ -737,14 +1162,17 @@ impl ScriptView {
         if n == 0 {
             return;
         }
-        self.notice = "".into();
-        let i = match (self.cur[r], forward) {
+        self.say("");
+        // By script position (the numbers shown), not file order.
+        let order = in_script_order(self.doc(cx), &self.session.reviews[r].items);
+        let at = self.cur[r].and_then(|i| order.iter().position(|&o| o == i));
+        let k = match (at, forward) {
             (None, true) => 0,
             (None, false) => n - 1,
-            (Some(i), true) => (i + 1).min(n - 1),
-            (Some(i), false) => i.saturating_sub(1),
+            (Some(k), true) => (k + 1).min(n - 1),
+            (Some(k), false) => k.saturating_sub(1),
         };
-        self.go_to(i, window, cx);
+        self.go_to(order[k], window, cx);
     }
     fn on_next(&mut self, _: &NextChange, window: &mut Window, cx: &mut Context<Self>) {
         self.step(true, window, cx);
@@ -764,9 +1192,47 @@ impl ScriptView {
     fn on_prev_option(&mut self, _: &PrevOption, _: &mut Window, cx: &mut Context<Self>) {
         self.cycle_option(false, cx);
     }
+    /// What the next undo (or redo) would take back, for the notice: the
+    /// decisions it changes (whoever made them: undo is shared with the CLI
+    /// and agents), else how many lines. None if there's nothing to undo.
+    fn describe_step(&self, redo: bool, cx: &App) -> Option<String> {
+        let doc = self.doc(cx);
+        if !(if redo { doc.can_redo() } else { doc.can_undo() }) {
+            return None;
+        }
+        let verb = if redo { "Redid" } else { "Undid" };
+        let keys = doc.next_undo_meta_keys(redo);
+        let mut found: Vec<(usize, usize)> = vec![];
+        for key in keys {
+            if let Some(ri) = item_with_key(&self.session, key)
+                && !found.contains(&ri)
+            {
+                found.push(ri);
+            }
+        }
+        if !found.is_empty() {
+            let one_review = found.iter().all(|(r, _)| *r == found[0].0);
+            let names: Vec<String> = found
+                .iter()
+                .map(|&(r, i)| {
+                    let n = item_numbers(doc, &self.session.reviews[r].items)[i];
+                    if one_review && self.review() == Some(r) {
+                        format!("#{n}")
+                    } else {
+                        format!("{} #{n}", self.session.reviews[r].name)
+                    }
+                })
+                .collect();
+            return Some(format!("{verb} the decision on {}.", names.join(", ")));
+        }
+        let n = doc.next_undo_paras(redo).len();
+        Some(format!("{verb} an edit to {n} line{}.", if n == 1 { "" } else { "s" }))
+    }
+
     fn undo_redo(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.rewriting = None;
-        self.notice = "".into();
+        let said = self.describe_step(redo, cx);
+        self.say(said.unwrap_or_default());
         // The suggestion the undo will touch: by its decision, else by its paragraph.
         let target = self.review().and_then(|r| {
             let doc = self.doc(cx);
@@ -784,7 +1250,7 @@ impl ScriptView {
             })
         });
         if !did {
-            self.notice = if redo { "Nothing to redo." } else { "Nothing to undo." }.into();
+            self.say(if redo { "Nothing to redo." } else { "Nothing to undo." });
         }
         // Go to the suggestion the undo touched, as script-review does.
         if let (Some(r), Some(i)) = (self.review(), target) {
@@ -801,6 +1267,9 @@ impl ScriptView {
             self.undo_redo(redo, window, cx);
         } else {
             self.rewriting = None;
+            // Typing undoes quietly; a decision (maybe the CLI's) is named.
+            let said = self.describe_step(redo, cx).filter(|s| s.contains("decision"));
+            self.say(said.unwrap_or_default());
             self.editor.update(cx, |e, cx| {
                 e.run(cx, |doc, sel| Ok(if redo { doc.redo() } else { doc.undo() }.unwrap_or(sel)))
             });
@@ -1082,6 +1551,7 @@ impl ScriptView {
         let status = self.session.status(doc, r, i);
         let now = self.text_of(item.para, cx);
         let total = self.session.reviews[r].items.len();
+        let number = item_numbers(doc, &self.session.reviews[r].items)[i];
 
         body.push(
             div()
@@ -1091,7 +1561,7 @@ impl ScriptView {
                 .child(small(format!(
                     "{} · change {} of {total}",
                     if ctx.scene.is_empty() { "Before the first scene" } else { &ctx.scene },
-                    i + 1
+                    number
                 )))
                 .into_any_element(),
         );
@@ -1263,7 +1733,23 @@ impl ScriptView {
                 )
             }
         };
-        let right: SharedString = if self.notice.is_empty() { hints.into() } else { self.notice.clone() };
+        let said: Vec<&str> =
+            [self.error.as_ref(), self.notice.as_ref()].into_iter().filter(|s| !s.is_empty()).collect();
+        let right: SharedString = if said.is_empty() { hints.into() } else { said.join("  \u{b7}  ").into() };
+        // Not cleared by the writer's keys: it goes when the file is usable again.
+        let stuck = self.stuck.as_ref().map(|why| {
+            div()
+                .flex_none()
+                .px_2()
+                .rounded_sm()
+                .bg(WARN_SOFT)
+                .text_color(WARN)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(format!(
+                    "The session file was changed by another program and can't be read ({why}). Close the other program or move {} aside, then the app resumes saving.",
+                    file_name(&self.session_path)
+                ))
+        });
         div()
             .flex_none()
             .h(px(28.))
@@ -1277,13 +1763,49 @@ impl ScriptView {
             .text_size(px(12.))
             .text_color(INK_2)
             .child(left)
+            .children(stuck)
             .child(div().flex_1())
             .child(
                 div()
-                    .when(!self.notice.is_empty(), |d| d.text_color(INK).font_weight(FontWeight::SEMIBOLD))
+                    .when(!said.is_empty(), |d| d.text_color(INK).font_weight(FontWeight::SEMIBOLD))
+                    .when(!self.error.is_empty(), |d| d.text_color(WARN))
                     .child(right),
             )
     }
+}
+
+/// Indexes into `items` in script order (by their numbers).
+fn in_script_order(doc: &Document, items: &[scriptorium_review::Item]) -> Vec<usize> {
+    let numbers = item_numbers(doc, items);
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| numbers[i]);
+    order
+}
+
+/// The review and item whose decision is metadata `key`.
+fn item_with_key(session: &Session, key: &str) -> Option<(usize, usize)> {
+    session.reviews.iter().enumerate().find_map(|(r, review)| {
+        let prefix = format!("review/{}/", review.id);
+        let entry: usize = key.strip_prefix(&prefix)?.parse().ok()?;
+        review.items.iter().position(|it| it.entry == entry).map(|i| (r, i))
+    })
+}
+
+/// How many of the writer's changes `changes` are: a suggestion's line and
+/// its decision count once; another line counts once.
+fn count_changes(session: &Session, changes: &[Change]) -> usize {
+    let mut seen: HashSet<String> = HashSet::new();
+    for c in changes {
+        let id = match c {
+            Change::Meta(key) => match item_with_key(session, key) {
+                Some((r, i)) => format!("p{}", session.item(r, i).para.0),
+                None => format!("k{key}"),
+            },
+            Change::Para(p, _) => format!("p{}", p.0),
+        };
+        seen.insert(id);
+    }
+    seen.len()
 }
 
 fn mark_of(session: &Session, doc: &Document, r: usize, i: usize) -> Mark {
@@ -1505,26 +2027,5 @@ impl Render for ScriptView {
                     .children(card),
             )
             .child(self.render_status(cx))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_session_set_aside_never_overwrites_an_earlier_one() {
-        let dir = std::env::temp_dir().join(format!("scriptorium-aside-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let session = dir.join("film.scriptorium.json");
-        let first = aside_path(&session);
-        assert_eq!(file_name(&first), "film.scriptorium.json.old");
-        std::fs::write(&first, "earlier").unwrap();
-        let second = aside_path(&session);
-        assert_eq!(file_name(&second), "film.scriptorium.2.json.old");
-        std::fs::write(&second, "later").unwrap();
-        assert_eq!(file_name(&aside_path(&session)), "film.scriptorium.3.json.old");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

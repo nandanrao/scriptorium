@@ -103,7 +103,7 @@ fn attached_reviews_are_used_without_naming_them() {
 
     // Two attached: a command on one review has to say which.
     let (ok, text) = f.run(&["suggestions", "film.fdx"]);
-    assert!(!ok && text.contains("--review"), "{text}");
+    assert!(!ok && text.contains("name one with review"), "{text}");
     f.ok(&["decide", "film.fdx", "--review", "b.review", "1", "keep"]);
     assert!(f.ok(&["reviews", "film.fdx"]).contains("notes/b.review.txt  1 of 1 decided"));
 
@@ -203,6 +203,8 @@ fn suggest_matches_and_numbers_against_the_live_document() {
 }
 
 /// Every file under `dir` with its contents, to show nothing was written.
+/// The session lock file is left out: a command that may write creates it
+/// (empty) before finding it has nothing to write.
 fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
     let mut out = vec![];
     let mut stack = vec![dir.to_path_buf()];
@@ -211,6 +213,8 @@ fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
             let p = e.unwrap().path();
             if p.is_dir() {
                 stack.push(p);
+            } else if p.to_string_lossy().ends_with(".scriptorium.lock") {
+                continue;
             } else {
                 let modified = std::fs::metadata(&p).unwrap().modified().unwrap();
                 out.push((p.clone(), std::fs::read(&p).unwrap(), modified));
@@ -230,7 +234,7 @@ fn tool_subcommand() {
     // No review attached and none named: the CLI has no review of its own.
     let args = r#"{"paragraph_id": 1, "options": ["Laura grins."], "why": "livelier"}"#;
     let (ok, text) = f.run(&["tool", "film.fdx", "suggest_change", args]);
-    assert!(!ok && text.contains("give --review-file"), "{text}");
+    assert!(!ok && text.contains("give review_file"), "{text}");
     assert!(!f.path("film.scriptorium.json").exists());
 
     // Into a new review file: created with an Id, attached.
@@ -415,4 +419,62 @@ fn tool_runs_from_the_library() {
     assert!(std::fs::read_to_string(&review).unwrap().contains("PARA: 1"));
     let err = scriptorium_cli::tool(&script, "no_such_tool", &serde_json::json!({}), None, &mut notes).unwrap_err();
     assert!(err.contains("unknown tool"), "{err}");
+}
+
+/// Concurrent commands each decide a different suggestion: the session lock
+/// makes them take turns, so every decision is in the session afterwards
+/// (without it, one writer saved over another's decision about half the time).
+#[test]
+fn concurrent_decides_all_land() {
+    const N: usize = 6;
+    let f = Folder::new("concurrent");
+    let mut script = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n<FinalDraft DocumentType=\"Script\" Template=\"No\" Version=\"5\">\n  <Content>\n",
+    );
+    let mut review = String::from("SCRIPT REVIEW v1\nScript: many.fdx\n\n");
+    for k in 0..N {
+        script +=
+            &format!("    <Paragraph Type=\"Action\">\n      <Text>Line number {k} here.</Text>\n    </Paragraph>\n");
+        review += &format!("---\nBEFORE: Line number {k} here.\nAFTER: Line number {k} changed.\n");
+    }
+    script += "  </Content>\n</FinalDraft>\n";
+    std::fs::write(f.path("many.fdx"), script).unwrap();
+    std::fs::write(f.path("many.review.txt"), review).unwrap();
+    f.ok(&["reviews", "many.fdx", "add", "many.review.txt"]);
+    // From threads through the library, as the MCP server calls it.
+    let script = f.path("many.fdx").to_string_lossy().into_owned();
+    std::thread::scope(|s| {
+        for k in 0..N {
+            let script = &script;
+            s.spawn(move || {
+                let n = scriptorium_cli::SuggestionRef::Entry(k);
+                let choice = scriptorium_cli::Choice::Keep;
+                scriptorium_cli::commands::decide(script, None, n, choice, &mut vec![]).unwrap();
+            });
+        }
+    });
+    let list: serde_json::Value = serde_json::from_str(&f.ok(&["suggestions", "many.fdx", "--json"])).unwrap();
+    assert!(list.as_array().unwrap().iter().all(|s| s["status"] == "kept"), "{list}");
+    // Alternately accept and undecide every suggestion, all at once.
+    for round in 0..20 {
+        let (choice, status) = if round % 2 == 0 { ("accept", "accepted 1") } else { ("undecide", "pending") };
+        let children: Vec<_> = (0..N)
+            .map(|k| {
+                Command::new(env!("CARGO_BIN_EXE_scriptorium"))
+                    .current_dir(&f.0)
+                    .args(["decide", "many.fdx", &format!("e{k}"), choice])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for c in children {
+            let out = c.wait_with_output().unwrap();
+            assert!(out.status.success(), "round {round}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        let list: serde_json::Value = serde_json::from_str(&f.ok(&["suggestions", "many.fdx", "--json"])).unwrap();
+        let statuses: Vec<&str> = list.as_array().unwrap().iter().map(|s| s["status"].as_str().unwrap()).collect();
+        assert_eq!(statuses, [status; N], "round {round}: a decision was lost");
+    }
 }

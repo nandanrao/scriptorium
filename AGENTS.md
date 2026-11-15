@@ -64,7 +64,9 @@ GPL-3.0 — read them for ideas, never copy code from them.
    subcommand so agents can use it and it can be tested without the GUI. The
    app and the CLI go through the same library calls and the same session file
    (`<script>.scriptorium.json`, which also lists the review files attached to
-   the script); never give the app a code path the CLI lacks.
+   the script); never give the app a code path the CLI lacks. Anything that
+   writes the session or a review file holds `scriptorium_cli::SessionLock`
+   (`<script>.scriptorium.lock`) from reading the files to writing them.
 
 ## How agent sessions work here (required)
 

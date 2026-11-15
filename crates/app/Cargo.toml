@@ -15,6 +15,10 @@ path = "src/main.rs"
 scriptorium-core.workspace = true
 scriptorium-fdx.workspace = true
 scriptorium-review.workspace = true
+# The shared shell: atomic writes, the same as the CLI and MCP server.
+scriptorium-cli.workspace = true
+# Suggestion numbers by script position, as the CLI and tools show them.
+scriptorium-tools.workspace = true
 # GPUI: crates.io snapshot gpui-pre (same as gpui-kit).
 gpui = { package = "gpui-pre", version = "=0.3.12" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["wayland", "x11", "font-kit"] }

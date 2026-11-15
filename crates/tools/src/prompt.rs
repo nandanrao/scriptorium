@@ -21,8 +21,8 @@ How to work:
   what suggest_change takes. Give a scene number, part of its heading, or the id of any paragraph in it. \
   Find lines across the script with list_paragraphs, filtered by scene, speaker, element type or text. For an \
   overview, script_info is cheap.
-- Use read_script only for whole-script passes: it returns the entire script, which is long, and the app may \
-  ask the writer before sending it. Read what the task needs.
+- Use read_script only for whole-script passes: it returns the script in long parts (each part's first line \
+  says how to read the next), and the app may ask the writer before sending it. Read what the task needs.
 - Propose one line per suggestion, with one to three options for the whole line (best first) and a short \
   reason. Change what the writer asked about and nothing else; keep their voice, dialect and formatting. For a \
   pass over many lines, send them together with suggest_changes; it reports which were added and which failed.

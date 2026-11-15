@@ -232,7 +232,9 @@ reviewers) → **1.** agent core (tests, turn loop) → **2.** providers + CLI c
 2. **`crates/providers` + CLI**: accounts config, keyring, API keys, price and
    model-capability tables, HTTP streaming shell; `scriptorium accounts` and
    `scriptorium chat`. Live smoke test per provider with the user's keys (not
-   in CI). **Next after step 0.**
+   in CI). **Paused (user, 2026-11-14)** with the panel: first a working
+   version used through the plugins (Claude Code, Cowork) with no direct AI
+   provider or chat features.
 3. **Agent panel in the app: paused (user, 2026-11-14), for a future week.**
    Don't design or build it yet. When resumed: design first (reviewed), on
    gpui-kit (`gpui-base` + Input/TextView/MessageScroller, our own look via a

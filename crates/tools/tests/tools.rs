@@ -337,6 +337,66 @@ fn read_script_is_every_scene() {
     );
 }
 
+/// A script of `scenes` scenes, each a heading and `lines` long action lines,
+/// after one line before the first heading.
+fn big_script(scenes: usize, lines: usize) -> Fixture {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n<FinalDraft DocumentType=\"Script\" Template=\"No\" Version=\"5\">\n<Content>\n<Paragraph Type=\"Action\"><Text>FADE IN:</Text></Paragraph>\n",
+    );
+    for s in 1..=scenes {
+        xml.push_str(&format!("<Paragraph Type=\"Scene Heading\"><Text>INT. ROOM {s} - DAY</Text></Paragraph>\n"));
+        for l in 0..lines {
+            let text = format!("Scene {s} line {l}: {}", "the rain keeps falling on the long road home. ".repeat(4));
+            xml.push_str(&format!("<Paragraph Type=\"Action\"><Text>{text}</Text></Paragraph>\n"));
+        }
+    }
+    xml.push_str("</Content>\n</FinalDraft>\n");
+    let fdx = FdxFile::parse(xml).unwrap();
+    let doc = Document::new(fdx.to_script());
+    Fixture { fdx, doc, session: Session::default(), default_review: None }
+}
+
+#[test]
+fn read_script_pages_a_long_script() {
+    // ≈200 scenes of ≈1k tokens: far over the default budget.
+    let f = big_script(200, 18);
+    let (_, total) = script_size(&f.doc, &f.is_caps());
+    assert!(total > 150_000, "{total}");
+    let mut from = 1;
+    let mut seen = vec![];
+    let mut parts = 0;
+    loop {
+        let args = if from == 1 { json!({}) } else { json!({ "from_scene": from }) };
+        let part = f.text("read_script", args);
+        parts += 1;
+        let (head, body) = part.split_once("\n\n").unwrap();
+        assert!(head.starts_with("film.fdx: 200 scenes, "), "{head}");
+        assert!(body.chars().count().div_ceil(4) <= scriptorium_tools::READ_BUDGET, "part {parts} too long");
+        assert_eq!(body.contains("FADE IN:"), from == 1, "the lines before scene 1 come with the first part");
+        for line in body.lines().filter(|l| l.starts_with("SCENE ")) {
+            seen.push(line.split_whitespace().nth(1).unwrap().parse::<usize>().unwrap());
+        }
+        let last = *seen.last().unwrap();
+        assert!(head.contains(&format!("This part: scenes {from}–{last} of 200")), "{head}");
+        if head.contains("This part ends the script.") {
+            break;
+        }
+        assert!(head.contains(&format!("call read_script with from_scene {}", last + 1)), "{head}");
+        from = last + 1;
+    }
+    assert_eq!(seen, (1..=200).collect::<Vec<_>>(), "every scene once, in order");
+    assert!(parts >= 8, "{parts}");
+    // A small budget still gives a whole scene; bad scene numbers are refused.
+    let one = f.text("read_script", json!({ "from_scene": 5, "max_tokens": 1 }));
+    assert!(one.contains("This part: scene 5 of 200"), "{one}");
+    assert!(one.contains("from_scene 6"), "{one}");
+    assert_eq!(f.err("read_script", json!({ "from_scene": 201 })), "no scene 201 (1 to 200)");
+    assert_eq!(f.err("read_script", json!({ "from_scene": 0 })), "no scene 0 (1 to 200)");
+    // A short script is still one part with the plain header.
+    let small = Fixture::new();
+    assert!(!small.text("read_script", json!({ "max_tokens": 1000 })).contains("This part"));
+}
+
 #[test]
 fn list_reviews_with_and_without_summary() {
     let f = Fixture::new();
