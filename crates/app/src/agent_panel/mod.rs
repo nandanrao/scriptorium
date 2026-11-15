@@ -332,6 +332,7 @@ impl AgentPanel {
     /// shown as a line and the next Enter accepts it; a whole-script question
     /// is answered by Enter (yes) or Stop.
     fn on_send(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
+        crate::log::info("agent panel: send");
         if self.chat.read(cx).question().is_some() {
             self.chat.update(cx, |c, cx| c.answer(true, cx));
             return;
@@ -343,6 +344,9 @@ impl AgentPanel {
             crate::log::warn(&format!("couldn't remember the disclosure: {e}"));
         }
         let sent = self.chat.update(cx, |c, cx| c.send(&text, cx));
+        if let Err(e) = &sent {
+            crate::log::info(&format!("agent panel: not sent: {e:?}"));
+        }
         match sent {
             Ok(()) | Err(SendError::Blank) => {}
             Err(SendError::Disclose { key, text }) => {
