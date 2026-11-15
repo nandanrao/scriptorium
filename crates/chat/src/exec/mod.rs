@@ -37,12 +37,12 @@ use std::path::{Path, PathBuf};
 
 use scriptorium_agent::file::ThreadFile;
 use scriptorium_agent::{ToolCall, ToolResult};
-use scriptorium_core::{Document, ElementKind};
+use scriptorium_core::{Document, ElementKind, ParaId};
 use scriptorium_providers::Price;
 use scriptorium_review::file::{FORMAT_HEADER, insert_id};
 use scriptorium_review::sessionfile::{resolve_path, stored_path};
 use scriptorium_review::{ReviewFile, Session};
-use scriptorium_tools::{Append, Applied, Ctx, Outcome, Target};
+use scriptorium_tools::{Append, Applied, Ctx, Failed, Outcome, Target};
 
 use crate::naming;
 
@@ -51,6 +51,10 @@ pub use file::{FileScript, FileStore};
 /// The tool result when the script's files stay busy (another program holds
 /// the session lock).
 pub const BUSY: &str = "The script's files are busy in another program; try again.";
+
+/// The reason a proposal on the line the writer is rewriting is refused
+/// ([`ReviewStore::editing_para`]).
+pub const EDITING_LINE: &str = "The writer is editing this line right now; propose it later.";
 
 /// Why a store couldn't do what was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +117,13 @@ pub trait ReviewStore {
     /// call, so all three can be borrowed together).
     #[allow(clippy::type_complexity)]
     fn session_mut(&mut self) -> (&mut Session, &Document, &dyn Fn(&ElementKind) -> bool);
+
+    /// The line the writer is rewriting right now, if any (the app's): a
+    /// proposal touching it is refused with [`EDITING_LINE`]; the rest of a
+    /// batch goes on. The CLI has none.
+    fn editing_para(&self) -> Option<ParaId> {
+        None
+    }
 
     /// The file at `path` as it is on disk now, `None` if it can't be read.
     fn disk_text(&self, path: &Path) -> Option<String> {
@@ -236,9 +247,12 @@ const NAME_TRIES: usize = 100;
 pub fn apply_append(
     store: &mut dyn ReviewStore,
     file: &mut ThreadFile,
-    append: Append,
+    mut append: Append,
 ) -> Result<Applied, ReviewError> {
     let (r, attached_here) = resolve(store, file, &append.target)?;
+    if let Some(editing) = store.editing_para() {
+        refuse_editing(&mut append, editing);
+    }
     let result = {
         let (session, doc, caps) = store.session_mut();
         scriptorium_tools::apply(session, doc, r, append, caps)
@@ -263,6 +277,18 @@ pub fn apply_append(
             Err(ReviewError::Failed(e.to_string()))
         }
     }
+}
+
+/// Moves the proposals that touch line `editing` to `append.failed`.
+fn refuse_editing(append: &mut Append, editing: ParaId) {
+    let (refused, kept): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut append.proposals).into_iter().partition(|p| p.entry.para.contains(&editing));
+    append.proposals = kept;
+    append.failed.extend(refused.into_iter().map(|p| Failed {
+        index: p.index,
+        paragraph_id: p.entry.para.first().map(|id| id.0),
+        error: EDITING_LINE.into(),
+    }));
 }
 
 /// The review `target` names, and whether it was attached by this call.

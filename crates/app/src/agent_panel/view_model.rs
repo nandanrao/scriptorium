@@ -261,6 +261,13 @@ impl Stream {
         self.failure = Some(Failure { text: error.to_string(), retryable });
     }
 
+    /// A failure told in words (the thread is busy elsewhere, the round
+    /// limit…): shown like [`Stream::fail`].
+    pub fn fail_with(&mut self, text: impl Into<String>, retryable: bool) {
+        self.clear();
+        self.failure = Some(Failure { text: text.into(), retryable });
+    }
+
     /// The writer pressed Stop: running rows read "Not run (stopped)" and a
     /// "Stopping…" line shows until the run reports (then [`Stream::clear`]).
     pub fn stop(&mut self) {

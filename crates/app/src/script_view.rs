@@ -1478,6 +1478,11 @@ impl ScriptView {
         }
     }
 
+    /// Whether the agent panel is showing.
+    pub(crate) fn agent_open(&self) -> bool {
+        self.agent_open
+    }
+
     fn set_agent_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.agent_open != open {
             crate::log::info(&format!("agent panel {}", if open { "open" } else { "closed" }));

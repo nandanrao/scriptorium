@@ -28,6 +28,8 @@
 
 pub mod accounts;
 pub mod composer;
+pub mod driver;
+mod live;
 pub mod messages;
 pub mod threads;
 mod view_model;
@@ -42,6 +44,7 @@ use gpui::{
 use crate::script_view::{RedoAny, ScriptView, UndoAny};
 use crate::theme::*;
 use composer::Composer;
+use driver::{Chat, ChatEvent, SendError, ViewOp};
 use messages::MessageView;
 use threads::ThreadList;
 
@@ -181,9 +184,8 @@ pub enum AgentPanelEvent {
     /// The header's ×: close the panel (focus goes back to the script if it
     /// was in the panel).
     Close,
-    /// A notice for the status bar, e.g. how a run ended while the panel was
-    /// closed.
-    #[allow(dead_code)] // The driver (U4).
+    /// A notice for the status bar: how a run ended, or that it needs the
+    /// writer, while the panel was closed.
     Say(SharedString),
 }
 
@@ -195,6 +197,12 @@ pub struct AgentPanel {
     threads: Entity<ThreadList>,
     messages: Entity<MessageView>,
     composer: Entity<Composer>,
+    /// The conversation and its runs (driver.rs).
+    chat: Entity<Chat>,
+    /// A disclosure shown in place of sending: the next Send accepts it.
+    /// (Stand-in until U6's disclosure card.)
+    disclosure: Option<String>,
+    _chat: [gpui::Subscription; 2],
 }
 
 impl EventEmitter<AgentPanelEvent> for AgentPanel {}
@@ -207,13 +215,58 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let chat = cx.new(|_| Chat::new(script.clone(), script_path.clone()));
+        let messages = cx.new(|cx| MessageView::new(script.clone(), window, cx));
+        let observe = cx.observe(&chat, |this: &mut Self, chat, cx| {
+            let (ops, extra) = chat.update(cx, |c, _| (c.take_view_ops(), extra_lines(c)));
+            this.messages.update(cx, |m, cx| {
+                apply_view_ops(m, ops, cx);
+                m.set_extra(extra, cx);
+            });
+        });
+        let events = cx.subscribe_in(&chat, window, Self::on_chat_event);
         Self {
             focus: cx.focus_handle(),
             script,
             script_path,
             threads: cx.new(|cx| ThreadList::new(window, cx)),
-            messages: cx.new(|cx| MessageView::new(window, cx)),
+            messages,
             composer: cx.new(|cx| Composer::new(window, cx)),
+            chat,
+            disclosure: None,
+            _chat: [observe, events],
+        }
+    }
+
+    /// The conversation and its runs: send, stop, retry, open a thread.
+    pub fn chat(&self) -> &Entity<Chat> {
+        &self.chat
+    }
+
+    /// Whether the panel is showing (it lives on while closed).
+    fn is_open(&self, cx: &App) -> bool {
+        self.script.upgrade().is_some_and(|v| v.read(cx).agent_open())
+    }
+
+    fn on_chat_event(&mut self, _: &Entity<Chat>, e: &ChatEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match e {
+            ChatEvent::MessageSaved => {
+                // Stand-in until U6: the draft goes once the message is saved.
+                let input = self.composer.read(cx).input().clone();
+                input.update(cx, |s, cx| s.set_value("", window, cx));
+            }
+            ChatEvent::Withdrawn(text) => {
+                let input = self.composer.read(cx).input().clone();
+                let text = text.clone();
+                input.update(cx, |s, cx| s.set_value(text, window, cx));
+            }
+            ChatEvent::Asking if !self.is_open(cx) => {
+                cx.emit(AgentPanelEvent::Say(say_closed("The agent is waiting for you.")));
+            }
+            ChatEvent::Ended { say: Some(text) } if !self.is_open(cx) => {
+                cx.emit(AgentPanelEvent::Say(say_closed(text)));
+            }
+            _ => {}
         }
     }
 
@@ -272,18 +325,45 @@ impl AgentPanel {
         cx.emit(AgentPanelEvent::ReturnFocus);
     }
 
+    /// Enter: send the draft. A stand-in for U6's composer: a disclosure is
+    /// shown as a line and the next Enter accepts it; a whole-script question
+    /// is answered by Enter (yes) or Stop.
     fn on_send(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
-        // The driver (U4) and composer (U6) send; until then the draft stays.
-        let len = self.composer.read(cx).text(cx).chars().count();
-        crate::log::info(&format!("agent panel: send ({len} chars; not wired yet)"));
+        if self.chat.read(cx).question().is_some() {
+            self.chat.update(cx, |c, cx| c.answer(true, cx));
+            return;
+        }
+        let text = self.composer.read(cx).text(cx);
+        if let Some(key) = self.disclosure.take()
+            && let Err(e) = self.chat.update(cx, |c, _| c.accept_disclosure(&key))
+        {
+            crate::log::warn(&format!("couldn't remember the disclosure: {e}"));
+        }
+        let sent = self.chat.update(cx, |c, cx| c.send(&text, cx));
+        match sent {
+            Ok(()) | Err(SendError::Blank) => {}
+            Err(SendError::Disclose { key, text }) => {
+                self.disclosure = Some(key);
+                self.chat.update(cx, |c, cx| c.notice(format!("{text} Press Enter to send."), cx));
+            }
+            Err(e) => self.chat.update(cx, |c, cx| c.notice(e.to_string(), cx)),
+        }
     }
 
-    fn on_stop(&mut self, _: &Stop, _: &mut Window, _: &mut Context<Self>) {
-        crate::log::info("agent panel: stop (no run)");
+    fn on_stop(&mut self, _: &Stop, _: &mut Window, cx: &mut Context<Self>) {
+        self.chat.update(cx, |c, cx| {
+            if c.question().is_some() && !c.is_running() {
+                c.answer(false, cx);
+            }
+            c.stop(cx);
+        });
     }
 
-    fn on_new_thread(&mut self, _: &NewThread, _: &mut Window, _: &mut Context<Self>) {
-        crate::log::info("agent panel: new thread (not wired yet)");
+    fn on_new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
+        self.disclosure = None;
+        if let Err(e) = self.chat.update(cx, |c, cx| c.new_thread(cx)) {
+            self.chat.update(cx, |c, cx| c.notice(e, cx));
+        }
     }
 
     /// Edit › Undo/Redo with the composer focused undo the composer's text,
@@ -364,6 +444,35 @@ impl Render for AgentPanel {
             .child(self.render_header(cx))
             .child(div().flex_1().min_h_0().child(self.messages.clone()))
             .child(self.composer.clone())
+    }
+}
+
+/// The status bar line for `text` while the panel is closed.
+fn say_closed(text: &str) -> SharedString {
+    format!("{text} {} to see.", crate::menus::shortcut("l")).into()
+}
+
+/// The driver's lines the message view shows after the rows (stand-in for
+/// U6's notices and question card).
+fn extra_lines(c: &Chat) -> Vec<String> {
+    let mut lines = c.notices().to_vec();
+    if let Some(q) = c.question() {
+        lines.push(format!("{} Enter: send · {}: not now", q.text(), crate::menus::shortcut(".")));
+    }
+    lines
+}
+
+/// The one adapter from the driver's [`ViewOp`]s to the message view's API.
+fn apply_view_ops(m: &mut MessageView, ops: Vec<ViewOp>, cx: &mut Context<MessageView>) {
+    for op in ops {
+        match op {
+            ViewOp::SetThread(t) => m.set_thread(t, cx),
+            ViewOp::PushTurn(t) => m.push_turn(t, cx),
+            ViewOp::StreamEvents(events) => m.stream_events(events, cx),
+            ViewOp::Stream(op) => m.update_stream(|s| op.apply(s), cx),
+            ViewOp::RunActive(active) => m.set_run_active(active, cx),
+            ViewOp::Review(r) => m.set_review(r, cx),
+        }
     }
 }
 

@@ -27,6 +27,8 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features =
 # events in, rows out, with the shared chat core's tool-row labels.
 scriptorium-agent.workspace = true
 scriptorium-chat.workspace = true
+# The run driver (agent_panel/driver.rs): transports, keys, accounts.
+scriptorium-providers.workspace = true
 serde_json.workspace = true
 # Unstyled behaviour layer of gpui-kit (Textarea, TextView markdown, Select,
 # Sheet); pins the same gpui-pre. Not gpui-component: we keep theme.rs's look.

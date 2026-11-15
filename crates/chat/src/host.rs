@@ -117,6 +117,11 @@ pub trait Ui {
     fn tool_finished(&mut self, _call: &ToolCall, _done: &exec::CallDone) {}
     /// Something to tell the writer (older tools, a review file left out…).
     fn notice(&mut self, _text: &str) {}
+    /// The thread was saved after a step: the writer's message pushed, a
+    /// reply pushed, a round's results pushed, a retry begun, the run over.
+    /// Not called after each tool call (results so far go to
+    /// [`Self::tool_finished`]). The app shows the thread from this.
+    fn saved(&mut self, _file: &ThreadFile) {}
     /// The first-use disclosure ([`disclosure_text`]): send (true) or not.
     /// The CLI: true with `--yes`, else asks on a terminal, else false.
     fn disclose(&mut self, text: &str) -> bool;
@@ -458,6 +463,7 @@ fn run_inner(
         Ok(())
     };
     save(&mut file)?;
+    ui.saved(&file);
 
     // 4. The loop.
     let ctx = RoundCtx {
@@ -502,8 +508,10 @@ fn run_inner(
         action = run.next(&mut file.thread, input);
         file.extra.remove(FINISHED_KEY);
         save(&mut file)?;
+        ui.saved(&file);
     };
     save(&mut file)?;
+    ui.saved(&file);
     Ok(Finished { thread: file, outcome, created })
 }
 
