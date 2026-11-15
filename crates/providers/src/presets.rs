@@ -35,13 +35,19 @@ pub const ANTHROPIC: Preset = Preset {
     keys_url: "https://platform.claude.com/settings/keys",
 };
 
+/// Only GPT-5.2 is suggested: starting with GPT-5.4, OpenAI's Chat
+/// Completions refuses tool calls unless `reasoning_effort` is `none`
+/// (GPT-6 Astra, GPT-6.1 Sol and GPT-6.1 Terra refuse them outright), and
+/// this preset speaks Chat Completions without sending `none`. GPT-5.2
+/// defaults to no reasoning and takes tools at any effort. `gpt-5` and
+/// `gpt-5-mini` shut down 2026-12-11.
 pub const OPENAI: Preset = Preset {
     id: "openai",
     name: "OpenAI",
     protocol: Protocol::OpenaiChat,
     base_url: "https://api.openai.com/v1",
-    default_model: "gpt-5",
-    models: &["gpt-5", "gpt-5-mini"],
+    default_model: "gpt-5.2",
+    models: &["gpt-5.2"],
     keys_url: "https://platform.openai.com/api-keys",
 };
 
@@ -51,7 +57,12 @@ pub const OPENROUTER: Preset = Preset {
     protocol: Protocol::OpenaiChat,
     base_url: "https://openrouter.ai/api/v1",
     default_model: "anthropic/claude-opus-5.5",
-    models: &["anthropic/claude-opus-5.5", "anthropic/claude-sonnet-5.5", "openai/gpt-5"],
+    models: &[
+        "anthropic/claude-opus-5.5",
+        "anthropic/claude-sonnet-5.5",
+        "anthropic/claude-haiku-5.5",
+        "anthropic/claude-fable-5.2",
+    ],
     keys_url: "https://openrouter.ai/keys",
 };
 

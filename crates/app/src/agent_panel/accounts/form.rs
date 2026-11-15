@@ -222,11 +222,11 @@ pub fn model_label(id: &str) -> String {
         "claude-sonnet-5-5" => "Claude Sonnet 5.5",
         "claude-haiku-5-5" => "Claude Haiku 5.5",
         "claude-fable-5-2" => "Claude Fable 5.2",
-        "gpt-5" => "GPT-5",
-        "gpt-5-mini" => "GPT-5 mini",
+        "gpt-5.2" => "GPT-5.2",
         "anthropic/claude-opus-5.5" => "Claude Opus 5.5",
         "anthropic/claude-sonnet-5.5" => "Claude Sonnet 5.5",
-        "openai/gpt-5" => "GPT-5",
+        "anthropic/claude-haiku-5.5" => "Claude Haiku 5.5",
+        "anthropic/claude-fable-5.2" => "Claude Fable 5.2",
         _ => return id.to_string(),
     };
     name.to_string()
@@ -392,7 +392,7 @@ mod tests {
     fn empty_model_falls_back_for_a_named_provider() {
         let mut f = Form::new(Kind::Openai);
         f.model = "  ".into();
-        assert_eq!(f.account(&AccountsFile::default(), None).unwrap().model.as_deref(), Some("gpt-5"));
+        assert_eq!(f.account(&AccountsFile::default(), None).unwrap().model.as_deref(), Some("gpt-5.2"));
         f.model = "gpt-9-custom".into();
         assert_eq!(f.account(&AccountsFile::default(), None).unwrap().model.as_deref(), Some("gpt-9-custom"));
     }

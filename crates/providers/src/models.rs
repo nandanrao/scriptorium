@@ -235,6 +235,16 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_presets_find_the_table() {
+        for id in crate::presets::OPENROUTER.models {
+            let m = find(id).unwrap_or_else(|| panic!("{id} has no table entry"));
+            assert!(anthropic_price(m.id).is_some(), "{id}");
+            assert_eq!(find(&format!("{id}:batch")).map(|b| b.id), Some(m.id), "{id}:batch");
+        }
+        assert_eq!(find("anthropic/claude-fable-5.2").unwrap().id, "claude-fable-5-2");
+    }
+
+    #[test]
     fn effort_is_lowered_to_what_the_model_takes() {
         let sonnet46 = capabilities("claude-sonnet-4-6").unwrap();
         assert_eq!(sonnet46.effort(Effort::XHigh), Some(Effort::High));
