@@ -13,6 +13,8 @@ use gpui::{
     PathPromptOptions, SharedString, Stateful, Subscription, Window, actions, deferred, div, prelude::*, px,
 };
 
+use crate::agent_panel::accounts::{AccountsSheet, Dismissed};
+use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
 use crate::menus::{self, Item};
 use crate::script_view::{
     ApplyToFdx, NextView, Opened, PrevView, RedoAny, SaveAndQuit, ScriptView, ShowReview1, ShowReview2, ShowReview3,
@@ -36,6 +38,8 @@ pub struct Workspace {
     /// Shown in the status bar when no script is open (otherwise the script
     /// view's status bar shows notices).
     notice: SharedString,
+    /// The AI accounts sheet while it's open, and what had focus before.
+    accounts: Option<(Entity<AccountsSheet>, Option<FocusHandle>, Subscription)>,
     _observe: Option<Subscription>,
 }
 
@@ -47,6 +51,7 @@ impl Workspace {
             menu: None,
             menu_focus: cx.focus_handle(),
             notice: "".into(),
+            accounts: None,
             _observe: None,
         };
         // Closing the window saves, like Quit.
@@ -216,6 +221,42 @@ impl Workspace {
         self.set_notice(format!("Scriptorium {} · log file: {log}", env!("CARGO_PKG_VERSION")), cx);
     }
 
+    // ---- the agent panel and AI accounts ---------------------------------------
+
+    fn on_toggle_agent(&mut self, _: &ToggleAgentPanel, window: &mut Window, cx: &mut Context<Self>) {
+        // Under the accounts sheet, keys stay with the sheet.
+        if self.accounts.is_some() {
+            return;
+        }
+        self.close_menu(window, cx);
+        if self.view.is_none() {
+            self.set_notice("Open a script to chat about it.", cx);
+            return;
+        }
+        self.with_view(cx, |v, cx| v.toggle_agent(window, cx));
+    }
+
+    /// The accounts are the user's, not the script's, so the sheet is drawn
+    /// here over the whole window and opens with no script too.
+    fn on_open_accounts(&mut self, _: &OpenAccounts, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        if self.accounts.is_some() {
+            return;
+        }
+        let back = window.focused(cx);
+        let sheet = cx.new(|cx| AccountsSheet::new(window, cx));
+        let sub = cx.subscribe_in(&sheet, window, |this, _, _: &Dismissed, window, cx| {
+            if let Some((_, back, _)) = this.accounts.take() {
+                window.focus(&back.unwrap_or_else(|| this.focus.clone()), cx);
+            }
+            cx.notify();
+        });
+        let into = sheet.focus_handle(cx);
+        window.focus(&into, cx);
+        self.accounts = Some((sheet, back, sub));
+        cx.notify();
+    }
+
     // ---- the Linux File dropdown ---------------------------------------------
 
     fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -228,6 +269,10 @@ impl Workspace {
         }
     }
 
+    /// Gives focus back to what had it when the menu opened. Menu items call
+    /// this before dispatching their action, and `dispatch_action` goes to the
+    /// element focused when it is called, so an item acts where the writer
+    /// was (Edit › Undo with the composer focused undoes the composer).
     fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(prev) = self.menu.take() {
             match prev {
@@ -333,6 +378,11 @@ impl Workspace {
             .when(show_file_button, |d| {
                 d.child(
                     toolbar_button("file-button", "File", self.menu.is_some())
+                        // Pressing here would focus the workspace (it tracks
+                        // focus) before the menu opens; keep the focus where
+                        // the writer was, so the menu can give it back and its
+                        // items act there (Edit › Undo in the composer).
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))),
                 )
             })
@@ -418,6 +468,7 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let menu = self.menu.is_some().then(|| self.render_menu(cx));
+        let accounts = self.accounts.as_ref().map(|(sheet, _, _)| sheet.clone());
         let body = match &self.view {
             Some(v) => div().flex_1().min_h_0().flex().flex_col().child(v.clone()),
             None => div().flex_1().min_h_0().flex().flex_col().child(self.render_empty(cx)).child(self.render_status()),
@@ -438,6 +489,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_apply))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_about))
+            .on_action(cx.listener(Self::on_toggle_agent))
+            .on_action(cx.listener(Self::on_open_accounts))
             .on_action(
                 cx.listener(|this, _: &UndoAny, window, cx| this.with_view(cx, |v, cx| v.undo_any(false, window, cx))),
             )
@@ -470,6 +523,7 @@ impl Render for Workspace {
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(ACCENT_SOFT))
             .child(self.render_toolbar(cx))
             .child(body)
+            .children(accounts)
             .children(menu)
     }
 }

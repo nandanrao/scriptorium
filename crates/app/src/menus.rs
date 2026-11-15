@@ -7,6 +7,7 @@
 
 use gpui::{Action, Menu, MenuItem};
 
+use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
 use crate::script_view::{ApplyToFdx, NextView, PrevView, RedoAny, SaveAndQuit, ShowScript, UndoAny};
 use crate::workspace::{About, AddReview, Open};
 
@@ -40,6 +41,8 @@ pub fn definition() -> Vec<MenuDef> {
             items: vec![
                 entry("About Scriptorium", || Box::new(About), None, false),
                 Item::Separator,
+                entry("AI accounts…", || Box::new(OpenAccounts), None, false),
+                Item::Separator,
                 entry("Quit Scriptorium", || Box::new(SaveAndQuit), Some("q"), false),
             ],
         },
@@ -65,17 +68,28 @@ pub fn definition() -> Vec<MenuDef> {
                 entry("Script", || Box::new(ShowScript), Some("0"), true),
                 entry("Next view", || Box::new(NextView), None, true),
                 entry("Previous view", || Box::new(PrevView), None, true),
+                Item::Separator,
+                entry("Agent panel", || Box::new(ToggleAgentPanel), Some("l"), true),
             ],
         },
     ]
 }
 
-/// The File dropdown drawn on Linux: the File menu, plus About and Quit
-/// (which live in the application menu on macOS).
+/// The File dropdown drawn on Linux: the File menu, Edit's Undo and Redo,
+/// the agent panel, then the application menu's items (About, AI accounts,
+/// Quit, which live in the application menu on macOS).
 pub fn file_dropdown() -> Vec<Item> {
     let mut defs = definition();
     let mut file = std::mem::take(&mut defs[1].items);
     let app = std::mem::take(&mut defs[0].items);
+    let edit = std::mem::take(&mut defs[2].items);
+    let panel = std::mem::take(&mut defs[3].items).into_iter().filter(|i| match i {
+        Item::Action(e) => e.name == "Agent panel",
+        Item::Separator => false,
+    });
+    file.push(Item::Separator);
+    file.extend(edit);
+    file.extend(panel);
     file.push(Item::Separator);
     file.extend(app.into_iter().filter(|i| matches!(i, Item::Action(_))));
     file
@@ -134,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn dropdown_has_file_items_then_quit() {
+    fn dropdown_has_file_edit_and_panel_items_then_quit() {
         let names: Vec<&str> = file_dropdown()
             .iter()
             .map(|i| match i {
@@ -142,6 +156,22 @@ mod tests {
                 Item::Separator => "-",
             })
             .collect();
-        assert_eq!(names, ["Open…", "Add review…", "-", "Write .fdx", "-", "About Scriptorium", "Quit Scriptorium"]);
+        assert_eq!(
+            names,
+            [
+                "Open…",
+                "Add review…",
+                "-",
+                "Write .fdx",
+                "-",
+                "Undo",
+                "Redo",
+                "Agent panel",
+                "-",
+                "About Scriptorium",
+                "AI accounts…",
+                "Quit Scriptorium"
+            ]
+        );
     }
 }
