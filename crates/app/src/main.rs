@@ -2,6 +2,7 @@
 //!
 //! Usage: `scriptorium-app [SCRIPT.fdx [REVIEW.txt ...]]`. See docs/PLAN.md.
 
+mod agent_panel;
 mod blocks;
 mod disk;
 mod editor;
@@ -11,7 +12,6 @@ mod log;
 mod menus;
 mod script_view;
 mod settings;
-mod spike_u0;
 mod theme;
 mod workspace;
 
@@ -133,6 +133,7 @@ fn bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-y", Redo, ctx),
         ]);
     }
+    b.extend(agent_panel::bindings());
     b
 }
 
@@ -155,22 +156,14 @@ fn main() {
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             log::warn(&format!("could not load Courier Prime: {e}"));
         }
-        // gpui-base first: it registers its `Input`, `Select`, `Sheet`... bindings,
-        // and ours, added after, win where both match at the same depth.
-        gpui_base::init(cx);
+        // gpui-base first (agent_panel::init calls gpui_base::init): it
+        // registers its `Input`, `Select`, `Sheet`... bindings, and ours,
+        // added after, win where both match at the same depth.
+        agent_panel::init(cx);
         cx.bind_keys(bindings());
-        let spike = std::env::var_os("SCRIPTORIUM_U0").is_some();
-        if spike {
-            cx.bind_keys(spike_u0::bindings());
-        }
         // With no window to handle it (all closed), Quit still quits.
         cx.on_action(|_: &SaveAndQuit, cx| cx.quit());
         cx.set_menus(menus::app_menus());
-        if spike {
-            spike_u0::open(cx);
-            cx.on_window_closed(|cx, _| cx.quit()).detach();
-            return;
-        }
         let bounds = Bounds::centered(None, size(px(1500.), px(1000.)), cx);
         let window = cx
             .open_window(
@@ -200,9 +193,27 @@ mod tests {
     /// The action `key` runs with focus in `focus` (inside the script view,
     /// inside the workspace), as GPUI's dispatcher resolves it.
     fn action_for(key: &'static str, focus: &str) -> Option<&'static str> {
-        let keymap = Keymap::new(bindings());
-        let stack: Vec<KeyContext> =
-            ["Workspace", "ScriptView", focus].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        action_in(key, &["Workspace", "ScriptView", focus])
+    }
+
+    /// The action `key` runs with focus at the end of `stack`, with
+    /// gpui-base's conflicting `Input` bindings registered first, as
+    /// `agent_panel::init` does before ours.
+    fn action_in(key: &'static str, stack: &[&str]) -> Option<&'static str> {
+        use gpui_base::input;
+        let mut all = vec![
+            // (Textarea binds Enter to its own action; any action stands in.)
+            KeyBinding::new("enter", input::MoveDown, Some("Input")),
+            KeyBinding::new("escape", input::Escape, Some("Input")),
+            KeyBinding::new("tab", input::IndentInline, Some("Input")),
+            KeyBinding::new("shift-tab", input::OutdentInline, Some("Input")),
+            KeyBinding::new(sec!("."), input::ToggleCodeActions, Some("Input")),
+            KeyBinding::new(sec!("z"), input::Undo, Some("Input")),
+            KeyBinding::new(sec!("f"), input::Search, Some("Input")),
+        ];
+        all.extend(bindings());
+        let keymap = Keymap::new(all);
+        let stack: Vec<KeyContext> = stack.iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         let (found, _) = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack);
         found.first().map(|b| b.action().name())
     }
@@ -232,5 +243,37 @@ mod tests {
         assert!(is("right", "ScriptEditor", &Right));
         // Ctrl+Enter on the card isn't Accept (it does nothing there).
         assert_eq!(action_for(commit, "Review"), None);
+    }
+
+    /// The agent panel's keys: Ctrl/Cmd+L everywhere; in the composer Enter
+    /// sends, Escape returns focus, Tab moves focus, Cmd/Ctrl+. stops (all
+    /// over gpui-base's `Input` keys), while Cmd/Ctrl+Z stays the composer's
+    /// own undo; the review card's single keys never reach the composer.
+    #[test]
+    fn agent_panel_keys() {
+        let composer = ["Workspace", "ScriptView", "AgentPanel", "AgentComposer", "Input"];
+        let panel = ["Workspace", "ScriptView", "AgentPanel"];
+        let name = |a: &dyn Action| Some(a.name());
+        for focus in ["ScriptEditor", "Review"] {
+            assert_eq!(action_for(sec!("l"), focus), name(&agent_panel::ToggleAgentPanel));
+        }
+        assert_eq!(action_in(sec!("l"), &composer), name(&agent_panel::ToggleAgentPanel));
+        assert_eq!(action_in("enter", &composer), name(&agent_panel::Send));
+        assert_eq!(action_in("escape", &composer), name(&agent_panel::ReturnFocus));
+        assert_eq!(action_in("tab", &composer), name(&agent_panel::FocusNext));
+        assert_eq!(action_in("shift-tab", &composer), name(&agent_panel::FocusPrev));
+        assert_eq!(action_in(sec!("."), &composer), name(&agent_panel::Stop));
+        assert_eq!(action_in(sec!("z"), &composer), name(&gpui_base::input::Undo));
+        // Disabled: gpui-base's search has no UI here.
+        assert_eq!(action_in(sec!("f"), &composer), None);
+        assert_eq!(action_in("a", &composer), None);
+        assert_eq!(action_in("escape", &panel), name(&agent_panel::ReturnFocus));
+        assert_eq!(action_in(sec!("n"), &panel), name(&agent_panel::NewThread));
+        if !cfg!(target_os = "macos") {
+            assert_eq!(action_in("ctrl-shift-z", &composer), name(&gpui_base::input::Redo));
+        }
+        // The card's and editor's keys are unchanged by the panel's.
+        assert!(is("escape", "ScriptEditor", &Escape));
+        assert!(is("tab", "Review", &NextOption));
     }
 }

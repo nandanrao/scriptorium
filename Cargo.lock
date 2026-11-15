@@ -4685,6 +4685,8 @@ dependencies = [
  "scriptorium-tools",
  "serde_json",
  "unicode-segmentation",
+ "wayland-client",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]
@@ -4695,8 +4697,6 @@ dependencies = [
  "scriptorium-fsio",
  "serde_json",
  "unicode-segmentation",
- "wayland-client",
- "wayland-protocols-wlr",
 ]
 
 [[package]]

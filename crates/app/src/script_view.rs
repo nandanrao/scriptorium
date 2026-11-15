@@ -31,6 +31,8 @@ use scriptorium_review::sessionfile::{self, Change, Disk, Resumed, Seen, Session
 use scriptorium_review::{Decision, LineChange, Refusal, Review, Session, Status};
 use scriptorium_tools::item_numbers;
 
+use crate::agent_panel::hooks::{AgentLease, AgentSnapshot, AgentStoreError};
+use crate::agent_panel::{self, AgentPanel, AgentPanelEvent};
 use crate::blocks::{self, CardLine, Side};
 use crate::disk::{self, Plan};
 use crate::editor::{Decor, EditorEvent, Mark, ScriptEditor, is_changed};
@@ -349,6 +351,10 @@ pub struct ScriptView {
     /// Another program wrote a session the app can't use (why): the app stops
     /// saving over it until the file is usable again (or removed).
     stuck: Option<String>,
+    /// The agent panel, once it has been opened (kept while closed, so a
+    /// draft or a run survives Ctrl+L), and whether it shows.
+    agent: Option<(Entity<AgentPanel>, Subscription)>,
+    agent_open: bool,
     /// Looks at the files every so often (see `crate::disk`).
     _watch: Task<()>,
     _subscription: Subscription,
@@ -412,12 +418,19 @@ impl ScriptView {
             synced,
             attached_since_sync: unsynced,
             stuck: None,
+            agent: None,
+            agent_open: false,
             _watch: watch,
             _subscription: subscription,
         };
         this.build_rows(cx);
         let first = if n > 0 { View::Review(0) } else { View::Script };
         this.set_view(first, window, cx);
+        // Open as the writer left it, without moving focus into it.
+        if crate::settings::agent_panel_open() {
+            this.agent_panel(window, cx);
+            this.agent_open = true;
+        }
         this
     }
 
@@ -743,14 +756,22 @@ impl ScriptView {
                 if let Some(i) = self.cur[r] {
                     self.show_item(r, i, cx);
                 }
-                window.focus(&self.focus, cx);
             }
-            View::Script => {
-                let focus = self.editor.read(cx).focus_handle().clone();
-                window.focus(&focus, cx);
-            }
+            View::Script => {}
         }
+        self.focus_main(window, cx);
         self.refresh(cx);
+    }
+
+    /// Focus the script: the card in a review view, else the editor (and the
+    /// editor while a line is being rewritten).
+    fn focus_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review().is_some() && self.rewriting.is_none() {
+            window.focus(&self.focus, cx);
+        } else {
+            let focus = self.editor.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+        }
     }
 
     /// Scroll the script and the queue to item `i`.
@@ -1098,16 +1119,23 @@ impl ScriptView {
     /// Compare the session file and each review file with what the app
     /// holds: whether the session file changed, and what to do.
     fn disk_plan(&mut self) -> (bool, Plan) {
-        let path = &self.session_path;
-        let session = sessionfile::check(&self.seen_session, modified(path), || std::fs::read_to_string(path).ok());
+        let (session, reviews_changed) = self.disk_check();
         if let Disk::Touched(seen) = &session {
             self.seen_session = seen.clone();
         }
+        (session == Disk::Changed, disk::plan(&session, reviews_changed, self.rewriting.is_some()))
+    }
+
+    /// The session file as against what the app last read or wrote, and
+    /// whether any attached review file differs from the text held for it.
+    fn disk_check(&self) -> (Disk, bool) {
+        let path = &self.session_path;
+        let session = sessionfile::check(&self.seen_session, modified(path), || std::fs::read_to_string(path).ok());
         let reviews_changed = self.session.reviews.iter().any(|r| {
             let at = sessionfile::resolve_path(&self.dir, &r.path);
             sessionfile::review_changed(r.text(), std::fs::read_to_string(at).ok().as_deref())
         });
-        (session == Disk::Changed, disk::plan(&session, reviews_changed, self.rewriting.is_some()))
+        (session, reviews_changed)
     }
 
     /// Every so often: pick up what another program wrote, so a suggestion an
@@ -1350,6 +1378,192 @@ impl ScriptView {
                 }
             })
             .collect()
+    }
+
+    // ---- the agent panel's hooks ---------------------------------------------
+    //
+    // The panel (agent_panel/) reaches the script only through these and the
+    // values in `agent_panel::hooks`. Never call them from inside an update of
+    // the panel that this view is also updating (GPUI panics on a double
+    // borrow): the driver updates one entity at a time.
+
+    /// The agent panel, made on first use.
+    fn agent_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<AgentPanel> {
+        if let Some((panel, _)) = &self.agent {
+            return panel.clone();
+        }
+        let panel = cx.new(|cx| AgentPanel::new(window, cx));
+        let sub = cx.subscribe_in(&panel, window, |this, _, e: &AgentPanelEvent, window, cx| match e {
+            AgentPanelEvent::ReturnFocus => this.focus_main(window, cx),
+        });
+        self.agent = Some((panel.clone(), sub));
+        panel
+    }
+
+    /// Ctrl/Cmd+L: closed, open it and focus the composer; open with focus
+    /// elsewhere, focus the composer; open with focus in it, close it and
+    /// focus the script. Remembered for next time.
+    pub fn toggle_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panel = self.agent_panel(window, cx);
+        if self.agent_open && panel.read(cx).has_focus(window, cx) {
+            self.agent_open = false;
+            self.focus_main(window, cx);
+        } else {
+            self.agent_open = true;
+            panel.update(cx, |p, cx| p.focus_composer(window, cx));
+        }
+        crate::settings::set_agent_panel_open(self.agent_open);
+        crate::log::info(&format!("agent panel {}", if self.agent_open { "open" } else { "closed" }));
+        cx.notify();
+    }
+
+    /// What a tool call reads: the live document and session, the script's
+    /// name and caps, the attached review whose id is `review_id` (the
+    /// thread's own), and the line being rewritten. None while another
+    /// program's changes are on disk and not yet loaded (the watcher loads
+    /// them within a second, or after a rewrite): ask again then.
+    #[allow(dead_code)] // The live store and the message view (U3, U5).
+    pub(crate) fn agent_ctx(&self, review_id: Option<&str>, cx: &App) -> Option<AgentSnapshot> {
+        let (session, reviews_changed) = self.disk_check();
+        if disk::plan(&session, reviews_changed, false) != Plan::Save {
+            return None;
+        }
+        Some(AgentSnapshot {
+            doc: self.doc(cx).clone(),
+            session: self.session.clone(),
+            script_name: file_name(&self.script_path),
+            fdx: self.fdx.clone(),
+            review: review_id.and_then(|id| self.session.reviews.iter().position(|r| r.id == id)),
+            rewriting: self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para),
+        })
+    }
+
+    /// Takes the session lock without waiting (Busy if another program holds
+    /// it: retry from the task, never wait on the UI thread), loads what other
+    /// programs wrote (Wait while a rewrite holds that off), and hands out the
+    /// attached review whose id is `id`. If it isn't attached, the file at
+    /// `path` is attached, created first with `create` if it doesn't exist
+    /// (the text of a new, empty review with `Id: <id>`). The attach is saved
+    /// by autosave; this never writes the session file. The lock is held by
+    /// the returned lease until [`Self::agent_write_review`] or its drop.
+    #[allow(dead_code)] // The live store and the message view (U3, U5).
+    pub(crate) fn agent_review(
+        &mut self,
+        id: &str,
+        path: &Path,
+        create: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Result<AgentLease, AgentStoreError> {
+        let lock = self.lock_session(Duration::ZERO).ok_or(AgentStoreError::Busy)?;
+        match self.disk_plan().1 {
+            Plan::Save => {}
+            Plan::Reload => self.reload(cx),
+            Plan::Wait => return Err(AgentStoreError::Wait),
+        }
+        let lease = |r| AgentLease { r, id: id.to_string(), lock };
+        if let Some(r) = self.session.reviews.iter().position(|r| r.id == id) {
+            return Ok(lease(r));
+        }
+        if !path.exists() {
+            let Some(text) = create else {
+                return Err(AgentStoreError::File(format!("{} doesn't exist.", path.display())));
+            };
+            scriptorium_fsio::write_atomic(path, text.as_bytes())
+                .map_err(|e| AgentStoreError::File(format!("Couldn't create {}: {e}", path.display())))?;
+        }
+        let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let source = read_review(&p, &self.dir).map_err(AgentStoreError::File)?;
+        let fdx = &self.fdx;
+        let review = Review::open_live(
+            source.name,
+            &source.text,
+            &fdx.to_script(),
+            self.doc(cx),
+            |k| fdx.is_caps(k.name()),
+            &file_name(&self.script_path),
+        )
+        .with_path(source.path);
+        if review.id != id {
+            return Err(AgentStoreError::File(format!(
+                "{} has the id {}, not {id}; it wasn't attached.",
+                file_name(&p),
+                review.id
+            )));
+        }
+        let restored = review.restored();
+        let r = Rc::make_mut(&mut self.session).add(review).map_err(AgentStoreError::File)?;
+        self.attached_since_sync.push(p);
+        if restored > 0 {
+            let session = self.session.clone();
+            self.editor.update(cx, |e, cx| {
+                e.run(cx, |doc, sel| {
+                    session.apply_saved(doc, r);
+                    Ok(doc.clamp_selection(sel))
+                })
+            });
+        }
+        let doc = self.doc(cx).clone();
+        Rc::make_mut(&mut self.session).note_removed_by(&doc);
+        self.build_rows(cx);
+        self.refresh(cx);
+        self.schedule_autosave(cx);
+        Ok(lease(r))
+    }
+
+    /// Still under the lease's lock: `review` is review `lease.r` as
+    /// `scriptorium_tools::apply` left it (on a copy of the session taken
+    /// from [`Self::agent_ctx`] in the same step, so the document hasn't
+    /// moved). Its text is written to its file, then it replaces the held
+    /// review (apply appends items at the end, so item indices held here stay
+    /// valid) and the sidebar and card refresh.
+    #[allow(dead_code)] // The live store and the message view (U3, U5).
+    pub(crate) fn agent_write_review(
+        &mut self,
+        lease: AgentLease,
+        review: Review,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let r = lease.r;
+        let held = self.session.reviews.get(r).map(|h| h.id.as_str());
+        if held != Some(lease.id.as_str()) || review.id != lease.id {
+            return Err("The script's reviews changed meanwhile; call the tool again.".into());
+        }
+        let at = sessionfile::resolve_path(&self.dir, &self.session.reviews[r].path);
+        scriptorium_fsio::write_atomic(&at, review.text().as_bytes())
+            .map_err(|e| format!("Couldn't write {}: {e}", at.display()))?;
+        let doc = self.doc(cx).clone();
+        let session = Rc::make_mut(&mut self.session);
+        session.reviews[r] = review;
+        session.note_removed_by(&doc);
+        self.build_rows(cx);
+        self.refresh(cx);
+        self.schedule_autosave(cx);
+        drop(lease);
+        Ok(())
+    }
+
+    /// The panel's "Proposed 8 changes → Dialogue pass" link: show review
+    /// `id` at suggestion number `n` (as `list_suggestions` numbers them) and
+    /// focus the card, so A/R/E work at once.
+    #[allow(dead_code)] // The live store and the message view (U3, U5).
+    pub(crate) fn show_suggestion(&mut self, id: &str, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = self.session.reviews.iter().position(|x| x.id == id) else {
+            self.say("That review isn't attached any more.");
+            cx.notify();
+            return;
+        };
+        let i = item_numbers(self.doc(cx), &self.session.reviews[r].items).iter().position(|&k| k == n);
+        if self.view != View::Review(r) {
+            self.set_view(View::Review(r), window, cx);
+        }
+        match i {
+            Some(i) => self.go_to(i, window, cx),
+            None => {
+                self.say(format!("{} has no suggestion #{n}.", self.session.reviews[r].name));
+                window.focus(&self.focus, cx);
+            }
+        }
+        cx.notify();
     }
 
     pub fn apply_to_fdx(&mut self, _: &ApplyToFdx, _: &mut Window, cx: &mut Context<Self>) {
@@ -1716,6 +1930,55 @@ impl ScriptView {
             .child(div().h(px(10.)))
             .child(section_label(&title))
             .child(list)
+    }
+
+    /// The sidebar collapsed (agent panel open in a narrow window): the views
+    /// as their Cmd/Ctrl+number shortcuts, a dot where suggestions are left.
+    fn render_rail(&self, cx: &mut Context<Self>) -> Div {
+        let doc = self.doc(cx);
+        let items: Vec<AnyElement> = self
+            .views()
+            .into_iter()
+            .enumerate()
+            .map(|(n, v)| {
+                let on = v == self.view;
+                let left = match v {
+                    View::Review(r) => self.session.progress(doc, r).pending,
+                    View::Script => 0,
+                };
+                div()
+                    .id(("rail", n))
+                    .relative()
+                    .size(px(32.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(INK_2)
+                    .hover(|s| s.bg(ACCENT_SOFT))
+                    .when(on, |d| d.bg(ACCENT_SOFT).text_color(ACCENT).font_weight(FontWeight::SEMIBOLD))
+                    .child(if n == 0 { "S".to_string() } else { n.to_string() })
+                    .when(left > 0, |d| {
+                        d.child(div().absolute().top(px(4.)).right(px(4.)).size(px(6.)).rounded_full().bg(ACCENT))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| this.set_view(v, window, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .flex_none()
+            .w(px(44.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .py_2()
+            .bg(SIDE)
+            .border_r_1()
+            .border_color(RULE)
+            .children(items)
     }
 
     fn render_card(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -2591,6 +2854,12 @@ impl Focusable for ScriptView {
 impl Render for ScriptView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let card = self.review().map(|_| self.render_card(window, cx));
+        let agent = self.agent.as_ref().filter(|_| self.agent_open).map(|(panel, _)| panel.clone());
+        let side = if agent_panel::sidebar_collapsed(agent.is_some(), window.viewport_size().width / px(1.)) {
+            self.render_rail(cx)
+        } else {
+            self.render_sidebar(cx)
+        };
         div()
             .key_context("ScriptView")
             .size_full()
@@ -2625,9 +2894,10 @@ impl Render for ScriptView {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.render_sidebar(cx))
+                    .child(side)
                     .child(div().flex_1().min_w_0().h_full().child(self.editor.clone()))
-                    .children(card),
+                    .children(card)
+                    .children(agent),
             )
             .child(self.render_status(cx))
     }

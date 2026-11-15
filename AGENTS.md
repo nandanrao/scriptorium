@@ -152,6 +152,7 @@ App layout: `main.rs` (arguments, key bindings, log + panic hook), `menus.rs`
 (the one menu definition: macOS menu bar, Linux File dropdown), `workspace.rs`
 (the window shell: toolbar, empty state, notices, pickers, drops),
 `script_view.rs` (one open script: sidebar, editor, review card, autosave),
+`agent_panel/` (the chat column: shell, key bindings, hooks into the script view),
 `editor.rs`, `elements.rs`, `layout.rs`, `theme.rs`, `log.rs`.
 
 ## Adding a file format

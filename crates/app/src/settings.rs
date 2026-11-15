@@ -1,17 +1,17 @@
 //! The few things the app remembers between runs, per user: which one-time
-//! notices the writer has already seen. A plain file, one notice name per
-//! line, so there's nothing to migrate.
+//! notices the writer has already seen (`notices-seen`, one notice name per
+//! line), and whether the agent panel was open (`agent-panel`: `open` or
+//! `closed`). Plain files, so there's nothing to migrate.
 //!
-//! macOS: `~/Library/Application Support/Scriptorium/notices-seen`.
-//! Elsewhere: `$XDG_CONFIG_HOME/scriptorium/notices-seen`
-//! (default `~/.config/scriptorium/notices-seen`).
+//! macOS: `~/Library/Application Support/Scriptorium/`.
+//! Elsewhere: `$XDG_CONFIG_HOME/scriptorium/` (default `~/.config/scriptorium/`).
 
 use std::path::PathBuf;
 
 /// "Enter now starts a new line" (the line-rewrite key moved to Cmd/Ctrl+Enter).
 pub const ENTER_SPLITS: &str = "enter-splits";
 
-fn path() -> Option<PathBuf> {
+fn dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
     let dir = if cfg!(target_os = "macos") {
         home?.join("Library/Application Support/Scriptorium")
@@ -21,7 +21,26 @@ fn path() -> Option<PathBuf> {
             None => home?.join(".config/scriptorium"),
         }
     };
-    Some(dir.join("notices-seen"))
+    Some(dir)
+}
+
+fn path() -> Option<PathBuf> {
+    Some(dir()?.join("notices-seen"))
+}
+
+/// Whether the agent panel was open when the writer last opened or closed it.
+pub fn agent_panel_open() -> bool {
+    dir().and_then(|d| std::fs::read_to_string(d.join("agent-panel")).ok()).is_some_and(|s| s.trim() == "open")
+}
+
+/// Remember whether the agent panel is open. Never fails (logged).
+pub fn set_agent_panel_open(open: bool) {
+    let Some(dir) = dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("agent-panel");
+    if scriptorium_fsio::write_atomic(&path, if open { "open\n" } else { "closed\n" }.as_bytes()).is_err() {
+        crate::log::warn(&format!("couldn't remember the agent panel in {}", path.display()));
+    }
 }
 
 fn contains(file: &str, name: &str) -> bool {
