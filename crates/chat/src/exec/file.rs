@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use scriptorium_core::{Document, ElementKind};
 use scriptorium_fsio::opened::Opened;
-use scriptorium_fsio::{LOCK_WAIT, LockError, SessionLock};
+use scriptorium_fsio::{LockError, SessionLock};
 use scriptorium_review::Session;
 
 use super::{ReviewError, ReviewStore, Script, create_new};
@@ -27,10 +27,13 @@ impl FileScript {
     pub fn new(script: &Path) -> Result<Self, String> {
         let canonical = script.canonicalize().map_err(|e| format!("{}: {e}", script.display()))?;
         let script = script.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", script.display()))?.to_string();
-        Ok(FileScript { script, canonical, lock_wait: LOCK_WAIT, notes: vec![] })
+        Ok(FileScript { script, canonical, lock_wait: Duration::ZERO, notes: vec![] })
     }
 
-    /// How long to wait for the session lock (default [`LOCK_WAIT`]).
+    /// How long each opening waits for the session lock. The default is not
+    /// at all: a busy lock comes back as [`ReviewError::Busy`] at once, and
+    /// [`crate::host::run`] tries the call again every
+    /// [`super::BUSY_RETRY`] for up to [`super::BUSY_FOR`].
     pub fn with_lock_wait(mut self, wait: Duration) -> Self {
         self.lock_wait = wait;
         self

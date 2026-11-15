@@ -294,6 +294,120 @@ fn whole_script_rule() {
 }
 
 #[test]
+fn a_crash_between_create_and_save_reattaches_by_id() {
+    let mut s = OneStore(Mem::new());
+    let mut file = thread("Dialogue pass");
+    call(&mut s, &mut file, suggest("a", 1, "Laura grins."));
+    // The file was created, but neither the thread nor the session was saved.
+    file.review_path = None;
+    file.review_id = None;
+    s.0.session = Session::new(vec![]);
+    let done = call(&mut s, &mut file, suggest("b", 3, "I am going to town tomorrow."));
+    assert!(!done.result.is_error, "{}", done.result.content);
+    assert_eq!(s.0.files.len(), 1, "{:?}", s.0.files.keys());
+    assert_eq!(file.review_path.as_deref(), Some("Dialogue pass.review.txt"));
+    let text = s.0.file("Dialogue pass.review.txt");
+    assert!(text.contains("Laura grins.") && text.contains("going to town"), "{text}");
+}
+
+#[test]
+fn a_planned_path_is_used_but_never_claims_another_file() {
+    // Planned and free: created there.
+    let mut s = OneStore(Mem::new());
+    let mut file = thread("Dialogue pass");
+    file.review_path = Some("Planned.review.txt".into());
+    let done = call(&mut s, &mut file, suggest("a", 1, "Laura grins."));
+    assert!(!done.result.is_error, "{}", done.result.content);
+    assert!(s.0.file("Planned.review.txt").contains("Id: thread-t0001"));
+    assert_eq!(file.review_id.as_deref(), Some("thread-t0001"));
+
+    // Planned, but another program put a file of its own there first.
+    let mut s = OneStore(Mem::new());
+    s.0.files.insert(s.0.dir.join("Planned.review.txt"), "Id: someone-else\n".into());
+    let mut file = thread("Dialogue pass");
+    file.review_path = Some("Planned.review.txt".into());
+    let done = call(&mut s, &mut file, suggest("a", 1, "Laura grins."));
+    assert!(!done.result.is_error, "{}", done.result.content);
+    assert_eq!(s.0.file("Planned.review.txt"), "Id: someone-else\n");
+    assert_eq!(file.review_path.as_deref(), Some("Dialogue pass.review.txt"));
+}
+
+#[test]
+fn plan_review_path_names_a_free_file() {
+    let dir = std::env::temp_dir().join(format!("scriptorium-plan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Dialogue pass.review.txt"), "").unwrap();
+    let mut file = thread("Dialogue pass");
+    assert_eq!(plan_review_path(&dir, &file).as_deref(), Some("Dialogue pass 2.review.txt"));
+    file.review_path = Some("x.review.txt".into());
+    assert_eq!(plan_review_path(&dir, &file), None);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_named_review_file_is_created_or_attached() {
+    let mut s = OneStore(Mem::new());
+    let mut file = thread("Dialogue pass");
+    let named = |id: &str, para: u64, option: &str| ToolCall {
+        input: json!({"paragraph_id": para, "options": [option], "review_file": "notes.review.txt"}),
+        ..suggest(id, para, option)
+    };
+    let done = call(&mut s, &mut file, named("a", 1, "Laura grins."));
+    assert!(!done.result.is_error, "{}", done.result.content);
+    // It went to the named file, not the thread's own review.
+    assert_eq!(
+        s.0.files.keys().map(|p| p.file_name().unwrap().to_str().unwrap()).collect::<Vec<_>>(),
+        ["notes.review.txt"]
+    );
+    assert!(s.0.file("notes.review.txt").contains("Laura grins."));
+    assert_eq!(file.review_path, None);
+    // Again: the same file, now attached.
+    let done = call(&mut s, &mut file, named("b", 3, "I am going to town tomorrow."));
+    assert!(!done.result.is_error, "{}", done.result.content);
+    assert_eq!(s.0.session.reviews.len(), 1);
+    assert!(s.0.file("notes.review.txt").contains("going to town"));
+}
+
+/// A script whose files are always busy.
+struct Busy;
+
+impl Script for Busy {
+    fn open(&mut self, _writes: bool) -> Result<Box<dyn ReviewStore + '_>, ReviewError> {
+        Err(ReviewError::Busy)
+    }
+}
+
+#[test]
+fn busy_is_a_flag_not_just_text() {
+    let mut file = thread("t");
+    let done = run_call(&mut Busy, &mut file, &suggest("a", 1, "Laura grins."));
+    assert!(done.busy && done.result.is_error);
+    assert_eq!(done.result.content, BUSY);
+    assert_eq!(whole_script_gate(&mut Busy, &file, "read_script", false, None), Err(ReviewError::Busy));
+}
+
+#[test]
+fn a_stored_answer_holds_until_the_script_doubles() {
+    assert_eq!(gate_with(Some(false), Some(30_000), 59_000, None), Gate::Refuse);
+    assert_eq!(gate_with(Some(true), Some(30_000), 60_000, None), Gate::Run);
+    assert!(matches!(gate_with(Some(false), Some(30_000), 60_001, None), Gate::Ask { tokens: 60_001, .. }));
+    assert!(matches!(gate_with(Some(true), Some(30_000), 70_000, None), Gate::Ask { .. }));
+    // An answer from before sizes were stored holds.
+    assert_eq!(gate_with(Some(false), None, 1_000_000, None), Gate::Refuse);
+
+    let mut file = thread("t");
+    record_whole_script(&mut file, Some(false), Some(30_000));
+    assert_eq!((file.whole_script, whole_script_tokens(&file)), (Some(false), Some(30_000)));
+    // The app's override keeps the size.
+    let kept = whole_script_tokens(&file);
+    record_whole_script(&mut file, Some(true), kept);
+    assert_eq!((file.whole_script, whole_script_tokens(&file)), (Some(true), Some(30_000)));
+    record_whole_script(&mut file, None, None);
+    assert_eq!((file.whole_script, whole_script_tokens(&file)), (None, None));
+    assert!(file.extra.is_empty());
+}
+
+#[test]
 fn the_new_review_text() {
     let t = new_review_text("film.fdx", "t0007");
     assert!(t.starts_with(FORMAT_HEADER), "{t}");

@@ -1,39 +1,53 @@
 //! The blocking run loop: one run of a thread, from the writer's message to
-//! the model's last reply. `scriptorium chat` calls [`run`]; the app's driver
-//! runs the same steps on its own (a GPUI task) with the helpers they share:
-//! [`crate::exec::run_call`], [`crate::exec::whole_script_gate`],
-//! [`disclosure`], [`new_thread`] and [`prepare`].
+//! the model's last reply. [`run`] is *the* loop, for both programs:
+//! `scriptorium chat` calls it with [`exec::Direct`]`(FileScript)`; the app
+//! calls it on a worker thread, with a [`Tools`] that sends each call to the
+//! UI thread (where [`exec::run_call`] runs over the open script view inside
+//! `update`) and blocks on the reply, a [`Ui`] behind a channel, and
+//! [`Request::wait`] zero. The step helpers ([`settle_account`],
+//! [`disclosure`], [`new_thread`], [`prepare`]) stay public for the panel's
+//! own displays, not for a second loop.
 //!
 //! Order of a run:
 //!
-//! 1. The thread: an existing one is locked (waiting [`Request::wait`]),
-//!    then read again, so turns another program added are kept; if another
-//!    program holds it, [`HostError::Store`] with
-//!    [`StoreError::Busy`]. The account and model are settled (the
+//! 1. The thread is read *unlocked* and the account and model settled (the
 //!    request's, else the thread's, else the default account's).
 //! 2. The disclosure, once per provider host and script ([`disclosure`]):
-//!    [`Ui::disclose`] must accept it, or nothing is sent or written.
-//! 3. A new thread is created (and locked) only now; the message is pushed.
-//! 4. The loop over [`Run`]: each request through
-//!    [`receive`] with the run's [`CancelToken`]; each tool call through
-//!    [`crate::exec::run_call`] (after the whole-script check); retry waits
-//!    scaled by the clock. The thread file is written after every step, so a
-//!    crash loses at most one.
-//! 5. [`Transport::finish`]: a replayed cassette with exchanges left over
-//!    fails the run ([`HostError::Transport`]), after the thread was saved.
+//!    [`Ui::disclose`] must accept it, or nothing is sent or written. No
+//!    lock is held while the writer reads it.
+//! 3. Only now is an existing thread locked (waiting [`Request::wait`]) and
+//!    read again, so turns another program added are kept, and the account
+//!    settled again (if it changed to one needing a disclosure, the lock is
+//!    dropped and step 2 repeats); if another program holds it,
+//!    [`HostError::Store`] with [`StoreError::Busy`]. A new thread is
+//!    created (and locked). Results of calls that finished before a crash
+//!    ([`FINISHED_KEY`]) are given back to their calls ([`turn::resume`]);
+//!    the message is pushed.
+//! 4. The loop over [`Run`]: each request through [`receive`] with the run's
+//!    [`CancelToken`]; each tool call through [`Tools`] (whole-script check,
+//!    then the call; a busy call is tried again every [`exec::BUSY_RETRY`]
+//!    for up to [`exec::BUSY_FOR`]); retry waits scaled by the clock. The
+//!    thread file is written after every step and after *every tool call*
+//!    (with the results so far), so a crash loses at most one step and never
+//!    runs a finished call again. Before a call that may create the thread's
+//!    review, its planned name is saved in the thread
+//!    ([`exec::plan_review_path`]).
+//! 5. [`Transport::finish`], on every exit, errors included: a replayed
+//!    cassette with exchanges left over fails a run that otherwise succeeded
+//!    ([`HostError::Transport`]), after the thread was saved.
 
 use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
 use scriptorium_agent::file::{ThreadFile, ToolsCheck, VERSION, check_tools, tools_hash};
-use scriptorium_agent::turn::{Action, Input, Limits, Outcome, Run};
+use scriptorium_agent::turn::{self, Action, Input, Limits, Outcome, Run};
 use scriptorium_agent::{AgentError, Event, Thread, ToolCall, ToolResult};
 use scriptorium_providers::shell::{CancelToken, Keys, TimeScale, Transport, receive};
-use scriptorium_providers::{AccountsFile, PriceBook, ProvidersError, Resolved};
+use scriptorium_providers::{AccountsFile, Price, PriceBook, ProvidersError, Resolved};
 
-use crate::clock::Clocks;
-use crate::exec::{self, Gate, Script};
+use crate::clock::{Clock, Clocks};
+use crate::exec::{self, CallDone, Gate, ReviewError};
 use crate::lock::CLI_WAIT;
 use crate::model::{disclosure_key, disclosure_text, host_of};
 use crate::naming;
@@ -66,7 +80,8 @@ pub struct Request<'a> {
     /// The writer allowed reading the whole script for this run
     /// (`--allow-whole-script`): no confirm, even over a stored "Not now".
     pub allow_whole_script: bool,
-    /// How long to wait for the thread's lock ([`CLI_WAIT`] for the CLI).
+    /// How long to wait for the thread's lock: [`CLI_WAIT`] for the CLI,
+    /// zero for the app (it shows a busy thread at once).
     pub wait: Duration,
     pub limits: Limits,
 }
@@ -89,6 +104,10 @@ impl<'a> Request<'a> {
 
 /// What the program shows and asks while a thread runs. Everything but the
 /// two questions has a do-nothing default.
+///
+/// Called from the thread [`run`] runs on, so it works behind a channel: the
+/// app's `Ui` forwards each call to its UI thread (events and notices
+/// without waiting; the two questions block until the writer answers).
 pub trait Ui {
     /// A streamed event (text, thinking, tool-call progress, usage).
     fn event(&mut self, _event: &Event) {}
@@ -105,6 +124,34 @@ pub trait Ui {
     /// ([`exec::whole_script_question`]): send (true) or not. The answer is
     /// stored in the thread.
     fn confirm_whole_script(&mut self, question: &str) -> bool;
+}
+
+/// Runs the agent's tool calls for [`run`]. Called from the thread `run` runs
+/// on, one call at a time, in order.
+///
+/// - The CLI: [`exec::Direct`]`(`[`exec::FileScript`]`)`.
+/// - The app: sends each request to the UI thread, which runs
+///   [`exec::whole_script_gate`] / [`exec::run_call`] over a `LiveScript`
+///   borrowing its `&mut ScriptView` inside `update`, sends back the result
+///   (and the updated [`ThreadFile`]), and blocks on it. A view that can't
+///   take the call now answers [`ReviewError::Busy`] / [`CallDone::busy`];
+///   `run` retries off the UI thread.
+pub trait Tools {
+    /// The whole-script rule for `call` ([`exec::whole_script_gate`]).
+    fn gate(
+        &mut self,
+        file: &ThreadFile,
+        call: &ToolCall,
+        allow: bool,
+        price: Option<&Price>,
+    ) -> Result<Gate, ReviewError>;
+    /// Run `call` for thread `file` ([`exec::run_call`]); may record the
+    /// thread's review in `file`.
+    fn call(&mut self, file: &mut ThreadFile, call: &ToolCall) -> CallDone;
+    /// Notices from opening the script, each once.
+    fn take_notes(&mut self) -> Vec<String> {
+        vec![]
+    }
 }
 
 /// Where a run's settings come from.
@@ -251,47 +298,135 @@ pub fn prepare(file: &mut ThreadFile, resolved: &Resolved) -> Option<&'static st
 pub const TOOLS_CHANGED: &str =
     "This conversation was started with older tools; the model's earlier reasoning won't be replayed.";
 
-/// Runs one turn of a thread (see the module docs). `script` opens the
-/// script for each tool call ([`exec::FileScript`] for the CLI).
-/// `cancel` stops the run: the request in flight is dropped, a retry wait
-/// ends, tools not yet run are answered as cancelled.
+/// The key in [`ThreadFile::extra`] holding the results of a round's calls
+/// that have finished, saved after each one; removed when the round's
+/// results go into the thread. A thread read with it set crashed (or was
+/// cut short) mid-round: [`run`] gives the results back to their calls
+/// ([`turn::resume`]) so they aren't run again.
+pub const FINISHED_KEY: &str = "finished_results";
+
+/// Takes the results [`FINISHED_KEY`] holds out of `file`.
+pub fn take_finished(file: &mut ThreadFile) -> Vec<ToolResult> {
+    file.extra.remove(FINISHED_KEY).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+}
+
+fn set_finished(file: &mut ThreadFile, results: &[ToolResult]) {
+    let v = serde_json::to_value(results).expect("tool results always serialize");
+    file.extra.insert(FINISHED_KEY.into(), v);
+}
+
+/// Shown once while a call waits for the script's files.
+pub const BUSY_WAITING: &str = "The script's files are busy in another program; waiting…";
+
+/// Changes thread `id`'s stored whole-script answer between runs (locks the
+/// thread, waiting `wait`): the app's "Allow" on a refused `read_script`
+/// passes `Some(true)`, "Ask again" `None`. During a run the answer comes
+/// through [`Ui::confirm_whole_script`], or [`Request::allow_whole_script`]
+/// for one run.
+pub fn set_whole_script(
+    threads: &ThreadStore,
+    id: &str,
+    answer: Option<bool>,
+    wait: Duration,
+) -> Result<ThreadFile, StoreError> {
+    let (lock, mut file) = threads.lock_and_read(id, wait)?;
+    let tokens = exec::whole_script_tokens(&file);
+    exec::record_whole_script(&mut file, answer, tokens);
+    threads.write(&lock, &file)?;
+    Ok(file)
+}
+
+/// Runs one turn of a thread (see the module docs). `tools` runs the calls
+/// ([`exec::Direct`]`(FileScript)` for the CLI). `cancel` stops the run: the
+/// request in flight is dropped, a retry or busy wait ends, tools not yet
+/// run are answered as cancelled. [`Transport::finish`] runs whatever the
+/// result.
 pub fn run(
     transport: &dyn Transport,
-    script: &mut dyn Script,
+    tools: &mut dyn Tools,
+    req: &Request,
+    env: Env,
+    ui: &mut dyn Ui,
+    cancel: &CancelToken,
+) -> Result<Finished, HostError> {
+    let result = run_inner(transport, tools, req, env, ui, cancel);
+    let finished = transport.finish();
+    match (result, finished) {
+        (Err(e), _) => Err(e),
+        (Ok(_), Err(e)) => Err(HostError::Transport(e)),
+        (Ok(done), Ok(())) => Ok(done),
+    }
+}
+
+/// The key for `resolved`'s account, failing if it needs one and has none.
+fn key_for(env: &Env, resolved: &Resolved) -> Result<Option<String>, HostError> {
+    let account = env.accounts.get(&resolved.account).expect("settle_account found it");
+    let key = env.keys.get(account).map(|(k, _)| k);
+    if resolved.needs_key && key.is_none() {
+        return Err(ProvidersError::MissingKey { account: resolved.account.clone() }.into());
+    }
+    Ok(key)
+}
+
+/// The disclosure for `resolved` still to show: not in `seen` and not
+/// accepted earlier in this run.
+fn pending_disclosure(
+    seen: &Seen,
+    accepted: &[String],
+    resolved: &Resolved,
+    script: &Path,
+) -> Option<(String, String)> {
+    disclosure(seen, &resolved.base_url, script).filter(|(k, _)| !accepted.contains(k))
+}
+
+fn run_inner(
+    transport: &dyn Transport,
+    tools: &mut dyn Tools,
     req: &Request,
     env: Env,
     ui: &mut dyn Ui,
     cancel: &CancelToken,
 ) -> Result<Finished, HostError> {
     let threads = ThreadStore::for_script(req.script);
-    // 1. The thread (locked and re-read), and the account.
-    let existing = match &req.which {
-        Which::Thread(id) => Some(threads.lock_and_read(id, req.wait)?),
-        Which::New => None,
-    };
-    let resolved = settle_account(env.accounts, existing.as_ref().map(|(_, f)| f), req.account, req.model)?;
-    let account = env.accounts.get(&resolved.account).expect("settle_account found it");
-    let key = env.keys.get(account).map(|(k, _)| k);
-    if resolved.needs_key && key.is_none() {
-        return Err(ProvidersError::MissingKey { account: resolved.account.clone() }.into());
-    }
     let message = req.message.filter(|m| !m.trim().is_empty());
-    if req.message.is_some() && message.is_none() || existing.is_none() && message.is_none() {
+    if req.message.is_some() && message.is_none() || req.which == Which::New && message.is_none() {
         return Err(HostError::NothingToSend);
     }
-    // 2. The disclosure.
-    if let Some((k, text)) = disclosure(env.seen, &resolved.base_url, req.script) {
-        if !ui.disclose(&text) {
-            return Err(HostError::Declined);
+    // 1–3. The account and disclosure unlocked, then the thread locked.
+    let mut accepted: Vec<String> = vec![];
+    let (existing, resolved, key) = loop {
+        let peek = match &req.which {
+            Which::Thread(id) => Some(threads.read(id)?),
+            Which::New => None,
+        };
+        let resolved = settle_account(env.accounts, peek.as_ref(), req.account, req.model)?;
+        key_for(&env, &resolved)?;
+        if let Some((k, text)) = pending_disclosure(env.seen, &accepted, &resolved, req.script) {
+            if !ui.disclose(&text) {
+                return Err(HostError::Declined);
+            }
+            if let Err(e) = env.seen.insert(&k) {
+                ui.notice(&format!("couldn't remember that the disclosure was shown: {e}"));
+            }
+            accepted.push(k);
         }
-        if let Err(e) = env.seen.insert(&k) {
-            ui.notice(&format!("couldn't remember that the disclosure was shown: {e}"));
+        let existing = match &req.which {
+            Which::Thread(id) => Some(threads.lock_and_read(id, req.wait)?),
+            Which::New => None,
+        };
+        let resolved = settle_account(env.accounts, existing.as_ref().map(|(_, f)| f), req.account, req.model)?;
+        let key = key_for(&env, &resolved)?;
+        // The thread moved to another account meanwhile: ask about that one,
+        // without holding the thread.
+        if pending_disclosure(env.seen, &accepted, &resolved, req.script).is_none() {
+            break (existing, resolved, key);
         }
-    }
-    // 3. The thread, ready to run.
+    };
     let created = existing.is_none();
     let (lock, mut file) = match existing {
         Some((lock, mut file)) => {
+            let finished = take_finished(&mut file);
+            turn::resume(&mut file.thread, finished);
             if let Some(n) = prepare(&mut file, &resolved) {
                 ui.notice(n);
             }
@@ -325,8 +460,15 @@ pub fn run(
     save(&mut file)?;
 
     // 4. The loop.
-    let tools = scriptorium_tools::catalogue();
-    let price = PriceBook::from_accounts(env.accounts).price(&resolved.origin());
+    let ctx = RoundCtx {
+        req,
+        price: PriceBook::from_accounts(env.accounts).price(&resolved.origin()),
+        dir: req.script.canonicalize().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+        clock,
+        cancel,
+        save: &save,
+    };
+    let specs = scriptorium_tools::catalogue();
     let time = TimeScale::new(clock.scale(Duration::from_secs(1)).as_secs_f64());
     let mut run = Run::new(req.limits, resolved.protocol, resolved.origin());
     let mut action = run.start(&mut file.thread);
@@ -337,7 +479,7 @@ pub fn run(
                     &resolved,
                     key.as_deref(),
                     &file.system,
-                    &tools,
+                    &specs,
                     &file.thread,
                 ) {
                     Err(ProvidersError::Agent(e)) => Input::Failed(e),
@@ -354,72 +496,129 @@ pub fn run(
                 ui.waiting(secs);
                 if time.sleep_unless(secs, cancel) { Input::Retry } else { Input::Stop(vec![]) }
             }
-            Action::RunTools(calls) => {
-                let input = run_tools(&calls, script, &mut file, req, price.as_ref(), ui, cancel);
-                for n in script.take_notes() {
-                    ui.notice(&n);
-                }
-                input
-            }
+            Action::RunTools(calls) => run_tools(&calls, tools, &mut file, &ctx, ui)?,
             Action::Done(outcome) => break outcome,
         };
         action = run.next(&mut file.thread, input);
+        file.extra.remove(FINISHED_KEY);
         save(&mut file)?;
     };
     save(&mut file)?;
-    // 5. The transport's own check.
-    transport.finish().map_err(HostError::Transport)?;
     Ok(Finished { thread: file, outcome, created })
 }
 
-/// Runs a round's calls in order, stopping (with the results so far) when
-/// `cancel` is cancelled.
+/// What a round of tool calls needs besides the tools and the thread.
+struct RoundCtx<'a> {
+    req: &'a Request<'a>,
+    price: Option<Price>,
+    /// The script's folder, canonical, for planning the review's name.
+    dir: Option<std::path::PathBuf>,
+    clock: &'a dyn Clock,
+    cancel: &'a CancelToken,
+    save: &'a dyn Fn(&mut ThreadFile) -> Result<(), HostError>,
+}
+
+/// Runs a round's calls in order, saving the thread (with the results so
+/// far under [`FINISHED_KEY`]) after each, and stopping with the results so
+/// far when the run is cancelled.
 fn run_tools(
     calls: &[ToolCall],
-    script: &mut dyn Script,
+    tools: &mut dyn Tools,
     file: &mut ThreadFile,
-    req: &Request,
-    price: Option<&scriptorium_providers::Price>,
+    ctx: &RoundCtx,
     ui: &mut dyn Ui,
-    cancel: &CancelToken,
-) -> Input {
+) -> Result<Input, HostError> {
     let mut results: Vec<ToolResult> = vec![];
     for call in calls {
-        if cancel.is_cancelled() {
-            return Input::Stop(results);
+        if ctx.cancel.is_cancelled() {
+            return Ok(Input::Stop(results));
         }
         ui.tool_started(call);
-        let gate = match exec::whole_script_gate(script, file, &call.name, req.allow_whole_script, price) {
-            Ok(g) => g,
-            Err(e) => {
-                let done = exec::CallDone {
-                    result: ToolResult { id: call.id.clone(), content: e.to_string(), is_error: true },
-                    added: None,
-                };
-                ui.tool_finished(call, &done);
-                results.push(done.result);
-                continue;
-            }
-        };
-        let allowed = match gate {
-            Gate::Run => true,
-            Gate::Refuse => false,
-            Gate::Ask { tokens, cost } => {
-                let yes = ui.confirm_whole_script(&exec::whole_script_question(tokens, cost));
-                file.whole_script = Some(yes);
-                yes
-            }
-        };
-        let done = if allowed {
-            exec::run_call(script, file, call)
-        } else {
-            exec::CallDone { result: exec::refused(call), added: None }
-        };
+        let done = run_one(call, tools, file, ctx, ui)?;
+        for n in tools.take_notes() {
+            ui.notice(&n);
+        }
         ui.tool_finished(call, &done);
         results.push(done.result);
+        set_finished(file, &results);
+        (ctx.save)(file)?;
     }
-    if cancel.is_cancelled() {
-        return Input::Stop(results);
+    if ctx.cancel.is_cancelled() {
+        return Ok(Input::Stop(results));
     }
-    Input::Results(results)
+    Ok(Input::Results(results))
+}
+
+/// One call: its planned review name saved first if it may create the
+/// review, the whole-script check, then the call, each tried again while the
+/// script's files are busy.
+fn run_one(
+    call: &ToolCall,
+    tools: &mut dyn Tools,
+    file: &mut ThreadFile,
+    ctx: &RoundCtx,
+    ui: &mut dyn Ui,
+) -> Result<CallDone, HostError> {
+    if scriptorium_tools::may_append(&call.name)
+        && let Some(planned) = ctx.dir.as_deref().and_then(|dir| exec::plan_review_path(dir, file))
+    {
+        file.review_path = Some(planned);
+        (ctx.save)(file)?;
+    }
+    let mut busy = Busy::default();
+    let gate = loop {
+        match tools.gate(file, call, ctx.req.allow_whole_script, ctx.price.as_ref()) {
+            Err(ReviewError::Busy) if busy.wait(ctx, ui) => continue,
+            other => break other,
+        }
+    };
+    let allowed = match gate {
+        Err(e) => return Ok(CallDone { busy: false, ..CallDone::failed(call, &e) }),
+        Ok(Gate::Run) => true,
+        Ok(Gate::Refuse) => false,
+        Ok(Gate::Ask { tokens, cost }) => {
+            let yes = ui.confirm_whole_script(&exec::whole_script_question(tokens, cost));
+            exec::record_whole_script(file, Some(yes), Some(tokens));
+            yes
+        }
+    };
+    if !allowed {
+        return Ok(CallDone { result: exec::refused(call), added: None, busy: false });
+    }
+    loop {
+        let done = tools.call(file, call);
+        if !(done.busy && busy.wait(ctx, ui)) {
+            return Ok(CallDone { busy: false, ..done });
+        }
+    }
+}
+
+/// Waiting out busy script files: every [`exec::BUSY_RETRY`] (scaled by the
+/// clock) for up to [`exec::BUSY_FOR`].
+#[derive(Default)]
+struct Busy {
+    tries: u32,
+}
+
+impl Busy {
+    /// Waits before the next try; false once the time is up or the run is
+    /// cancelled.
+    fn wait(&mut self, ctx: &RoundCtx, ui: &mut dyn Ui) -> bool {
+        let max = (exec::BUSY_FOR.as_millis() / exec::BUSY_RETRY.as_millis()) as u32;
+        if self.tries >= max || ctx.cancel.is_cancelled() {
+            return false;
+        }
+        if self.tries == 0 {
+            ui.notice(BUSY_WAITING);
+        }
+        self.tries += 1;
+        let until = std::time::Instant::now() + ctx.clock.scale(exec::BUSY_RETRY);
+        while std::time::Instant::now() < until {
+            if ctx.cancel.is_cancelled() {
+                return false;
+            }
+            std::thread::sleep((until - std::time::Instant::now()).min(Duration::from_millis(20)));
+        }
+        true
+    }
 }

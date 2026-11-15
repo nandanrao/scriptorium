@@ -57,7 +57,9 @@
 //!
 //! To pick up a thread saved mid-run (after a crash, or opened from a file),
 //! compare its tools with [`crate::file::check_tools`], then call
-//! [`Run::start`] too: calls still waiting are answered as cancelled first.
+//! [`Run::start`] too: calls still waiting are answered as cancelled first,
+//! except those whose results the shell saved as they finished: give those
+//! back with [`resume`] before anything else.
 //!
 //! [`cancel`] is public too: it repairs a thread left with unanswered calls
 //! ([`Thread::push_user`] calls it).
@@ -117,6 +119,15 @@ pub fn cancel(thread: &mut Thread) -> usize {
         thread.answer(at, results, Some(CANCELLED_NOTICE.into()));
     }
     n
+}
+
+/// Picks up a thread saved mid-round: the calls still waiting are answered
+/// with `finished` (results the shell saved as each call completed, before a
+/// crash or a stop), the rest as [`CANCELLED`], so completed calls are never
+/// run again. Call it before [`Thread::push_user`] or [`Run::start`] (both
+/// would answer them all as cancelled). Does nothing if no call is waiting.
+pub fn resume(thread: &mut Thread, finished: Vec<ToolResult>) {
+    settle(thread, finished);
 }
 
 /// Answers every call still waiting: the earliest waiting calls with the
