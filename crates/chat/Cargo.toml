@@ -1,13 +1,18 @@
 [package]
 name = "scriptorium-chat"
-description = "The chat panel's logic: tool-row labels, review naming, thread list model. The core is pure: no I/O."
+description = "Chat threads for the built-in agent: the panel's pure core (labels, naming, thread list model), plus thread files beside the script, per-thread locks and the clock, behind the shell feature."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["shell"]
+shell = ["dep:scriptorium-cli"]
+
 [dependencies]
 scriptorium-agent.workspace = true
+scriptorium-cli = { workspace = true, optional = true }
 serde_json.workspace = true
 
 [lints]

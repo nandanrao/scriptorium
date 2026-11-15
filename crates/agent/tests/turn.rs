@@ -59,6 +59,8 @@ fn file() -> ThreadFile {
         account: "acct-1".into(),
         model: "claude-opus-5-5".into(),
         review_id: None,
+        review_path: None,
+        whole_script: None,
         system: "You are the assistant.".into(),
         tools_hash: tools_hash(&[]),
         thread,
@@ -72,6 +74,11 @@ fn thread_file_round_trips() {
     assert_eq!(back, f);
     let f = ThreadFile { review_id: Some("r9".into()), ..file() };
     assert_eq!(ThreadFile::from_json(&f.to_json()).unwrap(), f);
+    let f = ThreadFile { review_path: Some("Tighten act one.review.txt".into()), whole_script: Some(false), ..file() };
+    assert_eq!(ThreadFile::from_json(&f.to_json()).unwrap(), f);
+    // Unset, the new fields aren't written, so older readers see the same file.
+    let j = file().to_json();
+    assert!(!j.contains("review_path") && !j.contains("whole_script"), "{j}");
 }
 
 #[test]
