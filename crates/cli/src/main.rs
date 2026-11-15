@@ -8,7 +8,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut notes = vec![];
-    let result = scriptorium_cli::run(&args, &mut notes);
+    let result = scriptorium_cli::run_command(&args, &mut notes);
     for n in &notes {
         eprintln!("note: {n}");
     }
@@ -18,8 +18,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
+            print!("{}", e.stdout);
+            eprintln!("error: {}", e.message);
+            ExitCode::from(e.code)
         }
     }
 }

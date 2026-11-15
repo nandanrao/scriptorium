@@ -117,6 +117,10 @@ pub trait Ui {
     fn tool_finished(&mut self, _call: &ToolCall, _done: &exec::CallDone) {}
     /// Something to tell the writer (older tools, a review file left out…).
     fn notice(&mut self, _text: &str) {}
+    /// A new thread ([`Which::New`]) was created and first saved as `id`.
+    /// Called once, before anything is sent, so a run that then fails
+    /// ([`HostError`] carries no id) still names its thread.
+    fn thread_created(&mut self, _id: &str) {}
     /// The first-use disclosure ([`disclosure_text`]): send (true) or not.
     /// The CLI: true with `--yes`, else asks on a terminal, else false.
     fn disclose(&mut self, text: &str) -> bool;
@@ -458,6 +462,9 @@ fn run_inner(
         Ok(())
     };
     save(&mut file)?;
+    if created {
+        ui.thread_created(&file.id);
+    }
 
     // 4. The loop.
     let ctx = RoundCtx {
