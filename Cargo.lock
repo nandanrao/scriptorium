@@ -4479,6 +4479,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scriptorium-providers"
+version = "0.3.0"
+dependencies = [
+ "scriptorium-agent",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "scriptorium-review"
 version = "0.3.0"
 dependencies = [

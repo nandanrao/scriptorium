@@ -1,0 +1,15 @@
+[package]
+name = "scriptorium-providers"
+description = "AI provider accounts for the built-in agent: settings, presets, model capabilities and prices, request assembly. The core is pure; keys, config files and HTTP come with the shell."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+scriptorium-agent.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

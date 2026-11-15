@@ -15,6 +15,7 @@ scriptorium-review = { path = "crates/review" }
 scriptorium-agent = { path = "crates/agent" }
 scriptorium-tools = { path = "crates/tools" }
 scriptorium-cli = { path = "crates/cli" }
+scriptorium-providers = { path = "crates/providers" }
 fs4 = "1"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
