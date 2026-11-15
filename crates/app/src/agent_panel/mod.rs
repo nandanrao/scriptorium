@@ -209,10 +209,10 @@ impl AgentPanel {
     ) -> Self {
         Self {
             focus: cx.focus_handle(),
-            script,
+            script: script.clone(),
             script_path,
             threads: cx.new(|cx| ThreadList::new(window, cx)),
-            messages: cx.new(|cx| MessageView::new(window, cx)),
+            messages: cx.new(|cx| MessageView::new(script.clone(), window, cx)),
             composer: cx.new(|cx| Composer::new(window, cx)),
         }
     }
