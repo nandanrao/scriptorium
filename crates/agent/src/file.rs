@@ -36,6 +36,11 @@ pub struct ThreadFile {
     /// The writer's answer when the agent asked to read the whole script:
     /// `Some(true)` allowed, `Some(false)` declined ("Not now"), `None` never
     /// asked. Remembered so the thread doesn't ask again. Additive.
+    ///
+    /// A run started with `scriptorium chat --allow-whole-script` reads the
+    /// whole script even when this is `Some(false)`: the flag is the person
+    /// at the command line answering again, for that run (C4 must not
+    /// refuse on a stored "Not now").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub whole_script: Option<bool>,
     /// The system prompt the thread was started with. Sent unchanged on every
@@ -50,6 +55,12 @@ pub struct ThreadFile {
     #[serde(default)]
     pub tools_hash: String,
     pub thread: Thread,
+    /// Top-level keys this version doesn't know, kept as read and written
+    /// back, so a field added by a later build (as `review_path` and
+    /// `whole_script` were, without a version bump) survives this build
+    /// rewriting the file. Builds from before this field drop them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A stable hash of the tool specs as JSON (16 hex digits), for

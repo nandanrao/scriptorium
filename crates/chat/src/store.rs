@@ -269,6 +269,7 @@ pub(crate) mod tests {
             system: "sys".into(),
             tools_hash: tools_hash(&[]),
             thread,
+            extra: Default::default(),
         }
     }
 

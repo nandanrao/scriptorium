@@ -64,6 +64,7 @@ fn file() -> ThreadFile {
         system: "You are the assistant.".into(),
         tools_hash: tools_hash(&[]),
         thread,
+        extra: Default::default(),
     }
 }
 
@@ -79,6 +80,18 @@ fn thread_file_round_trips() {
     // Unset, the new fields aren't written, so older readers see the same file.
     let j = file().to_json();
     assert!(!j.contains("review_path") && !j.contains("whole_script"), "{j}");
+}
+
+#[test]
+fn unknown_top_level_fields_survive_a_rewrite() {
+    let mut j: Value = serde_json::from_str(&file().to_json()).unwrap();
+    j["from_a_later_build"] = json!({"kept": [1, 2]});
+    let f = ThreadFile::from_json(&j.to_string()).unwrap();
+    assert_eq!(f.extra.get("from_a_later_build"), Some(&json!({"kept": [1, 2]})));
+    let back: Value = serde_json::from_str(&f.to_json()).unwrap();
+    assert_eq!(back, j, "written back unchanged");
+    // Known fields are never doubled into `extra`.
+    assert!(file().extra.is_empty() && ThreadFile::from_json(&file().to_json()).unwrap().extra.is_empty());
 }
 
 #[test]

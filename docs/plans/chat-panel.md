@@ -344,7 +344,8 @@ panel shows an inline confirm: "The agent wants to read the whole script
 (about 35k tokens, ≈ $0.18). [Send] [Not now]". The answer is remembered for
 the thread (stored in the thread file as an additive field). Not now answers
 the call with an error telling the model to use `read_scene`. CLI: asks on a
-terminal, else refused unless `--allow-whole-script`.
+terminal, else refused unless `--allow-whole-script`. The flag overrides a
+stored "Not now" (`whole_script: Some(false)`) for that run.
 
 ## How the panel drives the shared chat host
 
