@@ -4448,6 +4448,7 @@ dependencies = [
  "scriptorium-agent",
  "scriptorium-fsio",
  "serde_json",
+ "unicode-segmentation",
 ]
 
 [[package]]
