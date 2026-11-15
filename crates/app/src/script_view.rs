@@ -1585,10 +1585,19 @@ impl ScriptView {
         (Rc::make_mut(&mut self.session), &self.editor.read(cx).doc)
     }
 
-    /// The line the writer is rewriting right now, if any: proposals on it
-    /// are refused.
-    pub(crate) fn editing_para(&self) -> Option<ParaId> {
-        self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para)
+    /// The lines the writer is rewriting right now (every line of a block
+    /// being rewritten, as it stands now, and the line it was made on):
+    /// proposals touching any of them are refused.
+    pub(crate) fn editing_paras(&self, cx: &App) -> Vec<ParaId> {
+        let Some(rw) = &self.rewriting else { return vec![] };
+        let mut paras = self.session.live_run(self.doc(cx), rw.r, rw.i);
+        let item = self.session.item(rw.r, rw.i);
+        for p in std::iter::once(item.para).chain(item.paras.iter().copied()) {
+            if !paras.contains(&p) {
+                paras.push(p);
+            }
+        }
+        paras
     }
 
     /// After a tool call changed the session (attached a review, added

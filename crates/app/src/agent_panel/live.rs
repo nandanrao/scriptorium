@@ -17,7 +17,7 @@
 //!   [`ScriptView::after_agent_change`] marks the session dirty for the
 //!   view's autosave. The agent never writes the session file.
 //! - Proposals on the line being rewritten are refused
-//!   ([`ScriptView::editing_para`], via [`ReviewStore::editing_para`]).
+//!   ([`ScriptView::editing_paras`], via [`ReviewStore::editing_paras`]).
 //! - Reading opens no lock and reloads nothing: the tools see the live
 //!   document and session as they are.
 //!
@@ -123,8 +123,8 @@ impl ReviewStore for LiveStore<'_, '_> {
         let (session, doc) = self.view.session_mut(self.cx);
         (session, doc, &*self.caps)
     }
-    fn editing_para(&self) -> Option<ParaId> {
-        self.view.editing_para()
+    fn editing_paras(&self) -> Vec<ParaId> {
+        self.view.editing_paras(self.cx)
     }
 
     fn reload(&mut self) -> Result<(), ReviewError> {

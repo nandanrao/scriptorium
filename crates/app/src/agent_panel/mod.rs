@@ -46,8 +46,8 @@ use gpui::{
 use crate::script_view::{RedoAny, ScriptView, UndoAny};
 use crate::theme::*;
 use composer::Composer;
-use driver::{Chat, ChatEvent, SendError, ViewOp};
-use messages::MessageView;
+use driver::{Chat, ChatEvent, ErrorAction, SendError, ViewOp};
+use messages::{MessageEvent, MessageView};
 use threads::ThreadList;
 
 actions!(
@@ -110,6 +110,19 @@ const BUNDLED_FONT: &str = "Inter";
 /// win where both match at the same depth.
 pub fn init(cx: &mut App) {
     gpui_base::init(cx);
+    // A replayed cassette (SCRIPTORIUM_REPLAY) with exchanges never requested
+    // fails the scenario: checked once, when the app quits.
+    cx.on_app_quit(|_| {
+        let finished = driver::finish_transport();
+        async move {
+            if let Err(e) = finished {
+                crate::log::error(&format!("agent transport: {e}"));
+                eprintln!("scriptorium-app: {e}");
+                std::process::exit(3);
+            }
+        }
+    })
+    .detach();
     #[cfg(target_os = "macos")]
     let font = ".SystemUIFont";
     #[cfg(not(target_os = "macos"))]
@@ -204,7 +217,7 @@ pub struct AgentPanel {
     /// A disclosure shown in place of sending: the next Send accepts it.
     /// (Stand-in until U6's disclosure card.)
     disclosure: Option<String>,
-    _chat: [gpui::Subscription; 2],
+    _chat: [gpui::Subscription; 3],
 }
 
 impl EventEmitter<AgentPanelEvent> for AgentPanel {}
@@ -220,11 +233,13 @@ impl AgentPanel {
         let chat = cx.new(|_| Chat::new(script.clone(), script_path.clone()));
         let messages = cx.new(|cx| MessageView::new(script.clone(), window, cx));
         let observe = cx.observe(&chat, |this: &mut Self, chat, cx| {
-            let ops = chat.update(cx, |c, _| c.take_view_ops());
+            let (ops, title) = chat.update(cx, |c, _| (c.take_view_ops(), c.title()));
             this.messages.update(cx, |m, cx| apply_view_ops(m, ops, cx));
+            this.threads.update(cx, |t, cx| t.set_title(title, cx));
             cx.notify();
         });
         let events = cx.subscribe_in(&chat, window, Self::on_chat_event);
+        let actions = cx.subscribe_in(&messages, window, Self::on_message_event);
         Self {
             focus: cx.focus_handle(),
             script: script.clone(),
@@ -234,7 +249,7 @@ impl AgentPanel {
             composer: cx.new(|cx| Composer::new(window, cx)),
             chat,
             disclosure: None,
-            _chat: [observe, events],
+            _chat: [observe, events, actions],
         }
     }
 
@@ -246,6 +261,34 @@ impl AgentPanel {
     /// Whether the panel is showing (it lives on while closed).
     fn is_open(&self, cx: &App) -> bool {
         self.script.upgrade().is_some_and(|v| v.read(cx).agent_open())
+    }
+
+    /// An error row's button.
+    fn on_message_event(
+        &mut self,
+        _: &Entity<MessageView>,
+        e: &MessageEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let MessageEvent::Action(action) = e;
+        crate::log::info(&format!("agent panel: {action:?}"));
+        match action {
+            ErrorAction::Retry | ErrorAction::Continue => {
+                if let Err(e) = self.chat.update(cx, |c, cx| c.retry(cx)) {
+                    self.chat.update(cx, |c, cx| c.notice(e.to_string(), cx));
+                }
+            }
+            ErrorAction::NewThread => {
+                if let Err(e) = self.chat.update(cx, |c, cx| c.new_thread(cx)) {
+                    self.chat.update(cx, |c, cx| c.notice(e, cx));
+                }
+            }
+            // U6's model picker will take ChooseModel; until then, accounts.
+            ErrorAction::ManageAccounts | ErrorAction::ChooseModel => {
+                window.dispatch_action(Box::new(OpenAccounts), cx);
+            }
+        }
     }
 
     fn on_chat_event(&mut self, _: &Entity<Chat>, e: &ChatEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -485,6 +528,9 @@ fn say_closed(text: &str) -> SharedString {
 /// U6's notices and question card).
 fn extra_lines(c: &Chat) -> Vec<String> {
     let mut lines = c.notices().to_vec();
+    if c.waiting_for_files() {
+        lines.push(scriptorium_chat::host::BUSY_WAITING.to_string());
+    }
     if let Some(q) = c.question() {
         lines.push(format!("{} Enter: send · {}: not now", q.text(), crate::menus::shortcut(".")));
     }

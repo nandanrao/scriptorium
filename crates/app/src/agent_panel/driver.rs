@@ -7,26 +7,34 @@
 //!   runs (`exec::whole_script_gate` / `exec::run_call`) inside *one*
 //!   `ScriptView` update over [`LiveScript`]; the worker blocks on the
 //!   answer. A busy answer ([`CallDone::busy`]) is retried by `host::run`
-//!   off the UI thread.
+//!   off the UI thread. Calls carry the thread file without its messages
+//!   ([`slim`]), so a long thread isn't copied per call.
 //! - a [`host::Ui`] behind the same channel: events, notices and saved
 //!   threads go to the UI without waiting; the two questions (disclosure,
 //!   whole-script read) block the worker until the writer answers.
-//! - `Request::wait` zero: a thread another program is running is refused at
-//!   once ("running in another program").
+//! - `Request::wait` [`THREAD_WAIT`]: a thread another program is running is
+//!   refused after that short wait ("running in another program"); the wait
+//!   covers this process's own worker that is still stopping (a script
+//!   closed and opened again).
 //!
 //! The UI side is a GPUI task owned by [`Chat`] that drains the channel once
-//! per frame (so repaints coalesce), and makes every entity update from its
-//! own async context, one at a time: the script view for tool calls, the
-//! chat for everything else, never one nested in the other.
+//! per frame, at most [`FRAME_BUDGET`] of work and [`FRAME_MESSAGES`]
+//! messages at a time (so repaints coalesce and a flood can't stall the UI),
+//! and makes every entity update from its own async context, one at a time:
+//! the script view for tool calls, the chat for everything else, never one
+//! nested in the other.
 //!
 //! Stop cancels the run's [`CancelToken`] and marks the turn stopped at once;
 //! events that arrive after it are dropped, a pending question is answered
-//! "no", a tool call not yet run answers "not run". The thread as the run
-//! saved it shows when the worker reports back.
+//! "no" (and the run records no answer: it was cancelled), a tool call not
+//! yet run answers "not run". The thread as the run saved it shows when the
+//! worker reports back.
 //!
 //! The disclosure is checked by the UI before a run starts ([`Chat::send`]
 //! returns [`SendError::Disclose`]); if the run finds another one to show (the
 //! thread moved to another account), it asks through [`Chat::question`].
+//! Accepted disclosures are also kept in memory, so a settings folder that
+//! can't be written doesn't lock the writer out.
 //!
 //! Runs go on while the panel is closed (the panel, and so its chat, live as
 //! long as the script view); dropping the chat (another script opened, the
@@ -36,14 +44,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{App, AsyncApp, Context, EventEmitter, Task, WeakEntity};
 use scriptorium_agent::file::ThreadFile;
 use scriptorium_agent::turn::{self, Limits, Outcome};
-use scriptorium_agent::{
-    AgentError, Block, Event, Message, Request as HttpRequest, Role, Thread, ToolCall, ToolResult, Usage,
-};
+use scriptorium_agent::{AgentError, Event, Request as HttpRequest, Thread, ToolCall, Usage};
 use scriptorium_chat::exec::{self, Added, CallDone, Gate, ReviewError};
 use scriptorium_chat::host::{self, Env, Finished, HostError, Request, Which};
 use scriptorium_chat::seen::{self, Seen};
@@ -53,11 +59,19 @@ use scriptorium_providers::{AccountsFile, Price};
 
 use super::live::LiveScript;
 pub use super::messages::ReviewRef;
-use super::view_model::Stream;
+pub use super::view_model::ErrorAction;
+use super::view_model::{Stream, error_action};
 use crate::script_view::ScriptView;
 
 /// How often the UI drains the worker's channel: about once a frame.
 const FRAME: Duration = Duration::from_millis(16);
+/// The most work the UI does on a run's messages per frame.
+const FRAME_BUDGET: Duration = Duration::from_millis(4);
+/// The most messages the UI takes per frame.
+const FRAME_MESSAGES: usize = 256;
+
+/// How long a run waits for its thread's lock.
+pub const THREAD_WAIT: Duration = Duration::from_millis(500);
 
 /// A tool call's answer when the script view is gone.
 const CLOSED: &str = "The script was closed.";
@@ -126,24 +140,27 @@ pub enum ChatEvent {
 #[derive(Debug, Clone)]
 struct RunFailed {
     text: String,
-    retryable: bool,
+    action: Option<ErrorAction>,
     /// The writer said no to the disclosure: nothing to show.
     declined: bool,
 }
 
 impl RunFailed {
     fn new(text: impl Into<String>) -> Self {
-        RunFailed { text: text.into(), retryable: false, declined: false }
+        RunFailed { text: text.into(), action: None, declined: false }
     }
 
     fn from_host(e: HostError) -> Self {
         match e {
             HostError::Store(StoreError::Busy | StoreError::RunningHere) => RunFailed::new(BUSY_THREAD),
             HostError::Declined => RunFailed { declined: true, ..RunFailed::new("Nothing was sent.") },
-            HostError::Transport(e) => RunFailed {
-                retryable: matches!(e, AgentError::Api { retryable: true, .. }),
-                ..RunFailed::new(e.to_string())
-            },
+            HostError::Providers(e) => {
+                RunFailed { action: Some(ErrorAction::ManageAccounts), ..RunFailed::new(capitalized(&e.to_string())) }
+            }
+            HostError::NoAccount => {
+                RunFailed { action: Some(ErrorAction::ManageAccounts), ..RunFailed::new(capitalized(&e.to_string())) }
+            }
+            HostError::Transport(e) => RunFailed { action: error_action(&e), ..RunFailed::new(e.to_string()) },
             e => RunFailed::new(capitalized(&e.to_string())),
         }
     }
@@ -157,13 +174,36 @@ fn capitalized(s: &str) -> String {
     }
 }
 
+/// The thread file without its messages or system prompt: what a tool call
+/// needs (ids, review, whole-script answer), cheap to send whatever the
+/// thread's length.
+fn slim(file: &ThreadFile) -> ThreadFile {
+    ThreadFile {
+        version: file.version,
+        id: file.id.clone(),
+        title: file.title.clone(),
+        created: file.created.clone(),
+        updated: file.updated.clone(),
+        account: file.account.clone(),
+        model: file.model.clone(),
+        review_id: file.review_id.clone(),
+        review_path: file.review_path.clone(),
+        whole_script: file.whole_script,
+        system: String::new(),
+        tools_hash: file.tools_hash.clone(),
+        thread: Thread::default(),
+        extra: file.extra.clone(),
+    }
+}
+
 /// From the worker to the UI thread.
 enum ToUi {
     Event(Event),
     Waiting(u64),
+    Busy(bool),
     ToolFinished(ToolCall, CallDone),
     Notice(String),
-    Saved(Box<ThreadFile>),
+    Saved(Arc<ThreadFile>),
     Ask(Question, mpsc::Sender<bool>),
     Gate {
         file: Box<ThreadFile>,
@@ -173,43 +213,56 @@ enum ToUi {
         reply: mpsc::Sender<Result<Gate, ReviewError>>,
     },
     Call {
+        /// [`slim`].
         file: Box<ThreadFile>,
         call: ToolCall,
-        /// The thread as the call left it (`None`: unchanged), the result,
-        /// and notices from opening the script.
-        reply: mpsc::Sender<(Option<Box<ThreadFile>>, CallDone, Vec<String>)>,
+        /// The thread's review as the call left it (`None`: the view is
+        /// gone), the result, and notices from opening the script.
+        reply: mpsc::Sender<(Option<ReviewMark>, CallDone, Vec<String>)>,
     },
     Done(Result<Finished, RunFailed>),
 }
 
+/// What a tool call may change in the thread file: its review's id and path.
+type ReviewMark = (Option<String>, Option<String>);
+
 /// The worker's [`host::Ui`]: forwards to the UI thread.
-struct WorkerUi(mpsc::Sender<ToUi>);
+struct WorkerUi {
+    tx: mpsc::Sender<ToUi>,
+    /// Disclosures the writer accepted in this session (by text), in case
+    /// they couldn't be saved.
+    accepted: Vec<String>,
+}
 
 impl WorkerUi {
     fn ask(&self, q: Question) -> bool {
         let (tx, rx) = mpsc::channel();
-        self.0.send(ToUi::Ask(q, tx)).is_ok() && rx.recv().unwrap_or(false)
+        self.tx.send(ToUi::Ask(q, tx)).is_ok() && rx.recv().unwrap_or(false)
     }
 }
 
 impl host::Ui for WorkerUi {
     fn event(&mut self, event: &Event) {
-        let _ = self.0.send(ToUi::Event(event.clone()));
+        let _ = self.tx.send(ToUi::Event(event.clone()));
     }
     fn waiting(&mut self, secs: u64) {
-        let _ = self.0.send(ToUi::Waiting(secs));
+        let _ = self.tx.send(ToUi::Waiting(secs));
+    }
+    fn busy(&mut self, waiting: bool) {
+        let _ = self.tx.send(ToUi::Busy(waiting));
     }
     fn tool_finished(&mut self, call: &ToolCall, done: &CallDone) {
-        let _ = self.0.send(ToUi::ToolFinished(call.clone(), done.clone()));
+        let _ = self.tx.send(ToUi::ToolFinished(call.clone(), done.clone()));
     }
     fn notice(&mut self, text: &str) {
-        let _ = self.0.send(ToUi::Notice(text.to_string()));
+        let _ = self.tx.send(ToUi::Notice(text.to_string()));
     }
     fn saved(&mut self, file: &ThreadFile) {
-        let _ = self.0.send(ToUi::Saved(Box::new(file.clone())));
+        // One copy per step, shared from here on.
+        let _ = self.tx.send(ToUi::Saved(Arc::new(file.clone())));
     }
     fn disclose(&mut self, text: &str) -> bool {
-        self.ask(Question::Disclose(text.to_string()))
+        self.accepted.iter().any(|a| a == text) || self.ask(Question::Disclose(text.to_string()))
     }
     fn confirm_whole_script(&mut self, question: &str) -> bool {
         self.ask(Question::WholeScript(question.to_string()))
@@ -231,7 +284,7 @@ impl host::Tools for WorkerTools {
         price: Option<&Price>,
     ) -> Result<Gate, ReviewError> {
         let (reply, rx) = mpsc::channel();
-        let msg = ToUi::Gate { file: Box::new(file.clone()), call: call.clone(), allow, price: price.copied(), reply };
+        let msg = ToUi::Gate { file: Box::new(slim(file)), call: call.clone(), allow, price: price.copied(), reply };
         if self.tx.send(msg).is_err() {
             return Err(ReviewError::Failed(CLOSED.into()));
         }
@@ -240,13 +293,14 @@ impl host::Tools for WorkerTools {
 
     fn call(&mut self, file: &mut ThreadFile, call: &ToolCall) -> CallDone {
         let (reply, rx) = mpsc::channel();
-        if self.tx.send(ToUi::Call { file: Box::new(file.clone()), call: call.clone(), reply }).is_err() {
+        if self.tx.send(ToUi::Call { file: Box::new(slim(file)), call: call.clone(), reply }).is_err() {
             return CallDone::new(call, CLOSED, true);
         }
         match rx.recv() {
-            Ok((changed, done, notes)) => {
-                if let Some(f) = changed {
-                    *file = *f;
+            Ok((mark, done, notes)) => {
+                if let Some((id, path)) = mark {
+                    file.review_id = id;
+                    file.review_path = path;
                 }
                 self.notes.extend(notes);
                 done
@@ -261,16 +315,27 @@ impl host::Tools for WorkerTools {
 }
 
 /// The process's transport: one for every run, so a replayed cassette is one
-/// queue across runs (as one `scriptorium chat` per exchange group would be).
+/// queue across runs.
 static TRANSPORT: OnceLock<Result<Arc<dyn Transport>, AgentError>> = OnceLock::new();
 
 fn shared_transport() -> Result<Arc<dyn Transport>, AgentError> {
     TRANSPORT.get_or_init(|| transport_from_env(None).map(Arc::from)).clone()
 }
 
+/// The end of the process's runs (the app quitting): the transport's own
+/// [`Transport::finish`], which for a replayed cassette fails if exchanges
+/// were never requested. Nothing to do if no run was started.
+pub fn finish_transport() -> Result<(), AgentError> {
+    match TRANSPORT.get() {
+        Some(Ok(t)) => t.finish(),
+        _ => Ok(()),
+    }
+}
+
 /// The shared transport for one run. `finish` does nothing: `host::run`
 /// calls it after every run, and a cassette for several runs has exchanges
-/// left until the last (a replay left unfinished says so on stderr at exit).
+/// left until the last. The real one runs when the app quits
+/// ([`finish_transport`], registered by `agent_panel::init`).
 struct Shared(Arc<dyn Transport>);
 
 impl Transport for Shared {
@@ -293,6 +358,8 @@ struct Job {
     model: Option<String>,
     accounts: AccountsFile,
     seen: PathBuf,
+    /// Disclosure texts accepted in this session.
+    accepted: Vec<String>,
 }
 
 /// The worker thread's body: one `host::run`, then `Done`.
@@ -307,12 +374,12 @@ fn work(job: Job, transport: Arc<dyn Transport>, keys: Keys, tx: mpsc::Sender<To
             account: job.account.as_deref(),
             model: job.model.as_deref(),
             allow_whole_script: false,
-            wait: Duration::ZERO,
+            wait: THREAD_WAIT,
             limits: Limits::default(),
         };
         let env = Env { accounts: &job.accounts, keys: &keys, seen: &mut seen, clocks: &mut clocks };
         let mut tools = WorkerTools { tx: tx.clone(), notes: vec![] };
-        let mut ui = WorkerUi(tx.clone());
+        let mut ui = WorkerUi { tx: tx.clone(), accepted: job.accepted.clone() };
         host::run(&Shared(transport), &mut tools, &req, env, &mut ui, &cancel).map_err(RunFailed::from_host)
     })();
     let _ = tx.send(ToUi::Done(result));
@@ -325,8 +392,7 @@ fn work(job: Job, transport: Arc<dyn Transport>, keys: Keys, tx: mpsc::Sender<To
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewOp {
     /// Show thread `id` (`""` for a new conversation not sent yet): another
-    /// one (opened, new, created by its first save), or the same one grown
-    /// (a tool's result during a round).
+    /// one (opened, new, created by its first save).
     SetThread {
         id: String,
         thread: Thread,
@@ -346,7 +412,7 @@ pub enum ViewOp {
 pub enum StreamOp {
     Wait(u64),
     Fail(AgentError),
-    FailText { text: String, retryable: bool },
+    FailText { text: String, action: Option<ErrorAction> },
     Stop,
     Clear,
 }
@@ -357,7 +423,7 @@ impl StreamOp {
         match self {
             StreamOp::Wait(secs) => stream.wait(secs),
             StreamOp::Fail(e) => stream.fail(&e),
-            StreamOp::FailText { text, retryable } => stream.fail_with(text, retryable),
+            StreamOp::FailText { text, action } => stream.fail_with(text, action),
             StreamOp::Stop => stream.stop(),
             StreamOp::Clear => stream.clear(),
         }
@@ -388,21 +454,26 @@ impl Drop for ActiveRun {
 pub struct Chat {
     script: WeakEntity<ScriptView>,
     script_path: PathBuf,
-    /// The open thread; `None` for a new conversation not sent yet.
-    thread: Option<ThreadFile>,
-    /// Results of the round in progress, shown before they are in the thread.
-    round: Vec<ToolResult>,
+    /// The open thread as last saved; `None` for a new conversation not
+    /// sent yet. Shared with the worker's copy of that step.
+    thread: Option<Arc<ThreadFile>>,
     /// The request in flight's usage so far (the usage line adds it).
     usage: Option<Usage>,
     /// Where each call's suggestions went, by call id (the tool row's link).
     added: HashMap<String, Added>,
-    /// What the run had to say (older tools, busy files…), this run only.
+    /// What the run had to say (older tools, a review file left out…) and
+    /// refusals to send: sticky until the next run.
     notices: Vec<String>,
+    /// A tool call is waiting for the script's files (transient).
+    busy_files: bool,
     question: Option<(Question, mpsc::Sender<bool>)>,
     run: Option<ActiveRun>,
     /// The account and model for the next run (the model chip); `None`: the
     /// thread's, else the default account's.
     choice: Option<(String, Option<String>)>,
+    /// Disclosures offered (key → text) and those accepted in this session.
+    offered: HashMap<String, String>,
+    accepted: HashMap<String, String>,
     ops: Vec<ViewOp>,
     review: Option<ReviewRef>,
     /// The thread id the message view was last given.
@@ -418,13 +489,15 @@ impl Chat {
             script,
             script_path,
             thread: None,
-            round: vec![],
             usage: None,
             added: HashMap::new(),
             notices: vec![],
+            busy_files: false,
             question: None,
             run: None,
             choice: None,
+            offered: HashMap::new(),
+            accepted: HashMap::new(),
             ops: vec![],
             review: None,
             view_id: None,
@@ -435,7 +508,12 @@ impl Chat {
 
     /// The open thread as last saved (`None`: a new conversation).
     pub fn thread(&self) -> Option<&ThreadFile> {
-        self.thread.as_ref()
+        self.thread.as_deref()
+    }
+
+    /// The header's title: the thread's, or "New conversation".
+    pub fn title(&self) -> String {
+        self.thread.as_ref().map_or_else(|| "New conversation".to_string(), |t| t.title.clone())
     }
 
     /// The message view's changes since last asked.
@@ -462,6 +540,12 @@ impl Chat {
         self.run.as_ref().is_some_and(|r| r.stopped)
     }
 
+    /// A tool call is waiting for the script's files, held by another
+    /// program (transient: "The script's files are busy… waiting").
+    pub fn waiting_for_files(&self) -> bool {
+        self.busy_files
+    }
+
     /// The thread this chat is running, if known: never probe it (U7), the
     /// probe would fail against this process's own lock.
     pub fn running_thread(&self) -> Option<&str> {
@@ -473,7 +557,7 @@ impl Chat {
         self.question.as_ref().map(|(q, _)| q)
     }
 
-    /// The run's notices, and the last refusal to send.
+    /// Sticky lines: the run's notices and the last refusal to send.
     pub fn notices(&self) -> &[String] {
         &self.notices
     }
@@ -487,6 +571,16 @@ impl Chat {
     /// The account and model chosen for the next run.
     pub fn choice(&self) -> Option<(&str, Option<&str>)> {
         self.choice.as_ref().map(|(a, m)| (a.as_str(), m.as_deref()))
+    }
+
+    /// The account id and model the next run will use (the model chip):
+    /// the choice, else the thread's, else the default account's.
+    pub fn effective_model(&self) -> Result<(String, String), String> {
+        let accounts = load_accounts().map_err(|e| e.to_string())?;
+        let (account, model) = self.chosen();
+        let r =
+            host::settle_account(&accounts, self.thread(), account, model).map_err(|e| capitalized(&e.to_string()))?;
+        Ok((r.account, r.model))
     }
 
     // ---- what the panel does ----------------------------------------------
@@ -509,8 +603,12 @@ impl Chat {
         self.start(None, cx)
     }
 
-    /// The writer accepted disclosure `key` ([`SendError::Disclose`]).
+    /// The writer accepted disclosure `key` ([`SendError::Disclose`]). It
+    /// counts for this session even if it can't be saved (the error says
+    /// why, for the log).
     pub fn accept_disclosure(&mut self, key: &str) -> Result<(), String> {
+        let text = self.offered.get(key).cloned().unwrap_or_default();
+        self.accepted.insert(key.to_string(), text);
         let path = seen::default_path().ok_or("There's no settings folder to remember that in.")?;
         Seen::load(&path).insert(key)
     }
@@ -525,6 +623,7 @@ impl Chat {
         crate::log::info("agent: stop");
         run.stopped = true;
         run.cancel.cancel();
+        self.busy_files = false;
         self.ops.push(ViewOp::Stream(StreamOp::Stop));
         if let Some((_, reply)) = self.question.take() {
             let _ = reply.send(false);
@@ -552,7 +651,7 @@ impl Chat {
             return Err("Stop the agent before switching conversations.".into());
         }
         let file = self.store().read(id).map_err(|e| e.to_string())?;
-        self.reset(Some(file), cx);
+        self.reset(Some(Arc::new(file)), cx);
         Ok(())
     }
 
@@ -575,7 +674,9 @@ impl Chat {
         self.store().probe(id)
     }
 
-    /// A line for the writer, e.g. why a send was refused.
+    /// A sticky line for the writer: for the composer's (U6's) refusals to
+    /// send (blank, still running, no account…). Runs report through their
+    /// own notices.
     pub fn notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.notices.push(text.into());
         cx.notify();
@@ -587,24 +688,33 @@ impl Chat {
         ThreadStore::for_script(&self.script_path)
     }
 
-    fn reset(&mut self, thread: Option<ThreadFile>, cx: &mut Context<Self>) {
+    fn chosen(&self) -> (Option<&str>, Option<&str>) {
+        match &self.choice {
+            Some((a, m)) => (Some(a.as_str()), m.as_deref()),
+            None => (None, None),
+        }
+    }
+
+    fn reset(&mut self, thread: Option<Arc<ThreadFile>>, cx: &mut Context<Self>) {
         self.thread = thread;
-        self.round.clear();
         self.usage = None;
         self.added.clear();
         self.notices.clear();
+        self.busy_files = false;
+        // A choice was for the thread it was made on.
+        self.choice = None;
         self.ops.push(ViewOp::Stream(StreamOp::Clear));
         self.show(false);
         self.sync_review(cx);
         cx.notify();
     }
 
-    /// Gives the message view the thread as shown. `turn`: a step was saved,
+    /// Gives the message view the saved thread. `turn`: a step was saved,
     /// so it replaces the streaming rows. Another thread id than the view
     /// has (a new thread's first save) switches its thread.
     fn show(&mut self, turn: bool) {
         let id = self.thread.as_ref().map_or_else(String::new, |t| t.id.clone());
-        let thread = self.shown();
+        let thread = self.thread.as_ref().map(|t| t.thread.clone()).unwrap_or_default();
         if self.view_id.as_deref() != Some(id.as_str()) {
             self.view_id = Some(id.clone());
             if turn {
@@ -616,11 +726,6 @@ impl Chat {
         } else {
             self.ops.push(ViewOp::SetThread { id, thread });
         }
-    }
-
-    /// The thread as shown: the saved one plus the round's results so far.
-    fn shown(&self) -> Thread {
-        shown(self.thread.as_ref(), &self.round)
     }
 
     /// Tells the view when the thread's review appears, goes or is renamed.
@@ -643,18 +748,16 @@ impl Chat {
 
     /// The accounts, and the disclosure check (the UI shows it before any
     /// run, so no run waits on it).
-    fn ready(&self) -> Result<(AccountsFile, PathBuf), SendError> {
-        let path = config::default_path()
-            .ok_or_else(|| SendError::Setup("There's no settings folder for AI accounts.".into()))?;
-        let accounts = config::load(&path).map_err(|e| SendError::Setup(capitalized(&e.to_string())))?;
-        let (account, model) = match &self.choice {
-            Some((a, m)) => (Some(a.as_str()), m.as_deref()),
-            None => (None, None),
-        };
-        let resolved = host::settle_account(&accounts, self.thread.as_ref(), account, model)
+    fn ready(&mut self) -> Result<(AccountsFile, PathBuf), SendError> {
+        let accounts = load_accounts()?;
+        let (account, model) = self.chosen();
+        let resolved = host::settle_account(&accounts, self.thread(), account, model)
             .map_err(|e| SendError::Setup(capitalized(&e.to_string())))?;
         let seen_path = seen::default_path().ok_or_else(|| SendError::Setup("There's no settings folder.".into()))?;
-        if let Some((key, text)) = host::disclosure(&Seen::load(&seen_path), &resolved.base_url, &self.script_path) {
+        if let Some((key, text)) = host::disclosure(&Seen::load(&seen_path), &resolved.base_url, &self.script_path)
+            && !self.accepted.contains_key(&key)
+        {
+            self.offered.insert(key.clone(), text.clone());
             return Err(SendError::Disclose { key, text });
         }
         Ok((accounts, seen_path))
@@ -678,6 +781,7 @@ impl Chat {
             model: self.choice.as_ref().and_then(|(_, m)| m.clone()),
             accounts,
             seen,
+            accepted: self.accepted.values().cloned().collect(),
         };
         let (tx, rx) = mpsc::channel();
         let cancel = CancelToken::new();
@@ -698,6 +802,7 @@ impl Chat {
         let task = cx.spawn(async move |this, cx| pump(rx, this, script, cx).await);
         self.notices.clear();
         self.usage = None;
+        self.busy_files = false;
         self.ops.push(ViewOp::Stream(StreamOp::Clear));
         self.ops.push(ViewOp::RunActive(true));
         self.run = Some(ActiveRun {
@@ -741,21 +846,20 @@ impl Chat {
                 }
             }
             ToUi::Waiting(secs) => self.ops.push(ViewOp::Stream(StreamOp::Wait(secs))),
+            ToUi::Busy(waiting) => self.busy_files = waiting,
+            // The round's results show when the round is saved (one push per
+            // round, not a copy of the thread per call); the link is kept now.
             ToUi::ToolFinished(call, done) => {
                 if let Some(a) = done.added {
                     self.added.insert(call.id.clone(), a);
                 }
-                self.round.push(done.result);
-                self.show(false);
-                self.sync_review(cx);
             }
             ToUi::Notice(text) => self.notices.push(text),
             ToUi::Saved(file) => {
                 let run = self.run.as_mut().expect("not stopped, so running");
                 run.thread_id = Some(file.id.clone());
                 let first = std::mem::take(&mut run.message);
-                self.thread = Some(*file);
-                self.round.clear();
+                self.thread = Some(file);
                 self.usage = None;
                 self.show(true);
                 self.sync_review(cx);
@@ -779,8 +883,8 @@ impl Chat {
         if let Some(task) = run.as_mut().and_then(|r| r.task.take()) {
             task.detach();
         }
-        self.round.clear();
         self.usage = None;
+        self.busy_files = false;
         if let Some((_, reply)) = self.question.take() {
             let _ = reply.send(false);
         }
@@ -788,7 +892,7 @@ impl Chat {
         let say = match result {
             Ok(done) => {
                 crate::log::info(&format!("agent: run ended: {:?}", done.outcome));
-                self.thread = Some(done.thread);
+                self.thread = Some(Arc::new(done.thread));
                 match done.outcome {
                     Outcome::Finished | Outcome::Stopped => None,
                     Outcome::Withdrawn(text) => {
@@ -807,7 +911,7 @@ impl Chat {
                             "Stopped: the agent reached its limit of {} tool rounds.",
                             Limits::default().max_tool_rounds
                         );
-                        fail = Some(StreamOp::FailText { text: text.clone(), retryable: true });
+                        fail = Some(StreamOp::FailText { text: text.clone(), action: Some(ErrorAction::Continue) });
                         Some(text)
                     }
                 }
@@ -817,10 +921,10 @@ impl Chat {
                 // The thread may have been saved before the failure.
                 let id = run.as_ref().and_then(|r| r.thread_id.clone());
                 if let Some(file) = id.and_then(|id| self.store().read(&id).ok()) {
-                    self.thread = Some(file);
+                    self.thread = Some(Arc::new(file));
                 }
                 (!f.declined).then(|| {
-                    fail = Some(StreamOp::FailText { text: f.text.clone(), retryable: f.retryable });
+                    fail = Some(StreamOp::FailText { text: f.text.clone(), action: f.action });
                     f.text
                 })
             }
@@ -835,30 +939,24 @@ impl Chat {
     }
 }
 
-/// `thread` plus the results of the round in progress, as one more message
-/// (the one the round will push).
-fn shown(thread: Option<&ThreadFile>, round: &[ToolResult]) -> Thread {
-    let mut shown = thread.map(|t| t.thread.clone()).unwrap_or_default();
-    if !round.is_empty() {
-        shown.messages.push(Message {
-            role: Role::User,
-            blocks: round.iter().cloned().map(Block::ToolResult).collect(),
-            origin: None,
-            usage: None,
-        });
-    }
-    shown
+/// The accounts file as it is now.
+fn load_accounts() -> Result<AccountsFile, SendError> {
+    let path =
+        config::default_path().ok_or_else(|| SendError::Setup("There's no settings folder for AI accounts.".into()))?;
+    config::load(&path).map_err(|e| SendError::Setup(capitalized(&e.to_string())))
 }
 
-/// The UI side of a run: drains the worker's channel about once a frame.
-/// Tool calls update the script view; the other messages go to the chat in
-/// one update per frame (between tool calls). Each update is made from here,
-/// one at a time.
+/// The UI side of a run: drains the worker's channel about once a frame,
+/// within [`FRAME_BUDGET`] and [`FRAME_MESSAGES`]. Tool calls update the
+/// script view; the other messages go to the chat in one update per batch
+/// (between tool calls). Each update is made from here, one at a time.
 async fn pump(rx: mpsc::Receiver<ToUi>, chat: WeakEntity<Chat>, script: WeakEntity<ScriptView>, cx: &mut AsyncApp) {
     loop {
+        let started = Instant::now();
         let mut gone = false;
         let mut batch = vec![];
-        loop {
+        let mut taken = 0;
+        while taken < FRAME_MESSAGES && started.elapsed() < FRAME_BUDGET {
             let msg = match rx.try_recv() {
                 Ok(m) => m,
                 Err(TryRecvError::Empty) => break,
@@ -867,6 +965,7 @@ async fn pump(rx: mpsc::Receiver<ToUi>, chat: WeakEntity<Chat>, script: WeakEnti
                     break;
                 }
             };
+            taken += 1;
             let done = matches!(msg, ToUi::Done(_));
             if matches!(msg, ToUi::Call { .. } | ToUi::Gate { .. }) {
                 // Everything before the call shows first.
@@ -917,7 +1016,7 @@ fn run_tool(msg: ToUi, chat: &WeakEntity<Chat>, script: &WeakEntity<ScriptView>,
                     let mut live = LiveScript::new(view, cx);
                     let done = exec::run_call(&mut live, &mut file, &call);
                     let notes = exec::Script::take_notes(&mut live);
-                    (Some(Box::new(file)), done, notes)
+                    (Some((file.review_id, file.review_path)), done, notes)
                 });
                 ran.unwrap_or_else(|_| (None, CallDone::new(&call, CLOSED, true), vec![]))
             };
@@ -1000,6 +1099,7 @@ mod tests {
             model: None,
             accounts,
             seen: f.0.join("seen.json"),
+            accepted: vec![],
         }
     }
 
@@ -1021,7 +1121,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let keys = Keys::in_memory(|_| Some("sk-test".into()));
         let worker = {
-            let cancel = cancel.clone();
+            let (cancel, transport) = (cancel.clone(), transport.clone());
             std::thread::spawn(move || work(job, transport, keys, tx, cancel))
         };
         let mut tools = Direct(FileScript::new(&f.0.join("film.fdx")).unwrap());
@@ -1032,7 +1132,7 @@ mod tests {
                     seen.texts.push_str(&text);
                     on_text();
                 }
-                ToUi::Event(_) | ToUi::Waiting(_) | ToUi::Notice(_) => {}
+                ToUi::Event(_) | ToUi::Waiting(_) | ToUi::Busy(_) | ToUi::Notice(_) => {}
                 ToUi::ToolFinished(_, done) => seen.finished.push(done),
                 ToUi::Saved(_) => seen.saved += 1,
                 ToUi::Ask(q, reply) => {
@@ -1043,13 +1143,17 @@ mod tests {
                     reply.send(host::Tools::gate(&mut tools, &file, &call, allow, price.as_ref())).unwrap();
                 }
                 ToUi::Call { mut file, call, reply } => {
+                    // Calls carry the thread without its messages.
+                    assert!(file.thread.messages.is_empty() && file.system.is_empty());
                     let done = host::Tools::call(&mut tools, &mut file, &call);
-                    reply.send((Some(file), done, vec![])).unwrap();
+                    reply.send((Some((file.review_id, file.review_path)), done, vec![])).unwrap();
                 }
                 ToUi::Done(r) => seen.done = Some(r),
             }
         }
         worker.join().unwrap();
+        // Every exchange of the cassette was used.
+        transport.finish().unwrap();
         seen
     }
 
@@ -1111,17 +1215,8 @@ mod tests {
         let seen = drive(&f, again, "", CancelToken::new(), || {});
         let failed = seen.done.unwrap().unwrap_err();
         assert_eq!(failed.text, BUSY_THREAD);
-        assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn the_shown_thread_has_the_rounds_results_as_one_more_message() {
-        let r = ToolResult { id: "a".into(), content: "ok".into(), is_error: false };
-        assert!(shown(None, &[]).messages.is_empty());
-        let t = shown(None, std::slice::from_ref(&r));
-        assert_eq!(t.messages.len(), 1);
-        assert_eq!(t.messages[0].role, Role::User);
-        assert_eq!(t.messages[0].blocks, [Block::ToolResult(r)]);
+        // Refused after the short wait for this process's own stopping runs.
+        assert!(started.elapsed() >= THREAD_WAIT && started.elapsed() < THREAD_WAIT * 4);
     }
 
     #[test]

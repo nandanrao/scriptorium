@@ -117,6 +117,15 @@ pub trait Ui {
     fn tool_finished(&mut self, _call: &ToolCall, _done: &exec::CallDone) {}
     /// Something to tell the writer (older tools, a review file left out…).
     fn notice(&mut self, _text: &str) {}
+    /// A call is waiting for the script's files (`true`, once, when it
+    /// starts waiting), or stopped waiting (`false`: it ran, or gave up).
+    /// Transient: the CLI says [`BUSY_WAITING`] once as a notice; the app
+    /// shows a line while it lasts.
+    fn busy(&mut self, waiting: bool) {
+        if waiting {
+            self.notice(BUSY_WAITING);
+        }
+    }
     /// The thread was saved after a step: the writer's message pushed, a
     /// reply pushed, a round's results pushed, a retry begun, the run over.
     /// Not called after each tool call (results so far go to
@@ -574,6 +583,22 @@ fn run_one(
         (ctx.save)(file)?;
     }
     let mut busy = Busy::default();
+    let done = run_gated(call, tools, file, ctx, ui, &mut busy);
+    if busy.tries > 0 {
+        ui.busy(false);
+    }
+    done
+}
+
+/// [`run_one`] after its planned review name is saved.
+fn run_gated(
+    call: &ToolCall,
+    tools: &mut dyn Tools,
+    file: &mut ThreadFile,
+    ctx: &RoundCtx,
+    ui: &mut dyn Ui,
+    busy: &mut Busy,
+) -> Result<CallDone, HostError> {
     let gate = loop {
         match tools.gate(file, call, ctx.req.allow_whole_script, ctx.price.as_ref()) {
             Err(ReviewError::Busy) if busy.wait(ctx, ui) => continue,
@@ -586,6 +611,10 @@ fn run_one(
         Ok(Gate::Refuse) => false,
         Ok(Gate::Ask { tokens, cost }) => {
             let yes = ui.confirm_whole_script(&exec::whole_script_question(tokens, cost));
+            // Stopped while asking: no answer, so nothing is recorded.
+            if ctx.cancel.is_cancelled() {
+                return Ok(CallDone::new(call, turn::CANCELLED, true));
+            }
             exec::record_whole_script(file, Some(yes), Some(tokens));
             yes
         }
@@ -617,7 +646,7 @@ impl Busy {
             return false;
         }
         if self.tries == 0 {
-            ui.notice(BUSY_WAITING);
+            ui.busy(true);
         }
         self.tries += 1;
         let until = std::time::Instant::now() + ctx.clock.scale(exec::BUSY_RETRY);

@@ -1,18 +1,28 @@
 //! The thread list (U7 fills it in): the header's thread title, which opens
 //! the list of this script's conversations. A Tab stop in the panel.
 
-use gpui::{App, Context, FocusHandle, FontWeight, Window, div, prelude::*};
+use gpui::{App, Context, FocusHandle, FontWeight, SharedString, Window, div, prelude::*};
 
 use crate::theme::*;
 
 pub struct ThreadList {
     /// The title (the list's trigger).
     focus: FocusHandle,
+    /// The open thread's title (the panel keeps it current from the chat).
+    title: SharedString,
 }
 
 impl ThreadList {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self { focus: cx.focus_handle() }
+        Self { focus: cx.focus_handle(), title: "New conversation".into() }
+    }
+
+    pub fn set_title(&mut self, title: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let title = title.into();
+        if self.title != title {
+            self.title = title;
+            cx.notify();
+        }
     }
 
     pub fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -33,6 +43,6 @@ impl Render for ThreadList {
             .rounded_sm()
             .font_weight(FontWeight::SEMIBOLD)
             .when(focused, |d| d.bg(ACCENT_SOFT))
-            .child("New conversation")
+            .child(self.title.clone())
     }
 }

@@ -149,6 +149,8 @@ struct TestUi {
     finished: Vec<CallDone>,
     cancel_on_text: Option<CancelToken>,
     cancel_on_tool: Option<CancelToken>,
+    /// Stop while the whole-script question is shown.
+    cancel_on_ask: Option<CancelToken>,
     /// While the disclosure is shown, whether thread `.1` of script `.0` was
     /// free to lock.
     probe: Option<(PathBuf, String)>,
@@ -191,6 +193,10 @@ impl Ui for TestUi {
     }
     fn confirm_whole_script(&mut self, question: &str) -> bool {
         self.asked.push(question.to_string());
+        if let Some(c) = &self.cancel_on_ask {
+            c.cancel();
+            return false;
+        }
         self.allow_whole
     }
 }
@@ -520,6 +526,34 @@ fn a_stored_not_now_refuses_read_script_unless_allowed() {
     let mut ui = TestUi::new();
     let done = run_with(&f, &req, &allowed, &mut ui, &CancelToken::new()).unwrap();
     assert_eq!(done.thread.whole_script, Some(false));
+}
+
+/// The CLI's tools, except that `read_script` always asks first.
+struct AskFirst(Direct<FileScript>);
+
+impl Tools for AskFirst {
+    fn gate(&mut self, _: &ThreadFile, call: &ToolCall, _: bool, _: Option<&Price>) -> Result<Gate, ReviewError> {
+        Ok(if call.name == "read_script" { Gate::Ask { tokens: 30_000, cost: None } } else { Gate::Run })
+    }
+    fn call(&mut self, file: &mut ThreadFile, call: &ToolCall) -> CallDone {
+        self.0.call(file, call)
+    }
+}
+
+#[test]
+fn stopping_at_the_whole_script_question_records_no_answer() {
+    let f = Folder::new("whole-stop");
+    let cassette = tools(json!({}), &[("toolu_1", "read_script", json!({}))]);
+    let script = f.script();
+    let req = Request::new(&script, Which::New, Some("Read it all"));
+    let cancel = CancelToken::new();
+    let mut ui = TestUi { cancel_on_ask: Some(cancel.clone()), ..TestUi::new() };
+    let done = run_on(&f, &req, &replay(&cassette), &mut AskFirst(file_tools(&f)), &mut ui, &cancel, &OPTS).unwrap();
+    assert_eq!(done.outcome, Outcome::Stopped);
+    assert_eq!(ui.asked.len(), 1);
+    // Cancelled is not "Not now": the next run asks again.
+    assert_eq!(done.thread.whole_script, None);
+    assert_eq!(exec::whole_script_tokens(&done.thread), None);
 }
 
 #[test]

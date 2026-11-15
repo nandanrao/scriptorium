@@ -53,7 +53,7 @@ pub use file::{FileScript, FileStore};
 pub const BUSY: &str = "The script's files are busy in another program; try again.";
 
 /// The reason a proposal on the line the writer is rewriting is refused
-/// ([`ReviewStore::editing_para`]).
+/// ([`ReviewStore::editing_paras`]).
 pub const EDITING_LINE: &str = "The writer is editing this line right now; propose it later.";
 
 /// Why a store couldn't do what was asked.
@@ -118,11 +118,12 @@ pub trait ReviewStore {
     #[allow(clippy::type_complexity)]
     fn session_mut(&mut self) -> (&mut Session, &Document, &dyn Fn(&ElementKind) -> bool);
 
-    /// The line the writer is rewriting right now, if any (the app's): a
-    /// proposal touching it is refused with [`EDITING_LINE`]; the rest of a
-    /// batch goes on. The CLI has none.
-    fn editing_para(&self) -> Option<ParaId> {
-        None
+    /// The lines the writer is rewriting right now (the app's; every line
+    /// of a block being rewritten): a proposal touching any of them is
+    /// refused with [`EDITING_LINE`]; the rest of a batch goes on. The CLI
+    /// has none.
+    fn editing_paras(&self) -> Vec<ParaId> {
+        vec![]
     }
 
     /// The file at `path` as it is on disk now, `None` if it can't be read.
@@ -250,8 +251,9 @@ pub fn apply_append(
     mut append: Append,
 ) -> Result<Applied, ReviewError> {
     let (r, attached_here) = resolve(store, file, &append.target)?;
-    if let Some(editing) = store.editing_para() {
-        refuse_editing(&mut append, editing);
+    let editing = store.editing_paras();
+    if !editing.is_empty() {
+        refuse_editing(&mut append, &editing);
     }
     let result = {
         let (session, doc, caps) = store.session_mut();
@@ -279,10 +281,11 @@ pub fn apply_append(
     }
 }
 
-/// Moves the proposals that touch line `editing` to `append.failed`.
-fn refuse_editing(append: &mut Append, editing: ParaId) {
-    let (refused, kept): (Vec<_>, Vec<_>) =
-        std::mem::take(&mut append.proposals).into_iter().partition(|p| p.entry.para.contains(&editing));
+/// Moves the proposals that touch any of the lines `editing` to `append.failed`.
+fn refuse_editing(append: &mut Append, editing: &[ParaId]) {
+    let (refused, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut append.proposals)
+        .into_iter()
+        .partition(|p| p.entry.para.iter().any(|id| editing.contains(id)));
     append.proposals = kept;
     append.failed.extend(refused.into_iter().map(|p| Failed {
         index: p.index,

@@ -151,6 +151,8 @@ pub enum Kind {
         /// The provider's or library's own message, for an expandable detail.
         detail: String,
         retryable: bool,
+        /// The button the row offers, if any.
+        action: Option<ErrorAction>,
     },
     /// A retryable failure; sending again in `secs`.
     Waiting {
@@ -186,6 +188,45 @@ pub struct Failure {
     /// The raw error text.
     pub detail: String,
     pub retryable: bool,
+    pub action: Option<ErrorAction>,
+}
+
+/// What an error row offers (docs/plans/chat-panel.md, "Cancel and errors").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorAction {
+    /// Send the thread again ([Retry]).
+    Retry,
+    /// Go on after the round limit ([Continue]).
+    Continue,
+    /// The key was refused, or there is no account or key.
+    ManageAccounts,
+    /// The provider refused the request (unknown model…).
+    ChooseModel,
+    /// The thread can't go on as it is (the tools-changed banner, U7).
+    NewThread,
+}
+
+impl ErrorAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            ErrorAction::Retry => "Retry",
+            ErrorAction::Continue => "Continue",
+            ErrorAction::ManageAccounts => "Manage accounts",
+            ErrorAction::ChooseModel => "Choose model",
+            ErrorAction::NewThread => "New thread",
+        }
+    }
+}
+
+/// The button for a failed run's `error`.
+pub fn error_action(error: &AgentError) -> Option<ErrorAction> {
+    use scriptorium_agent::ErrorKind;
+    match error {
+        AgentError::Api { kind: ErrorKind::Auth, .. } => Some(ErrorAction::ManageAccounts),
+        AgentError::Api { kind: ErrorKind::BadRequest, .. } => Some(ErrorAction::ChooseModel),
+        AgentError::Api { .. } | AgentError::Parse(_) | AgentError::Mismatch(_) => Some(ErrorAction::Retry),
+        AgentError::NotReady(_) | AgentError::File(_) => None,
+    }
 }
 
 /// The reply being streamed, plus the run's state lines. Fed by the shell.
@@ -269,14 +310,16 @@ impl Stream {
     pub fn fail(&mut self, error: &AgentError) {
         self.clear();
         let retryable = matches!(error, AgentError::Api { retryable: true, .. });
-        self.failure = Some(Failure { text: plain_error(error), detail: error.to_string(), retryable });
+        let action = error_action(error);
+        self.failure = Some(Failure { text: plain_error(error), detail: error.to_string(), retryable, action });
     }
 
     /// A failure told in words (the thread is busy elsewhere, the round
-    /// limit…): shown like [`Stream::fail`].
-    pub fn fail_with(&mut self, text: impl Into<String>, retryable: bool) {
+    /// limit…), offering `action`: shown like [`Stream::fail`], no detail.
+    pub fn fail_with(&mut self, text: impl Into<String>, action: Option<ErrorAction>) {
         self.clear();
-        self.failure = Some(Failure { text: text.into(), detail: String::new(), retryable });
+        let retryable = matches!(action, Some(ErrorAction::Retry | ErrorAction::Continue));
+        self.failure = Some(Failure { text: text.into(), detail: String::new(), retryable, action });
     }
 
     /// The writer pressed Stop: running rows read "Not run (stopped)" and a
@@ -498,7 +541,12 @@ fn stream_rows(message: usize, stream: &Stream, out: &mut Vec<Row>) {
     if let Some(f) = &stream.failure {
         out.push(Row {
             key: Key::Tail("error"),
-            kind: Kind::Error { text: f.text.clone(), detail: f.detail.clone(), retryable: f.retryable },
+            kind: Kind::Error {
+                text: f.text.clone(),
+                detail: f.detail.clone(),
+                retryable: f.retryable,
+                action: f.action,
+            },
         });
     }
     if stream.stopped {
@@ -923,7 +971,8 @@ mod tests {
             vec![&Kind::Error {
                 text: plain_error(&AgentError::offline("no connection")),
                 detail: "no connection".into(),
-                retryable: true
+                retryable: true,
+                action: Some(ErrorAction::Retry),
             }]
         );
         assert_eq!(s.failure().unwrap().detail, "no connection");
@@ -942,7 +991,8 @@ mod tests {
             vec![&Kind::Error {
                 text: "The service's reply wasn't understood.".into(),
                 detail: "unexpected reply: bad".into(),
-                retryable: false
+                retryable: false,
+                action: Some(ErrorAction::Retry),
             }]
         );
     }

@@ -33,8 +33,8 @@ struct Mem {
     /// A name another program creates just before this store tries to.
     race: Option<String>,
     reloads: usize,
-    /// The line being rewritten.
-    editing: Option<ParaId>,
+    /// The lines being rewritten.
+    editing: Vec<ParaId>,
 }
 
 impl Mem {
@@ -49,7 +49,7 @@ impl Mem {
             caps: Box::new(|k| k.name() == "Character"),
             race: None,
             reloads: 0,
-            editing: None,
+            editing: vec![],
         }
     }
 
@@ -89,8 +89,8 @@ impl ReviewStore for Mem {
     fn disk_text(&self, path: &Path) -> Option<String> {
         self.files.get(path).cloned()
     }
-    fn editing_para(&self) -> Option<ParaId> {
-        self.editing
+    fn editing_paras(&self) -> Vec<ParaId> {
+        self.editing.clone()
     }
     fn file_names(&self) -> Result<Vec<String>, ReviewError> {
         Ok(self.files.keys().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect())
@@ -156,8 +156,8 @@ impl ReviewStore for Borrowed<'_> {
     fn disk_text(&self, path: &Path) -> Option<String> {
         self.0.disk_text(path)
     }
-    fn editing_para(&self) -> Option<ParaId> {
-        self.0.editing_para()
+    fn editing_paras(&self) -> Vec<ParaId> {
+        self.0.editing_paras()
     }
     fn file_names(&self) -> Result<Vec<String>, ReviewError> {
         self.0.file_names()
@@ -426,7 +426,8 @@ fn the_new_review_text() {
 #[test]
 fn a_proposal_on_the_line_being_rewritten_is_refused() {
     let mut s = OneStore(Mem::new());
-    s.0.editing = Some(ParaId(3));
+    // A block of two lines is being rewritten; the proposal is on its second.
+    s.0.editing = vec![ParaId(2), ParaId(3)];
     let mut file = thread("Dialogue pass");
     // One suggestion, on that line: an error, nothing written.
     let done = call(&mut s, &mut file, suggest("a", 3, "I am going to town tomorrow."));
