@@ -22,6 +22,11 @@ scriptorium-tools.workspace = true
 # GPUI: crates.io snapshot gpui-pre (same as gpui-kit).
 gpui = { package = "gpui-pre", version = "=0.3.12" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["wayland", "x11", "font-kit"] }
+# The chat panel's view model (agent_panel/view_model.rs): threads and stream
+# events in, rows out, with the shared chat core's tool-row labels.
+scriptorium-agent.workspace = true
+scriptorium-chat = { path = "../chat" }
+serde_json.workspace = true
 unicode-segmentation.workspace = true
 
 [lints]
