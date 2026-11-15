@@ -58,6 +58,69 @@ impl Entry {
     }
 }
 
+/// Parses an RFC 3339 time (`2026-11-15T09:30:00Z`, `…T10:30:00.5+01:00`;
+/// `t`/`z` in lower case too) to Unix seconds, as thread files store
+/// `created` and `updated`. Fractions of a second are dropped. `None` for
+/// anything else, impossible dates and times included, and for times before
+/// 1970. A leap second (`:60`) counts as the next second.
+pub fn parse_rfc3339(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let d = b.get(r)?;
+        d.iter().all(u8::is_ascii_digit).then(|| d.iter().fold(0, |n, c| n * 10 + i64::from(c - b'0')))
+    };
+    let at = |i: usize, c: &[u8]| b.get(i).is_some_and(|x| c.contains(x));
+    if !(at(4, b"-") && at(7, b"-") && at(10, b"Tt") && at(13, b":") && at(16, b":")) {
+        return None;
+    }
+    let (year, month, day) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hour, minute, second) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1..=12).contains(&month)
+        || day < 1
+        || day > month_days[month as usize - 1]
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let mut i = 19;
+    if at(i, b".") {
+        i += 1;
+        let start = i;
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+    }
+    let offset = match b.get(i)? {
+        b'Z' | b'z' if i + 1 == b.len() => 0,
+        sign @ (b'+' | b'-') if at(i + 3, b":") && i + 6 == b.len() => {
+            let (h, m) = (num(i + 1..i + 3)?, num(i + 4..i + 6)?);
+            if h > 23 || m > 59 {
+                return None;
+            }
+            let o = h * 3600 + m * 60;
+            if *sign == b'-' { -o } else { o }
+        }
+        _ => return None,
+    };
+    // Civil date to days since 1970-01-01 (proleptic Gregorian), after
+    // Howard Hinnant; the inverse of `clock::rfc3339_utc`.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hour * 3600 + minute * 60 + second - offset).ok()
+}
+
 /// The list newest first (ties by id, descending, so the order is stable).
 pub fn sorted(mut entries: Vec<Entry>) -> Vec<Entry> {
     entries.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| b.id.cmp(&a.id)));
@@ -108,6 +171,34 @@ mod tests {
 
     fn entry(id: &str, updated: u64) -> Entry {
         Entry { id: id.into(), title: id.into(), model: "m".into(), updated, suggestions: None, problem: None }
+    }
+
+    #[test]
+    fn rfc3339_times() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2000-02-29T00:00:00Z"), Some(951_782_400));
+        assert_eq!(parse_rfc3339("2026-11-15T09:30:45Z"), Some(1_794_735_045));
+        assert_eq!(parse_rfc3339("2026-11-15t09:30:45.999z"), Some(1_794_735_045));
+        assert_eq!(parse_rfc3339("2026-11-15T10:30:45+01:00"), Some(1_794_735_045));
+        assert_eq!(parse_rfc3339("2026-11-15T04:00:45-05:30"), Some(1_794_735_045));
+        assert_eq!(parse_rfc3339("2016-12-31T23:59:60Z"), parse_rfc3339("2017-01-01T00:00:00Z"));
+        for bad in [
+            "",
+            "2026-11-15",
+            "2026-11-15T09:30:00",
+            "2026-11-15T09:30:00.Z",
+            "2026-11-15T09:30Z",
+            "2026-13-01T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "1900-02-29T00:00:00Z",
+            "2026-11-15T24:00:00Z",
+            "2026-11-15T09:30:00+1:00",
+            "2026-11-15T09:30:00Zx",
+            "1969-12-31T23:59:59Z",
+            "２026-11-15T09:30:00Z",
+        ] {
+            assert_eq!(parse_rfc3339(bad), None, "{bad}");
+        }
     }
 
     #[test]

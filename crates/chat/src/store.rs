@@ -13,10 +13,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use scriptorium_agent::file::ThreadFile;
+use scriptorium_agent::file::{ThreadFile, VERSION};
 use scriptorium_fsio::write_atomic;
 
 use crate::clock::IdSource;
+use crate::core::model::{Entry, Problem, parse_rfc3339};
 use crate::lock::ThreadLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +30,14 @@ pub enum StoreError {
     NotFound(String),
     /// Not a possible thread id (ids are letters, digits, `-` and `_`).
     BadId(String),
-    /// The thread file can't be read: not JSON, or a newer version.
+    /// The thread file can't be read: not JSON, or not a thread.
     File {
+        id: String,
+        message: String,
+    },
+    /// The thread file was written by a newer Scriptorium (a format version
+    /// this one doesn't read); `message` says which.
+    Newer {
         id: String,
         message: String,
     },
@@ -51,7 +58,9 @@ impl fmt::Display for StoreError {
             StoreError::RunningHere => write!(f, "this thread is already running"),
             StoreError::NotFound(id) => write!(f, "no thread {id}"),
             StoreError::BadId(id) => write!(f, "{id:?} is not a thread id"),
-            StoreError::File { id, message } => write!(f, "thread {id}: {message}"),
+            StoreError::File { id, message } | StoreError::Newer { id, message } => {
+                write!(f, "thread {id}: {message}")
+            }
             StoreError::WrongLock { lock, thread } => {
                 write!(f, "thread {thread} can't be written under the lock for thread {lock}")
             }
@@ -146,8 +155,11 @@ impl ThreadStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(StoreError::NotFound(id.to_string())),
             Err(e) => return Err(io_err(&path, e)),
         };
-        let file = ThreadFile::from_json(&text)
-            .map_err(|e| StoreError::File { id: id.to_string(), message: e.to_string() })?;
+        let file = ThreadFile::from_json(&text).map_err(|e| {
+            let message = e.to_string();
+            let id = id.to_string();
+            if is_newer(&text) { StoreError::Newer { id, message } } else { StoreError::File { id, message } }
+        })?;
         if file.id != id {
             return Err(StoreError::File {
                 id: id.to_string(),
@@ -233,6 +245,47 @@ impl ThreadStore {
     }
 }
 
+/// Whether `text` is JSON whose `version` is past the one this build writes.
+fn is_newer(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("version")?.as_u64())
+        .is_some_and(|v| v > u64::from(VERSION))
+}
+
+impl Entry {
+    /// The thread list's entry for a listed thread file. `updated` is parsed
+    /// from the file's RFC 3339 `updated` (or `created`, for a file without
+    /// one); unparseable, it is 0 and the thread sorts last. A file that
+    /// can't be read is greyed with the reason, and a newer version's says
+    /// so ([`Problem::Newer`]). `suggestions`: its review's count, which the
+    /// caller reads (this does no I/O).
+    pub fn from_listed(listed: &Listed, suggestions: Option<usize>) -> Self {
+        match &listed.file {
+            Ok(f) => Entry {
+                id: listed.id.clone(),
+                title: f.title.clone(),
+                model: f.model.clone(),
+                updated: parse_rfc3339(&f.updated).or_else(|| parse_rfc3339(&f.created)).unwrap_or(0),
+                suggestions,
+                problem: None,
+            },
+            Err(e) => Entry {
+                id: listed.id.clone(),
+                title: listed.id.clone(),
+                model: String::new(),
+                updated: 0,
+                suggestions: None,
+                problem: Some(match e {
+                    StoreError::Newer { message, .. } => Problem::Newer(message.clone()),
+                    StoreError::File { message, .. } => Problem::Unreadable(message.clone()),
+                    other => Problem::Unreadable(other.to_string()),
+                }),
+            },
+        }
+    }
+}
+
 fn checked(id: &str) -> Result<&str, StoreError> {
     if is_valid_id(id) { Ok(id) } else { Err(StoreError::BadId(id.to_string())) }
 }
@@ -242,7 +295,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::clock::{SequentialIds, from_vars};
     use scriptorium_agent::Thread;
-    use scriptorium_agent::file::{VERSION, tools_hash};
+    use scriptorium_agent::file::tools_hash;
 
     /// A fresh scratch folder for one test.
     pub(crate) fn scratch(name: &str) -> PathBuf {
@@ -342,9 +395,34 @@ pub(crate) mod tests {
         let ids: Vec<_> = listed.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["bad", "new", "ok", "other"]);
         assert!(matches!(&listed[0].file, Err(StoreError::File { .. })));
-        assert!(matches!(&listed[1].file, Err(StoreError::File { message, .. }) if message.contains("version")));
+        assert!(matches!(&listed[1].file, Err(StoreError::Newer { message, .. }) if message.contains("version")));
         assert!(listed[2].file.is_ok());
         assert!(matches!(&listed[3].file, Err(StoreError::File { message, .. }) if message.contains("t9")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entries_from_listed_threads() {
+        let dir = scratch("entries");
+        let store = ThreadStore::new(dir.clone());
+        let mut ok = thread("ok", "Tighten act one");
+        ok.updated = "2026-11-15T10:30:45+01:00".into();
+        fs::write(dir.join("ok.json"), ok.to_json()).unwrap();
+        let mut old = thread("old", "x");
+        old.updated = String::new();
+        fs::write(dir.join("old.json"), old.to_json()).unwrap();
+        let mut newer: serde_json::Value = serde_json::from_str(&thread("new", "x").to_json()).unwrap();
+        newer["version"] = (VERSION + 1).into();
+        fs::write(dir.join("new.json"), newer.to_string()).unwrap();
+        fs::write(dir.join("bad.json"), "not json").unwrap();
+        let entries: Vec<Entry> = store.list().unwrap().iter().map(|l| Entry::from_listed(l, Some(3))).collect();
+        let [bad, new, ok, old] = &entries[..] else { panic!("{entries:?}") };
+        assert_eq!((ok.title.as_str(), ok.model.as_str()), ("Tighten act one", "claude-opus-5-5"));
+        assert_eq!((ok.updated, ok.suggestions, ok.problem.is_none()), (1_794_735_045, Some(3), true));
+        assert_eq!(old.updated, parse_rfc3339("2026-11-15T09:30:00Z").unwrap(), "falls back to created");
+        assert!(matches!(&new.problem, Some(Problem::Newer(m)) if m.contains("version")), "{new:?}");
+        assert!(matches!(&bad.problem, Some(Problem::Unreadable(_))), "{bad:?}");
+        assert!(bad.greyed() && bad.suggestions.is_none() && bad.title == "bad");
         let _ = fs::remove_dir_all(&dir);
     }
 

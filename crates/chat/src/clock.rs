@@ -153,39 +153,7 @@ pub fn rfc3339_utc(secs: u64) -> String {
 
 /// `YYYY-MM-DDTHH:MM:SS`, an optional fraction, then `Z` or `±HH:MM`.
 fn is_rfc3339(s: &str) -> bool {
-    let b = s.as_bytes();
-    let digits = |r: std::ops::Range<usize>| b.get(r).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
-    let at = |i: usize, c: u8| b.get(i) == Some(&c);
-    if !(digits(0..4)
-        && at(4, b'-')
-        && digits(5..7)
-        && at(7, b'-')
-        && digits(8..10)
-        && (at(10, b'T') || at(10, b't'))
-        && digits(11..13)
-        && at(13, b':')
-        && digits(14..16)
-        && at(16, b':')
-        && digits(17..19))
-    {
-        return false;
-    }
-    let mut i = 19;
-    if at(i, b'.') {
-        i += 1;
-        let start = i;
-        while b.get(i).is_some_and(u8::is_ascii_digit) {
-            i += 1;
-        }
-        if i == start {
-            return false;
-        }
-    }
-    match b.get(i) {
-        Some(b'Z' | b'z') => i + 1 == b.len(),
-        Some(b'+' | b'-') => digits(i + 1..i + 3) && at(i + 3, b':') && digits(i + 4..i + 6) && i + 6 == b.len(),
-        _ => false,
-    }
+    crate::core::model::parse_rfc3339(s).is_some()
 }
 
 #[cfg(test)]
