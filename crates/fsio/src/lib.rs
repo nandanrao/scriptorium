@@ -1,7 +1,11 @@
 //! Writing files so a reader (the app, another CLI run, an agent) never sees
 //! half of one, and a crash mid-write leaves the old file in place; and
 //! [`SessionLock`], which keeps two programs from writing a script's session
-//! at once.
+//! at once. With the `opened` feature, [`opened`]: a script opened with its
+//! saved session, the way the CLI and the chat host open it.
+
+#[cfg(feature = "opened")]
+pub mod opened;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
