@@ -10,7 +10,7 @@ use scriptorium_agent::{Effort, Origin, Protocol, Thread};
 
 use crate::ProvidersError;
 use crate::account::{Account, header_problem};
-use crate::models::capabilities;
+use crate::models::{ChatTools, capabilities};
 
 /// The output limit for a known model when the account sets none. Streaming,
 /// so a large limit doesn't risk a timeout; long review passes need room.
@@ -29,6 +29,10 @@ pub struct Resolved {
     pub needs_key: bool,
     pub max_tokens: Option<u64>,
     pub effort: Option<Effort>,
+    /// Send `reasoning_effort: "none"` in place of [`Resolved::effort`]: an
+    /// OpenAI model that calls tools on Chat Completions only without
+    /// reasoning ([`ChatTools::WithoutReasoning`]).
+    pub reasoning_off: bool,
     pub thinking: Thinking,
     /// Extra headers: the provider's, then the account's valid,
     /// non-reserved ones.
@@ -45,7 +49,9 @@ pub struct Resolved {
 /// it. For any other model, effort and the output limit are sent as the
 /// writer set them (no limit set: the protocol's default) and thinking is
 /// left to the model's default: the table only removes what a known model
-/// would refuse.
+/// would refuse. On the OpenAI Chat Completions protocol, a model that takes
+/// tools only without reasoning gets `reasoning_effort: "none"` whatever
+/// effort the account sets.
 pub fn resolve(account: &Account, model: Option<&str>) -> Result<Resolved, ProvidersError> {
     let model = model
         .filter(|m| !m.trim().is_empty())
@@ -66,6 +72,9 @@ pub fn resolve(account: &Account, model: Option<&str>) -> Result<Resolved, Provi
         ),
         None => (account.effort, account.max_tokens, Thinking::Default),
     };
+    let reasoning_off =
+        protocol == Protocol::OpenaiChat && caps.is_some_and(|c| c.chat_tools == ChatTools::WithoutReasoning);
+    let effort = if reasoning_off { None } else { effort };
     Ok(Resolved {
         account: account.id.clone(),
         protocol,
@@ -74,6 +83,7 @@ pub fn resolve(account: &Account, model: Option<&str>) -> Result<Resolved, Provi
         needs_key: account.provider.needs_key(),
         max_tokens,
         effort,
+        reasoning_off,
         thinking,
         headers: headers(account),
     })
@@ -139,7 +149,11 @@ pub fn build_request(
     thread: &Thread,
 ) -> Result<Request, ProvidersError> {
     let key = resolved.key(api_key)?;
-    Ok(protocol::build_request(resolved.protocol, &resolved.call(key, system, tools), thread)?)
+    let mut request = protocol::build_request(resolved.protocol, &resolved.call(key, system, tools), thread)?;
+    if resolved.reasoning_off {
+        request.body["reasoning_effort"] = "none".into();
+    }
+    Ok(request)
 }
 
 /// The accounts sheet's "Check" request: lists `account`'s models. It is
@@ -229,6 +243,38 @@ mod tests {
         assert_eq!(req.body["max_completion_tokens"], 4096);
         a.max_tokens = None;
         assert_eq!(resolve(&a, None).unwrap().max_tokens, None, "unknown model: the protocol's default");
+    }
+
+    #[test]
+    fn openai_models_that_need_no_reasoning_for_tools_get_none() {
+        let mut a = Account::new("o", "OpenAI", Provider::Openai);
+        for effort in [None, Some(Effort::Low), Some(Effort::Max)] {
+            a.effort = effort;
+            for model in ["gpt-6-sol", "gpt-5.6-terra", "gpt-5.4-mini-2026-03-17"] {
+                let r = resolve(&a, Some(model)).unwrap();
+                assert!(r.reasoning_off && r.effort.is_none(), "{model}");
+                let req = build_request(&r, Some("k"), "", &[], &thread()).unwrap();
+                assert_eq!(req.body["reasoning_effort"], "none", "{model} {effort:?}");
+                assert_eq!(req.body["max_completion_tokens"], DEFAULT_MAX_TOKENS, "a known model");
+            }
+        }
+        // GPT-5.2 takes tools at any effort.
+        a.effort = Some(Effort::Medium);
+        let r = resolve(&a, Some("gpt-5.2")).unwrap();
+        assert!(!r.reasoning_off);
+        assert_eq!(build_request(&r, Some("k"), "", &[], &thread()).unwrap().body["reasoning_effort"], "medium");
+        // A tool-less model goes out as written; the account warns instead.
+        let r = resolve(&a, Some("gpt-6.1-sol")).unwrap();
+        assert_eq!(build_request(&r, Some("k"), "", &[], &thread()).unwrap().body["reasoning_effort"], "medium");
+        // Only on the OpenAI protocol: OpenRouter's ids aren't OpenAI's.
+        let or = Account::new("or", "OpenRouter", Provider::Openrouter);
+        assert!(!resolve(&or, Some("openai/gpt-6-sol")).unwrap().reasoning_off);
+        let anthropic = Account::new(
+            "c",
+            "Proxy",
+            Provider::Custom { protocol: Protocol::Anthropic, base_url: "https://proxy.example/v1".into() },
+        );
+        assert!(!resolve(&anthropic, Some("gpt-6-sol")).unwrap().reasoning_off);
     }
 
     #[test]

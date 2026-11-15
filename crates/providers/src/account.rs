@@ -283,19 +283,40 @@ impl Account {
     }
 
     /// Things worth telling the writer that don't stop the account working:
-    /// a key sent over plain `http://` to another machine.
+    /// a key sent over plain `http://` to another machine
+    /// ([`Account::insecure_http`]), or a model that can't call tools here
+    /// ([`Account::refuses_tools`]).
     pub fn warnings(&self) -> Vec<String> {
         let mut out = vec![];
-        if let Provider::Custom { base_url, .. } = &self.provider
-            && base_url.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://"))
-            && !is_local(base_url)
-        {
+        if self.insecure_http() {
             out.push(format!(
-                "account \"{}\": {base_url} is plain http to another machine; the key and the script text travel unencrypted",
+                "account \"{}\": {} is plain http to another machine; the key and the script text travel unencrypted",
+                self.id,
+                self.provider.base_url()
+            ));
+        }
+        if let Some(model) = self.refuses_tools() {
+            out.push(format!(
+                "account \"{}\": {model} can't call tools over OpenAI's Chat Completions (only its Responses API), so it can't read or edit the script",
                 self.id
             ));
         }
         out
+    }
+
+    /// Whether the key goes over plain `http://` to another machine.
+    pub fn insecure_http(&self) -> bool {
+        matches!(&self.provider, Provider::Custom { base_url, .. }
+            if base_url.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://")) && !is_local(base_url))
+    }
+
+    /// The account's model, if the table knows it can't call tools on this
+    /// account's protocol ([`crate::ChatTools::No`]).
+    pub fn refuses_tools(&self) -> Option<&str> {
+        let model = self.model.as_deref().filter(|m| !m.trim().is_empty()).or(self.provider.default_model())?;
+        let no = self.provider.protocol() == Protocol::OpenaiChat
+            && crate::models::capabilities(model).is_some_and(|c| c.chat_tools == crate::ChatTools::No);
+        no.then_some(model)
     }
 
     fn check(&self) -> Result<(), String> {
@@ -771,6 +792,24 @@ mod tests {
         let mut file = AccountsFile::default();
         file.upsert(custom("http://api.example.org/v1")).unwrap();
         assert_eq!(file.warnings().len(), 1);
+    }
+
+    #[test]
+    fn a_model_without_chat_tools_warns() {
+        let mut a = Account::new("o", "OpenAI", Provider::Openai);
+        assert!(a.warnings().is_empty(), "the default model calls tools");
+        for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"] {
+            a.model = Some(model.into());
+            assert_eq!(a.refuses_tools(), Some(model));
+            let w = a.warnings();
+            assert!(w.len() == 1 && w[0].contains(model) && w[0].contains("tools"), "{w:?}");
+            assert!(!a.insecure_http());
+        }
+        a.model = Some("gpt-6-sol".into());
+        assert!(a.warnings().is_empty(), "sent without reasoning instead");
+        let mut or = Account::new("or", "OpenRouter", Provider::Openrouter);
+        or.model = Some("openai/gpt-6.1-sol".into());
+        assert!(or.warnings().is_empty(), "OpenRouter's ids aren't in the table");
     }
 
     #[test]

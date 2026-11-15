@@ -35,19 +35,19 @@ pub const ANTHROPIC: Preset = Preset {
     keys_url: "https://platform.claude.com/settings/keys",
 };
 
-/// Only GPT-5.2 is suggested: starting with GPT-5.4, OpenAI's Chat
-/// Completions refuses tool calls unless `reasoning_effort` is `none`
-/// (GPT-6 Astra, GPT-6.1 Sol and GPT-6.1 Terra refuse them outright), and
-/// this preset speaks Chat Completions without sending `none`. GPT-5.2
-/// defaults to no reasoning and takes tools at any effort. `gpt-5` and
-/// `gpt-5-mini` shut down 2026-12-11.
+/// Current models that call tools over Chat Completions
+/// (<https://developers.openai.com/api/docs/models>): GPT-6 Sol, GPT-5.6
+/// Terra and GPT-6 Luna only without reasoning (the request sends
+/// `reasoning_effort: "none"`, see [`crate::ChatTools`]); GPT-5.2 at any
+/// effort. GPT-6 Astra, GPT-6.1 Sol and GPT-6.1 Terra call tools only on the
+/// Responses API, so they aren't offered.
 pub const OPENAI: Preset = Preset {
     id: "openai",
     name: "OpenAI",
     protocol: Protocol::OpenaiChat,
     base_url: "https://api.openai.com/v1",
-    default_model: "gpt-5.2",
-    models: &["gpt-5.2"],
+    default_model: "gpt-6-sol",
+    models: &["gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna", "gpt-5.2"],
     keys_url: "https://platform.openai.com/api-keys",
 };
 
