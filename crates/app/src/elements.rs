@@ -257,7 +257,7 @@ impl Element for ParaElement {
         let (is_current, mark, changed) = {
             let ed = self.editor.read(cx);
             let Some(p) = ed.doc.paragraphs().get(self.ix) else { return };
-            let changed = ed.decor.originals.get(&p.id).is_some_and(|o| *o != p.text());
+            let changed = crate::editor::is_changed(&ed.decor.originals, p);
             (ed.decor.current == Some(p.id), ed.decor.marks.get(&p.id).copied(), changed)
         };
         let pad = px(5.);

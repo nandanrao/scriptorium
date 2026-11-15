@@ -29,12 +29,18 @@ back.
 
 The sidebar switches between the plain script and each review; a review lists
 its changes. Keys on the review card: `A`/`Enter` accept, `1` `2` `3` pick an
-option, `Tab` next option, `R` keep mine, `E` rewrite the line in place (`Enter`
+option, `Tab` next option, `R` keep mine, `E` rewrite the line in place (`Ctrl/Cmd+Enter`
 saves, `Esc` puts it back), `J`/`K` next/previous, `U` undo, `Shift+U` redo.
 Click the script to edit text inside a line; `Esc` returns to the card.
 `Ctrl+0`/`Ctrl+1`… switch views, `Ctrl+S` writes `MY SCRIPT (scriptorium).fdx`
 (the original is never changed), `Ctrl+Q` quits. Work is saved as you go in
 `MY SCRIPT.scriptorium.json` and picked up next time.
+
+Editing: `Enter` splits a line, `Backspace`/`Delete` at an edge joins lines,
+and `Tab` changes the line's type (also the way to fix a wrong guess after a
+paste). Pasting from other apps guesses each line's type; a single pasted line
+takes the type of the line it lands in. Copying to Final Draft gives plain
+text. Dual dialogue lines can't be split, joined or removed yet.
 
 From the command line (`scriptorium --help` for everything):
 
@@ -45,6 +51,12 @@ scriptorium suggestions "MY SCRIPT.fdx" --pending --json
 scriptorium decide "MY SCRIPT.fdx" 12 accept 2         # --review <name> if several are attached
 scriptorium suggest review.txt "MY SCRIPT.fdx" --para 40 --after "New text." --why "tense"
 scriptorium apply "MY SCRIPT.fdx"
+scriptorium insert "MY SCRIPT.fdx" --after 12 --block 'Character: ANNA\nDialogue: Hello.'   # or --start / --end
+scriptorium insert "MY SCRIPT.fdx" --end --guess 'INT. KITCHEN - DAY'   # guess each line's type
+scriptorium remove "MY SCRIPT.fdx" 12..15              # first..last in script order
+scriptorium split "MY SCRIPT.fdx" 12 --at "Then"       # or --offset 20
+scriptorium join "MY SCRIPT.fdx" 12 13
+scriptorium retype "MY SCRIPT.fdx" 12 Action
 ```
 
 Problems are logged to `~/Library/Logs/Scriptorium/scriptorium.log` (macOS) or
@@ -54,7 +66,7 @@ Problems are logged to `~/Library/Logs/Scriptorium/scriptorium.log` (macOS) or
 
 Being planned; see [docs/PLAN.md](docs/PLAN.md). Direction so far: writing stays
 in Final Draft at first, and Scriptorium starts with **review** and
-**translation**. Our own text editing comes later.
+**translation**. Structural editing (add, remove, split, join, retype) exists now, in the app and the CLI; full editing is v0.3.0 Phase A, and block suggestions come next.
 
 Done so far: the document model, Final Draft import/export with byte-identical
 round trips, an event-sourced editing core (undo/redo, stable paragraph ids), a

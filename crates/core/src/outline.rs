@@ -57,6 +57,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, (k, t))| Paragraph::plain(ParaId(i as u64), ElementKind::from_name(k), *t))
                 .collect(),
+            ..Script::default()
         }
     }
 

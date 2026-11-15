@@ -274,7 +274,7 @@ fn session_file_resumes_decisions_and_survives_review_changes() {
             .collect()
     };
     let extra = "---\nBEFORE: Laura smiles.\nAFTER: Laura grins.\n";
-    let o = resume(open_with(&[("main.txt", REVIEW)]), fdx.to_script(), &raw, None, &caps, "");
+    let o = resume(open_with(&[("main.txt", REVIEW)]), fdx.to_script(), None, &raw, None, &caps, "");
     assert_eq!(o.how, Resumed::Fresh);
     let mut o = o;
     o.session.decide(&mut o.doc, sel(), 0, 0, Decision::Accept(0)).unwrap();
@@ -284,6 +284,7 @@ fn session_file_resumes_decisions_and_survives_review_changes() {
     let o2 = resume(
         open_with(&[("extra.txt", extra), ("main.txt", REVIEW)]),
         fdx.to_script(),
+        None,
         &raw,
         Some(&saved),
         &caps,
@@ -297,6 +298,7 @@ fn session_file_resumes_decisions_and_survives_review_changes() {
     let o3 = resume(
         open_with(&[("main.txt", REVIEW)]),
         fdx.to_script(),
+        None,
         &raw.replace("Laura", "Lara"),
         Some(&saved),
         &caps,
@@ -350,7 +352,7 @@ fn session_v2_remembers_reviews_and_reopens_without_double_applying() {
     let caps = |k: &scriptorium_core::ElementKind| fdx.is_caps(k.name());
 
     // Started with one review (its decisions are the starting point)...
-    let mut o = resume(vec![src("a.txt", &decided)], script.clone(), &raw, None, &caps, "");
+    let mut o = resume(vec![src("a.txt", &decided)], script.clone(), None, &raw, None, &caps, "");
     assert!(!o.doc.can_undo());
     // ...then another added with a saved decision of its own, then a hand edit.
     let extra_decided = {
@@ -371,6 +373,7 @@ fn session_v2_remembers_reviews_and_reopens_without_double_applying() {
     let o2 = resume(
         vec![src("a.txt", &decided), src("b.txt", &extra_decided)],
         script.clone(),
+        None,
         &raw,
         Some(&json),
         &caps,
@@ -385,11 +388,12 @@ fn session_v2_remembers_reviews_and_reopens_without_double_applying() {
     assert!(!d.can_undo(), "two steps: the added review, the hand edit");
 
     // Reopened without b (removed from the list): its decision stays in the text.
-    let o3 = resume(vec![src("a.txt", &decided)], script.clone(), &raw, Some(&json), &caps, "");
+    let o3 = resume(vec![src("a.txt", &decided)], script.clone(), None, &raw, Some(&json), &caps, "");
     assert_eq!(o3.doc.script(), o.doc.script());
 
     // b's file changed since (a new id): it's said, and its new saved decisions apply as a step.
     let changed = "---\nBEFORE: Laura smiles.\nAFTER: Laura beams.\n";
-    let o4 = resume(vec![src("a.txt", &decided), src("b.txt", changed)], script.clone(), &raw, Some(&json), &caps, "");
+    let o4 =
+        resume(vec![src("a.txt", &decided), src("b.txt", changed)], script.clone(), None, &raw, Some(&json), &caps, "");
     assert!(o4.notes.iter().any(|n| n.contains("changed since last time")), "{:?}", o4.notes);
 }

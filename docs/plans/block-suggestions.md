@@ -1,9 +1,9 @@
 # Plan: full script editing, then block suggestions
 
-Status: revised after two reviews and user decisions (2026-11-15), to be
-reviewed again. Requested by the user: suggestions must be able to remove and
-add lines and change several paragraphs at once. That needs a script that can
-be fully edited and saved first, so the work is two phases. Follows v0.2.0.
+Status: A1–A5 built and reviewed; A6, A7 and Phase B next. Revised after second review round (2026-11-15). Requested by the
+user: suggestions must be able to remove and add lines and change several
+paragraphs at once. That needs a script that can be fully edited and saved
+first, so the work is two phases. Follows v0.2.0.
 
 ## Review outcome and decisions
 
@@ -23,10 +23,46 @@ be fully edited and saved first, so the work is two phases. Follows v0.2.0.
 - **No Final Draft revision marks** for now. **No locked scene numbers**:
   cutting a scene heading removes it like any paragraph (no `OMITTED`).
 - **`[cut]`** is the review-file marker for removing lines (confirmed).
-- Reviews found: DualDialogue is parsed wrong today; `rebase` can reuse ids;
-  `next_id` collides across programs; untyped/indented lines made the block
-  grammar ambiguous; restoring by pairing was fragile; before-texts came from
-  a log scan. Each is fixed below.
+- First round found: DualDialogue is parsed wrong today; `rebase` can reuse
+  ids; `next_id` collides across programs; untyped/indented lines made the
+  block grammar ambiguous; restoring by pairing was fragile; before-texts
+  came from a log scan. Each is fixed below.
+
+Second round (2026-11-15):
+- **Sync moves into Phase A** (A6) as a minimal guard: on a fresh-id clash
+  the host keeps its work unsaved, writes a set-aside file and asks the
+  writer to reload. Renumbering (B4) only if the guard proves insufficient.
+- **Refuse up front** (A3): wrapper members are marked "no structural
+  edits" by `to_script`; editor, `Edit`, CLI and tool validation refuse at
+  edit time; the writer's refusal stays only as a backstop.
+- **Existing line suggestions under structural edits** get a Phase A rule
+  (A7).
+- **The DualDialogue id-shift claim was wrong** (checked against
+  `fdx/src/lib.rs:20`): ids shift only when the first inner child is
+  self-closing (A1). Sessions are guarded by a reader version.
+- **Templates** use the file's most common attribute set per Type; new XML
+  uses the file's line ending, and the hardcoded `\n` in `render_runs` /
+  `rewrite_paragraph` (`lib.rs:312,329,334`) is fixed (A2).
+- **Split ids**: `Edit::split`, paste and CLI split follow `enter_at`
+  (`doc.rs:815`): at offset 0 the new id goes above, at the end below, so
+  the original id keeps the original text (A3).
+- **CLI for agents** (A5): multi-paragraph `insert`, `split --at`, `remove
+  a..b` in live order, `--json`.
+- **Plain-text paste** goes through a pure classifier (D6, A3); copying to
+  Final Draft is plain text (documented).
+- **Line-rewrite "done"** moves to Cmd/Ctrl+Enter with a one-time notice;
+  A4 gets a strongest-model reviewer.
+- **Block fixes** (Phase B): accepted blocks re-place on reopen from their
+  meta value (C1); `before_paras` = the entry's typed BEFORE with its PARA
+  ids (C2); entry indices are kept stable by placeholders (C4);
+  `restore_run` fallbacks and `replace_run(Run::Empty)` defined (C8);
+  accepting over lines another review decided is **refused** (C9); fuzzy
+  ambiguity defined (C10).
+- **`similarity` is already in `core::text`** (D4) (`core/src/text.rs:37`); only
+  `FUZZY_THRESHOLD` (`review/src/matching.rs:18`) moves, which touches
+  `review::matching` and `session.rs:28`.
+- **Final Draft hand test** is a fixed checklist (end of doc) that gates
+  the release.
 
 # Phase A — full script editing
 
@@ -35,8 +71,9 @@ be fully edited and saved first, so the work is two phases. Follows v0.2.0.
 `PARA_RE` (`lib.rs:20`) is non-greedy: for
 `<Paragraph><DualDialogue><Paragraph Type="Character">…</Paragraph>…</DualDialogue></Paragraph>`
 it matches from the outer `<Paragraph>` to the first inner `</Paragraph>`.
-Result: a phantom `Type=""` paragraph holding the first character's text, that
-character missing, and the wrapper's closing tags owned by no paragraph.
+Result: a phantom paragraph (the outer's `Type`, usually none) holding the
+first inner paragraph's runs, and the wrapper's closing tags owned by no
+paragraph.
 
 Fix: replace `PARA_RE` with a scanner over the top-level children of
 `<Content>` that finds each `<Paragraph` and its matching close by depth. A
@@ -45,17 +82,41 @@ paragraph whose body (after whitespace) starts with `<DualDialogue` is a
 read its inner paragraphs as ordinary paragraphs with
 `FdxParagraph::wrapper: Option<usize>`. The wrapper gets no id.
 
-Ids shift by one after each DualDialogue in files that have one. Saved
-sessions on such files then fail to replay (refused, never overwritten, as
-today), and `PARA:` entries fall back to `BEFORE` matching. Accepted; the
-PURPLE LIST has no DualDialogue.
+**Ids (C6).** The phantom takes the first inner paragraph's place, so ids
+normally don't shift (only that paragraph's kind changes). If the first
+inner child is self-closing, the phantom swallows it and the second, and
+every later id shifts by one. `SessionFile::new` / `to_file` write
+`reader: <version>` into the session file (`#[serde(default)]`, so old files
+= reader 1; the new reader is 2). `resume` gets a new parameter carrying
+the raw file and the current reader version; with a different stored
+version, parse the same raw file with both readers: if every id has the
+same text in both, keep the session; otherwise set it aside (as
+`Resumed::Discarded` does today) with a notice. As built, the parameter is
+`reader_1: Option<&Script>` (the file as reader 1 read it); callers always pass
+`Some(legacy_script())`. `same_ids` (the equivalence test) lets an untouched Scene
+Heading's text differ between the readers (a heading's text is the one thing
+the summary change moves); `touched_ids` names the paragraphs the saved edits
+use, which must match exactly. Files without DualDialogue number alike under
+both readers, so the check passes trivially. Both readers stay in the
+crate for this check (old one behind `legacy_paragraphs()`). Callers
+updated: `crates/cli/src/opened.rs`, `crates/app/src/script_view.rs`.
+`PARA:` entries that no longer fit fall back to `BEFORE` matching.
 
-Tests: hand-written fixture with two DualDialogue blocks; kinds/texts as
-expected; no-op write byte-identical.
+**Wrapper membership in the model.** A1 also adds `Script::fixed:
+BTreeMap<ParaId, u32>` (with `is_fixed` / `fixed_group`) (`#[serde(default)]`) in `crates/core/src/model.rs`,
+recording which wrapper each paragraph belongs to, filled by `to_script`
+from `FdxParagraph::wrapper`. A2 and A3 use it (A3 for the edit-time
+refusal). Because it records the wrapper, not just a fixed set, an insert
+between two adjacent DualDialogue blocks (different wrappers) stays possible.
+
+Tests: fixture with two DualDialogue blocks, one with a self-closing first
+child; kinds/texts as expected; no-op write byte-identical; reader
+equivalence: normal wrapper → session kept, self-closing first child →
+set aside.
 
 ## A2. .fdx writer (`crates/fdx`, `write_script`)
 
-**Ids.** File paragraphs have ids `0..n`; ids `≥ n` are new. Ids are never
+**Ids.** File paragraphs have ids `0..n`; ids `≥ n` are new. Fresh ids are never
 reused: `Script` gains `id_floor: u64` (`#[serde(default)]`), set to `n` by
 `to_script`. `Document::with_meta` sets `next_id = max(id_floor, max id + 1)`;
 `rebase` stores `next_id` into `id_floor`, and `rebuild` (`sync.rs:95`) goes
@@ -64,33 +125,43 @@ paragraph (id `n-1`) is cut, the document rebased (`doc.rs:200,215` recompute
 `next_id` from the live max), and a new paragraph gets id `n-1`, which the
 writer would take for the original.
 
+**Exception to "never reused".** `Edit` gets one more primitive, `insert_para_with_id(index,
+id, NewPara)`, which inserts a paragraph with a given id that was used
+before and is currently absent (error if live or `≥ next_id`). It is used
+only by `restore_run` and undo/redo; every other insert takes a fresh id.
+
 **Plan.** Walk the live script. Surviving originals must be increasing, else
-`StructureChanged("moved")`. Collect: text edits, retypes, removed originals,
+`StructureChanged { reason: Moved, para }`. Collect: text edits, retypes, removed originals,
 and insertions keyed by anchor (the nearest surviving original before them;
 `None` = start of `<Content>`).
 
 **Removing.** Cut `[s, span.end)` where `s` walks back from `span.start` over
-spaces/tabs, then one `\n` (and its `\r`), only if those bytes are pure
-whitespace; otherwise cut exactly the span.
+spaces/tabs, then one eol, only if those bytes are pure whitespace;
+otherwise cut exactly the span.
 
 **Inserting.** After anchor `i`: at `span_i.end` (or the wrapper's end, see
-below) write `{eol}{indent}{xml}` per new paragraph, `eol`/`indent` copied
-from the whitespace before `<Paragraph` of `i`. With anchor `None`: write
-`{xml}{eol}{indent}` at the start of the first surviving original; if none
-survive, `{eol}{indent}{xml}` right after `<Content>` (indent from the first
-original, else four spaces).
+below) write `{eol}{indent}{xml}` per new paragraph, `indent` copied from
+the whitespace before `<Paragraph` of `i`. With anchor `None`: write
+`{xml}{eol}{indent}` at the start of the first surviving original (or of its
+wrapper, if it is inside one); if none survive, `{eol}{indent}{xml}` right
+after `<Content>` (indent from the first original, else four spaces).
+
+**Line endings (C7).** `eol` = the file's (`\r\n` if the raw file contains one,
+else `\n`), used for all new XML and by `render_runs` / `rewrite_paragraph`,
+which hardcode `\n` today (`lib.rs:312,329,334`).
 
 **Splice order.** Edits are `(range, bytes)` sorted by start; at equal start a
 zero-width insert comes before a cut (an insert at X precedes a cut starting
 at X). Ranges must not overlap (assert).
 
-**New paragraph XML.** Template = nearest original of the same `Type` outside
-a wrapper (backwards from the insertion point, then forwards). Copy only
-allow-listed opening-tag attributes, as raw bytes: `Type`, `Alignment`,
-`FirstIndent`, `LeftIndent`, `RightIndent`, `Spacing`, `SpaceBefore`,
-`Leading`. No children but text runs. Runs copy `Font` and `Size` from the
-template's first run, plus `Style="Bold+Italic+Underline"` from each span. No
-template → `<Paragraph Type="…">` with bare `<Text>` runs (escaped).
+**New paragraph XML (C7).** Template = the most common set of allow-listed
+opening-tag attributes among the file's paragraphs of that `Type` outside
+wrappers (ties: the first seen); none → `Type` only. Allow-list, copied as
+raw bytes: `Type`, `Alignment`, `FirstIndent`, `LeftIndent`, `RightIndent`,
+`Spacing`, `SpaceBefore`, `Leading`. No children but text runs. Runs copy
+`Font` and `Size` from the most common first run of that Type, plus
+`Style="Bold+Italic+Underline"` from each span; none → bare `<Text>` runs
+(escaped).
 
 ```xml
     <Paragraph Type="Dialogue">
@@ -105,22 +176,23 @@ indents. Leaving Scene Heading also drops `Number` and the
 `<SceneProperties>` child. Everything else stays; runs are untouched unless
 the text changed too.
 
-**DualDialogue.** Text edits inside a wrapper are fine. Removing, inserting
-or retyping inside a wrapper → `StructureChanged("dual dialogue")` in v1. An
-insertion anchored on a wrapper's last paragraph goes after the wrapper's
-`</Paragraph>`. Removing every paragraph of a wrapper is refused too (v1).
+**DualDialogue (C6).** Text edits inside a wrapper are fine. Structural changes
+inside are refused at edit time (A3); the writer still returns
+`StructureChanged { reason: InDualDialogue, para }` as a backstop (`reason` is
+`Moved | Duplicated | InDualDialogue`; `para` is the paragraph at fault). New or
+edited text with a control character or line break is refused too
+(`BadText`). An insertion anchored on
+a wrapper's last paragraph goes after the wrapper's `</Paragraph>`.
 
 **Tests:** no-op byte-identical (fixtures + real file); remove first / middle
 / last / all-but-one; remove a scene heading with SceneProperties; insert at
-start / middle / end; insert where the next original is removed (splice
-order); cut last original then rebase then insert (no id reuse); retype with
-and without a template, from Scene Heading; styled spans; CRLF; DualDialogue
-text edit ok, structure refused; every output re-parses to the expected kinds
-and texts; reordering refused.
-
-**Gate:** a Final Draft hand test before release: open the output, check
-layout of new and retyped paragraphs, scene numbering, page breaks; save in
-Final Draft and re-read.
+start / middle / end; insert at start when the first original is in a
+wrapper; insert where the next original is removed (splice order); cut last
+original then rebase then insert (no id reuse); retype with and without a
+template, from Scene Heading; template picks the majority attributes, not
+the nearest; styled spans; CRLF file: new and rewritten XML use CRLF;
+DualDialogue text edit ok; every output re-parses to the expected kinds and
+texts; reordering refused.
 
 ## A3. Document ops (`crates/core/src/doc.rs`)
 
@@ -134,6 +206,7 @@ impl Document {
 impl Edit<'_> {
     pub fn splice(&mut self, para: ParaId, range: Range<usize>, spans: Vec<Span>) -> Result<(), DocError>;
     pub fn insert_para(&mut self, index: usize, p: NewPara) -> Result<ParaId, DocError>; // fresh id
+    pub fn insert_para_with_id(&mut self, index: usize, id: ParaId, p: NewPara) -> Result<(), DocError>; // restore_run/undo only (A2)
     pub fn remove_para(&mut self, id: ParaId) -> Result<(), DocError>;
     pub fn set_kind(&mut self, id: ParaId, kind: ElementKind) -> Result<(), DocError>;
     pub fn split(&mut self, at: Pos) -> Result<ParaId, DocError>;
@@ -146,43 +219,118 @@ commands, review decisions) is built from these. `Op` stays as it is,
 including `Split`/`Merge`: saved session logs contain them, and they keep the
 id rules of the module docs. Errors roll back the whole transaction (as
 `transact` does). `RemovePara` already refuses the last paragraph
-(`doc.rs:717`), so anything that replaces the whole script inserts before it
-removes.
+(`doc.rs:716`), so anything that replaces the whole script inserts before it
+removes. `Document::next_id()` becomes a public getter (A6).
+
+**Split ids (C5).** `split` follows `enter_at` (`doc.rs:815`): offset 0 of a
+non-empty paragraph inserts the new empty paragraph above; at the end the
+new one goes below; in the middle the original keeps the head. Paste and
+CLI split use it, so the original id stays with the original text.
+
+**No structural edits (D2).** Uses `Script::fixed` (A1). `Edit`
+refuses (`DocError::Fixed`) `remove_para`, `split`, `join` and `set_kind` on
+a wrapper member, and `insert_para` between two paragraphs of the *same*
+wrapper (between different wrappers, or a wrapper and a plain paragraph, is
+allowed). Text splices are
+allowed. Replaying `Op`s is not checked (old logs). The editor shows "Dual
+dialogue lines can't be added, removed or split here; edit their text, or
+change them in Final Draft." CLI and tool validation map the error to the
+same message.
 
 New command `paste_fragment(sel, &[NewPara])`: one paragraph → its spans go in
 at the cursor; several → split at the cursor, the first fragment's spans join
 the head (which keeps its kind unless empty), middle ones are inserted with
 their kinds, the last is prepended to the tail.
 
+**Plain-text classifier** (`core::paste::classify(&str) -> Vec<NewPara>`,
+pure): blank lines separate nothing but are dropped. Per line, trimmed:
+starts with `INT.`/`EXT.`/`EST.`/`INT./EXT.`/`I/E` → Scene Heading; `(…)` →
+Parenthetical; ends with `TO:` → Transition; ALL CAPS, ≤ 38 chars, and
+followed by a non-blank line → Character; else Dialogue if the previous
+line was a Character, Parenthetical or Dialogue (and no blank line
+between), otherwise Action. A single line pastes into the current paragraph
+unclassified.
+
 Tests: each primitive inverts; undo/redo restores ids; ids never reused after
-rebase; paste_fragment cases incl. at start/end and over a multi-paragraph
-selection.
+rebase; split at 0 / middle / end keeps the original id on the original
+text; wrapper members refuse each structural primitive, text edits pass; insert between two adjacent wrappers allowed;
+paste_fragment cases incl. at start/end and over a multi-paragraph
+selection; classifier table (heading, character + dialogue, parenthetical,
+transition, action, an ALL-CAPS action line before a blank line).
 
 ## A4. Editor (`crates/app/src/editor.rs`)
 
 Core already has Enter split, Backspace/Delete join, multi-paragraph
 `delete_selection` and Tab `cycle_kind`; the editor gates them behind
-`structural` (`editor.rs:169,225`). Remove the flag and the refusal notice:
-structural editing everywhere. Enter always splits; the review line-rewrite
-"done" moves to Cmd/Ctrl+Enter (and Esc / moving off as today). Copy writes
-plain text plus JSON metadata (`ClipboardItem::new_string_with_json_metadata`,
-`{"scriptorium":1,"paras":[{kind,spans}]}`); paste uses `paste_fragment` when
-the metadata is there, else today's plain-text rule (non-blank lines become
-paragraphs via Enter). Cut of a multi-paragraph selection deletes it. Headless
-smoke test per AGENTS.md.
+`structural` (`editor.rs:169,226`). Remove the flag and the refusal notice:
+structural editing everywhere (refusals from `DocError::Fixed` show as a
+notice). Enter always splits; the review line-rewrite "done" moves to
+Cmd/Ctrl+Enter (and Esc / moving off as today). (D7) The first time a writer
+presses Enter in a line rewrite, show once: "Enter now starts a new line.
+Press Cmd+Enter (Ctrl+Enter) when you're done." (remembered in settings).
+Copy writes plain text plus JSON metadata
+(`ClipboardItem::new_string_with_json_metadata`,
+`{"scriptorium":1,"paras":[{kind,spans}]}`); paste uses `paste_fragment`
+with the metadata, else with `classify` of the plain text. Copying to Final
+Draft is plain text (types are lost); paste from Final Draft goes through
+the classifier. Both documented in the user guide. Cut of a multi-paragraph
+selection deletes it. Headless smoke test per AGENTS.md. Reviewed by a
+strongest-model reviewer.
 
-## A5. CLI parity (`crates/cli/src/commands.rs`)
+## A5. CLI parity (D5) (`crates/cli/src/commands.rs`)
 
-New subcommands, each one transaction, saved under the session lock, printing
-the affected paragraphs with ids:
-- `insert <script> (--after <id> | --start) <TYPE> <text>`
-- `remove <script> <id>[-<id>]`
-- `split <script> <id> <char offset>`
-- `join <script> <id>` (joins it with the next paragraph)
+New subcommands, each one transaction, saved under the session lock,
+printing the affected paragraphs with ids; `--json` prints
+`{"new":[ids],"removed":[ids],"paras":[{id,kind,text}]}`:
+- `insert <script> (--after <id> | --start | --end) (--block '<TYPE: text
+  lines>' | <TYPE> <text>)`: one or more typed paragraphs, the same `TYPE:
+  text` grammar as `suggest --block` (B5; capitals per B1, the CLI also takes
+  any case); the short form `<TYPE> <text>` is one paragraph. Text can't
+  contain newlines. There is no `--before`: use `--after` the previous id.
+- `remove <script> <id>[..<id>]`: `a..b` = from `a` to `b` in live order
+  (inclusive), not a numeric range; refused if `b` is before `a`.
+- `split <script> <id> (--at "<text>" | --offset <n>)`: `--at` splits before
+  the first occurrence (refused if empty or absent); `--offset` counts
+  characters, converted to bytes. Id rules as A3.
+- `join <script> <first> <second>` (`second` must directly follow `first`)
 - `retype <script> <id> <TYPE>`
+- Each takes a trailing `--json` (only the last argument is the flag).
 
-`TYPE` is an editable element name (case-insensitive). MCP tools for these
-only when a writer asks (as with `edit_paragraph`); none now.
+`TYPE` is an editable element name (case-insensitive). Wrapper members
+refuse as in A3. MCP tools for these only when a writer asks (as with
+`edit_paragraph`); none now.
+
+## A6. Sync guard (D1) (`crates/review/src/sessionfile/sync.rs`, `with_unsaved`)
+
+Today a host `InsertPara` whose id the reloaded document already has fails
+`applies` (`sync.rs:207`) and is reported lost; but if the other program
+made and then removed that id, it applies and the two programs disagree on
+what the id means. Guard: if the host's unsaved events introduce an id
+`≥ synced.next_id()` and `reloaded.next_id() > synced.next_id()`, don't
+merge. The host keeps its document and unsaved events as they are, writes
+them to a set-aside file next to the session file
+(`<session>.aside-<timestamp>.json`, same format), and shows "Another
+program added lines while you had unsaved changes. Your version is kept
+here and saved aside; reload to continue with theirs." Reload replaces the
+host's document; the set-aside file stays for recovery. The CLI holds no
+unsaved work (it runs under the lock), so this is app-only. Renumbering
+(B4) only if this proves too disruptive.
+
+Tests: app inserts while the CLI inserts → clash, set-aside written,
+nothing merged; app text-only edits while the CLI inserts → merged as
+today; app inserts while the CLI only edits text → merged.
+
+## A7. Existing line suggestions under structural edits (D3) (`crates/review`)
+
+- Pending, paragraph gone → unplaced, status "line removed"; accept
+  refused (`can_apply`).
+- Accepted, paragraph gone → the B3 status rule, pulled forward for N = 1:
+  Rewritten, MINE = `[cut]`.
+- Split → the item stays on the head (the original id); the card says "the
+  line has changed" (Rewritten if it was decided, Mismatch-style notice if
+  pending).
+
+Tests for each, plus join and retype of a suggested line.
 
 # Phase B — block suggestions
 
@@ -193,6 +341,8 @@ anchor line with `[anchor unchanged, new lines]`. Join, split and retype are
 just N→M shapes.
 
 ## B1. Review file (`crates/review/src/file.rs`)
+
+Note: `parse_typed_lines(block, Case::Upper|Any)` (built in Phase A for the CLI's `insert --block`) is the seed of this block grammar. B1 grows it into `Line { kind: Option<ElementKind>, text }` (untyped lines allowed in BEFORE) rather than adding a second parser.
 
 ```
 ---
@@ -216,64 +366,91 @@ Grammar:
   SHOT, GENERAL, in capitals.
 - A line indented **deeper** than the typed line continues it. An untyped
   line at the typed lines' indent is its own paragraph: allowed in BEFORE
-  (matched on text only), refused in AFTER/MINE (block skipped, warning).
+  (matched on text only; restored to the matched paragraph's own kind, C2),
+  refused in AFTER/MINE (warning).
 - Inside a block, a field line must start at column 0 to end the block
-  (`FIELD_RE` today allows indentation, `file.rs:38`; outside block mode that
+  (`FIELD_RE` today allows indentation, `file.rs:36`; outside block mode that
   tolerance stays, for pasted files).
 - `AFTER: [cut]` is the empty option (a cut), only spelled explicitly.
 - `PARA:` lists every id of the run. Repeated `AFTER:` are alternatives.
 
 Types: `Line { kind: Option<ElementKind>, text }`; `Entry { para:
 Vec<ParaId>, before: Vec<Line>, options: Vec<Vec<Line>>, why, status, chosen,
-mine: Option<Vec<Line>> }`; `Entry::single(before, options)` for the line
-form. An untyped one-line entry takes the paragraph's own kind.
+mine: Option<Vec<Line>>, invalid: Option<String> }`; `Entry::single(before,
+options)` for the line form. An untyped one-line entry takes the
+paragraph's own kind.
+
+**Entry indices are decision keys (C4).** A block that has BEFORE and
+AFTER/MINE is never dropped: if it doesn't parse, it stays in its slot as an
+entry with `invalid: Some(reason)` (no item, shown in the unplaced list), so
+old and new builds count entries the same. Unparseable blocks are written
+back verbatim.
 
 **Header.** A file with any block entry is written as `SCRIPT REVIEW v2`;
-v1 files stay v1. New builds keep entries they can't parse verbatim when
-writing progress. Old builds reading a v2 file lose its blocks (accepted).
+v1 files stay v1. `append_entries` (`session.rs:672`, B3's file) rewrites the header to
+v2 when it appends a block entry; that change is owned by B3, not B1. Old builds reading a v2 file lose its
+blocks (accepted).
 
 ## B2. `replace_run` (`crates/core/src/doc.rs`)
 
 ```rust
-pub enum Run { Ids(Vec<ParaId>), Empty { after: Option<ParaId> } } // Empty: restoring a cut
+pub enum Run { Ids(Vec<ParaId>), Empty { after: Option<ParaId> } } // Empty: where a cut was
 impl Edit<'_> {
     pub fn replace_run(&mut self, run: Run, new: &[NewPara]) -> Result<Vec<ParaId>, DocError>;
     pub fn restore_run(&mut self, run: Run, before: &[Paragraph]) -> Result<(), DocError>;
 }
 ```
-`replace_run`: the run must be live and consecutive (else `Mismatch`). Pair
-old and new lines: only `diff::opcodes` Equal lines over (kind, normalized
-text), or inside a Replace chunk same-kind lines in order with
-`similarity ≥ FUZZY_THRESHOLD` (moved from `review::matching` to
-`core::text`); paired lines get a common-ends splice and keep id and styles.
+`replace_run(Run::Ids)`: the run must be live and consecutive (else
+`Mismatch`). Pair old and new lines: only `diff::opcodes` Equal lines over
+(kind, normalized text), or inside a Replace chunk same-kind lines in order
+with `similarity ≥ FUZZY_THRESHOLD` (constant moved to `core::text`, next to
+`similarity`, in this piece, before B3 touches `matching.rs`); paired lines get a common-ends splice and keep id and styles.
 Everything else is `insert_para` + `remove_para`, inserts first. Returns the
 run's ids afterwards (empty for a cut).
+`replace_run(Run::Empty { after })`: inserts `new` after `after` (or at the
+start for `None`), used to switch from a cut to another option; returns the
+new ids.
 
-`restore_run` (keep mine / undecide after accept): no pairing. Target = the
-`before` paragraphs with their own ids, by position. A before id still live in
-the run is set in place (whole-text splice + `set_kind`); missing ones are
-inserted with that id; run ids not in `before` are removed; inserts first.
+`restore_run` (C8; keep mine / undecide after accept): no pairing. Target = the
+`before` paragraphs with their own ids, by position. Run = the live
+paragraphs from the first to the last live after id (including lines added
+inside); none live → `Run::Empty` whose `after:` anchor, if gone, falls back
+to the nearest live predecessor in original order. A before id still live
+in the run is set in place (whole-text splice + `set_kind`); missing ones
+are inserted with that id (`insert_para_with_id`, the A2 exception); run ids not in `before` are removed; inserts
+first.
 
 ## B3. Matching and decisions (`crates/review/src/{matching,session}.rs`)
 
 **Matching** (one N-line matcher; N = 1 behaves as today).
+- **Decided first (C1):** if the entry's meta value exists and its `@before ids`
+  equal the entry's PARA, the item is placed from that value: paras = the
+  stored after ids (or the `Run::Empty` anchor), without requiring the
+  before ids to be live. Its after ids are reserved (`Taken`/used) before
+  other entries match.
 - PARA pass: all ids live, consecutive, editable, unused; each line equals its
-  original or live text (kinds where typed), or the entry is decided (meta
-  exists). Ids `≥ n` have no original: they match only on live text + kinds.
-- BEFORE pass, against the original: windows of exactly N paragraphs whose
-  lines match. Exact first; for N ≥ 2, several exact windows → unmatched
-  (`Unplaced::Ambiguous`). Fuzzy requires **every** line ≥ threshold. Matched
-  ids must still be live and consecutive, else `Unplaced::Restructured`.
-  BEFORE is the fallback for pasted files; tools always write PARA.
+  original or live text (kinds where typed). Ids `≥ n` have no original:
+  they match only on live text + kinds.
+- BEFORE pass (C10), against the original: windows of exactly N paragraphs whose
+  lines match. Exact first; for N ≥ 2, several exact windows →
+  `Unplaced::Ambiguous`. Fuzzy requires **every** line ≥ threshold; with
+  several fuzzy windows for N ≥ 2, the best (by mean similarity) wins only
+  if it beats every other by ≥ 0.05, else Ambiguous. Matched ids must still
+  be live and consecutive, else `Unplaced::Restructured`. BEFORE is the
+  fallback for pasted files; tools always write PARA.
 - Overlap: within a review items share no paragraph (`Taken`); across
   reviews allowed. An item whose lines another review removed is unmatched
-  with status "removed by review X"; `Session::can_apply` refuses accepting
-  it.
+  with status "removed by review X". `Session::can_apply` refuses accepting
+  it, and refuses accepting a block over any line another review has
+  decided (C9) ("decided in review X; undecide it there first").
 
 `Item` gains `paras: Vec<ParaId>`, typed `before`/`options`, and
-`before_paras: Vec<Paragraph>`, taken from the original `Script` given to
-`Review::open`/`open_live` (ids `≥ n`: from the live document at open time),
-never from a log scan. `Item::para()` = first id.
+`before_paras: Vec<Paragraph>` (C2) = the entry's typed BEFORE lines (untyped
+lines take the matched paragraph's own kind) with their
+PARA ids (what the suggestion was made against). The original file text is
+used only for fuzzy BEFORE matches (ids from the match). Never from a log
+scan. Keep mine / undecide restore `before_paras`, so earlier hand edits the
+suggestion was made on survive. `Item::para()` = first id.
 
 **Meta values.** `<decision>@<before ids>[=>(<after ids> | after:<id> |
 start)]`: `accepted:0@412,413,414,415=>412,2921`, `rejected@412,413`,
@@ -296,14 +473,21 @@ from the first to the last **live** after id, including new lines between. If
 no after id is live, MINE = `[cut]`. Never write MINE from a paragraph that is
 gone.
 
-## B4. Sync (`crates/review/src/sessionfile/sync.rs`, `with_unsaved`)
+Tests: accepted block reopens placed (before ids gone); its after ids block
+another entry; keep mine after hand edits restores the BEFORE lines; cross-
+review accept refused; fuzzy tie → Ambiguous, clear winner → placed.
 
-`applies` already checks Insert/RemovePara by neighbour ids (`sync.rs:207`)
-but replays the stored index. Change: recompute indices from the neighbour
-ids in the reloaded document. Fresh ids the host made that the reloaded
-document already used (or that are below its `next_id`) are renumbered to the
-target's fresh ids, and the mapping is applied to every later unsaved event:
-ops, selections, and decision meta values (`=>` lists).
+## B4. Sync renumbering (C3; only if A6 proves insufficient)
+
+`applies` already checks Insert/RemovePara by neighbour ids but replays the
+stored index; recompute indices from the neighbour ids in the reloaded
+document. Fresh = ids the host introduced that are `≥` the synced
+document's `next_id` (never ids brought back by undo or `restore_run`).
+Fresh ids that clash are renumbered to the target's fresh ids; the map is
+applied to every later unsaved event: ops, selections, decision meta values
+(`@` lists, `after:`, `=>`) and `SetMeta` `from`. `applies` and
+`net_changes` compare through the map. The shell remaps the cursor and
+review items.
 
 ## B5. Tools, CLI, MCP (`crates/tools`, `crates/cli`, `crates/mcp`)
 
@@ -314,14 +498,14 @@ list) | `insert_after` (sugar: becomes `[anchor, …options]` on that id).
 `[[{kind, text}, …], …]`; the schema states `[]` = cut. Empty paragraphs
 (`read_scene` hides them): trimmed at the run's edges, refused inside a
 `[first, last]` run ("give the full id list"), allowed in an explicit list.
-Validation: run consecutive and editable; ≤ 40 lines a side, ≤ 3 options; no
-line breaks; at least one option visible; no overlap; `apply` re-checks the
-live run. Tools always write PARA. Prompt: "Use the smallest unit the writer
-can judge on its own. Group lines that only make sense together into one
-suggestion with `paragraph_ids`. Use `insert_after` to add lines, `[]` to
-cut."
+Validation: run consecutive and editable; no structural change to fixed
+paragraphs (A3); ≤ 40 lines a side, ≤ 3 options; no line breaks; at least
+one option visible; no overlap; `apply` re-checks the live run. Tools always
+write PARA. Prompt: "Use the smallest unit the writer can judge on its own.
+Group lines that only make sense together into one suggestion with
+`paragraph_ids`. Use `insert_after` to add lines, `[]` to cut."
 
-CLI: `suggest … --paras 412-415 | --insert-after N --block $'CHARACTER:
+CLI: `suggest … --paras 412..415 | --insert-after N --block $'CHARACTER:
 MARIA\nDIALOGUE: What?'` (repeatable; `--block '[cut]'` = cut); `decide <n>
 rewrite-block '<typed lines>'`.
 
@@ -339,25 +523,60 @@ follows from B3.
 
 | # | Piece | Owns | After | Model |
 |---|---|---|---|---|
-| A1 | reader fix, DualDialogue fixture | `crates/fdx` | – | strongest |
-| A2 | writer: id-diff, remove/insert/retype, splice order | `crates/fdx` | A1 | strongest |
-| A3 | `Edit` builder, `id_floor`, `paste_fragment` | `crates/core` | – | strongest |
-| A4 | editor: drop `structural`, clipboard JSON | `crates/app/src/editor.rs` | A3 | Sonnet + headless smoke |
-| A5 | CLI `insert/remove/split/join/retype` | `crates/cli` | A2, A3 | Sonnet |
-| B1 | `Line`/`Entry`, block grammar, v2 header | `crates/review/src/file.rs` | – | strongest |
+| A1 | reader fix, `Script::fixed`, reader version in session file, resume check, DualDialogue fixtures | `crates/fdx`, `crates/core/src/model.rs`, `sessionfile.rs`, `crates/cli/src/opened.rs`, `crates/app/src/script_view.rs` | – | strongest |
+| A3 | `Edit` builder, `id_floor`, wrapper refusal, `insert_para_with_id`, split ids | `crates/core` | – | strongest |
+| A2 | writer: id-diff, remove/insert/retype, templates, eol | `crates/fdx` | A1, A3 | strongest |
+| A4 | editor: drop `structural`, clipboard, Cmd/Ctrl+Enter notice; `paste_fragment` and the paste classifier (these live in `crates/core`, as `paste_fragment` needs `Edit`'s private `delete_range`; the editor calls them) | `crates/app/src/editor.rs` | A3 | Sonnet + headless smoke; strongest reviewer |
+| A5 | CLI `insert/remove/split/join/retype`, `--json` | `crates/cli` | A2, A3 | Sonnet |
+| A6 | sync guard, set-aside file | `sessionfile/sync.rs` | A3 | strongest |
+| A7 | line suggestions under structural edits | `crates/review` | A3 | strongest |
+| B1 | `Line`/`Entry`, block grammar, placeholders, v2 reader/writer | `crates/review/src/file.rs` | – | strongest |
 | B1b | migrate `Entry` callers | tools, cli, mcp, app | B1 | Sonnet |
-| B2 | `replace_run`, `restore_run` | `crates/core/src/doc.rs` | A3 | strongest |
-| B3 | matcher, meta values, decide, status | `crates/review/src/{matching,session}.rs` | B1, B2 | strongest |
-| B4 | sync index recompute, id renumbering | `sessionfile/sync.rs` | B3 | strongest |
+| B2 | `replace_run`, `restore_run`, move `FUZZY_THRESHOLD` (first, before B3) | `crates/core/src/{doc,text}.rs`, `review::matching` (constant import only) | A3 | strongest |
+| B3 | matcher, meta values, decide, status, `can_apply`, `append_entries` v2 header | `crates/review/src/{matching,session}.rs` | B1, B2, A7 | strongest |
+| B4 | renumbering (only if needed) | `sessionfile/sync.rs` | B3, A6 | strongest |
 | B5 | tool validation/schema/prompt; CLI/MCP flags | tools (+ cli/mcp) | B3 | strongest + Sonnet |
 | B6 | card, dots | `crates/app/src/script_view.rs` | B3 | Sonnet + headless smoke |
 
-Order: A1 → A2 ‖ A3 → A4 ‖ A5 → **Final Draft hand test gates the release**;
-then B1 ‖ B2 → B1b, B3 → B4 ‖ B5 ‖ B6. Two reviewers per piece (correctness,
-design), fresh contexts.
+Order: A1 ‖ A3 → A2 ‖ A4 ‖ A6 ‖ A7 → A5 → **Final Draft hand test gates
+the release**; then B1 ‖ B2 (B2 moves `FUZZY_THRESHOLD` before B3 starts) → B1b, B3 → B5 ‖ B6 (B4 only if A6 falls
+short). Two reviewers per piece (correctness, design), fresh contexts.
+
+# Final Draft hand test (D8; gate for the Phase A release)
+
+For a non-technical Mac tester. Work on a copy of the script; take a
+screenshot of each result.
+
+1. Open the copy in Scriptorium and save without editing. Open it in Final
+   Draft: it looks identical.
+2. In Scriptorium: add a scene (heading, action, character, dialogue);
+   delete a whole scene including its heading; split an action paragraph
+   (Enter in the middle of a line); join two dialogue lines (Backspace at
+   the start of the second); change an action line to dialogue (Tab);
+   italicise a word in a new line. Save.
+3. Open in Final Draft: new lines have the right font, indents and
+   capitals; scene numbers renumber without gaps or duplicates; page count
+   and page breaks look right; the italic is kept; title page, headers and
+   Navigator are fine. Also check:
+   - inserted lines' indents and spacing match their neighbours of the
+     same type;
+   - with revision colours on, the new and edited text shows normally;
+   - an Action changed to Character takes the Character caps and indent;
+   - a numbered Scene Heading changed to Action loses its scene number and
+     summary; an Action changed to a Scene Heading gets a number from
+     Final Draft;
+   - an empty new paragraph opens cleanly (no error, no stray characters);
+   - a script saved with Windows line endings (CRLF) comes back the same
+     after step 1, and Final Draft opens it after step 2.
+4. Save in Final Draft, reopen in Scriptorium: the text matches, no warning.
+5. Copy three lines from Final Draft into Scriptorium; note any wrong
+   types. Then copy three lines from Scriptorium into Final Draft and note
+   the same.
+6. With a script that has dual dialogue: editing text inside it works;
+   deleting a line inside it is refused with a clear message.
 
 ## Open questions
 
-None from the user. For the next review: the retype attribute rule (A2), the
-Enter→Cmd/Ctrl+Enter change for line rewrites (A4), and the ambiguity rule
-for N ≥ 2 BEFORE matches (B3).
+None from the user. For the next review: the classifier's Character rule
+(A3), the set-aside flow's wording and whether it is disruptive enough to
+need B4 (A6), the 0.05 fuzzy margin (B3).

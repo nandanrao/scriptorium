@@ -25,14 +25,14 @@ use gpui::{
 use scriptorium_core::diff::{WordOp, word_diff};
 use scriptorium_core::doc::Event;
 use scriptorium_core::outline::{ParaContext, annotate};
-use scriptorium_core::{Document, ParaId, Script};
+use scriptorium_core::{Document, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::sessionfile::{self, Change, Disk, Resumed, Seen, SessionFile};
 use scriptorium_review::{Decision, Review, Session, Status};
 use scriptorium_tools::item_numbers;
 
 use crate::disk::{self, Plan};
-use crate::editor::{Decor, EditorEvent, Mark, ScriptEditor};
+use crate::editor::{Decor, EditorEvent, Mark, ScriptEditor, is_changed};
 use crate::layout;
 use crate::theme::*;
 
@@ -65,6 +65,9 @@ actions!(
 );
 
 const SCRIPT_FONT: &str = "Courier Prime";
+
+/// The key that finishes a line rewrite (Enter splits the line).
+const COMMIT_KEY: &str = if cfg!(target_os = "macos") { "Cmd+Enter" } else { "Ctrl+Enter" };
 
 /// Everything read from disk to open a script.
 pub struct Opened {
@@ -180,7 +183,11 @@ fn resume_from_disk(
         }
     }
     let caps = |k: &scriptorium_core::ElementKind| fdx.is_caps(k.name());
-    let opened = sessionfile::resume(sources, fdx.to_script(), raw, saved.as_deref(), &caps, &script_name);
+    // Always checked: reader 1 also misnumbered files without DualDialogue
+    // (nested paragraphs in scene summaries and arc beats), and it's cheap.
+    let reader_1 = Some(fdx.legacy_script());
+    let opened =
+        sessionfile::resume(sources, fdx.to_script(), reader_1.as_ref(), raw, saved.as_deref(), &caps, &script_name);
     for review in &opened.session.reviews {
         notices.append(&mut review_notes(review));
     }
@@ -245,8 +252,27 @@ struct Rewriting {
     depth: usize,
 }
 
+/// The sidebar's scene list for the script, given its outline ([`annotate`]).
+fn scene_rows(script: &Script, ctx: &[ParaContext]) -> Vec<Row> {
+    ctx.iter()
+        .zip(&script.paragraphs)
+        .filter(|(c, _)| c.heading)
+        .map(|(c, p)| Row::SceneLink(p.id, c.scene.clone().into()))
+        .collect()
+}
+
+/// What only a structural edit changes: the paragraphs' ids and kinds, in
+/// order. Typing leaves it alone, so the outline isn't rebuilt per keystroke.
+fn structure_key(script: &Script) -> Vec<(ParaId, scriptorium_core::ElementKind)> {
+    script.paragraphs.iter().map(|p| (p.id, p.kind.clone())).collect()
+}
+
+/// How long after the last keystroke the outline catches up with text edits
+/// (a renamed scene heading or speaker).
+const OUTLINE_SETTLE: Duration = Duration::from_millis(500);
+
 /// One row of the sidebar's lower list.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Row {
     Scene(SharedString),
     Item(usize),
@@ -263,10 +289,15 @@ pub struct ScriptView {
     raw: Rc<str>,
     fdx: Rc<FdxFile>,
     session_path: PathBuf,
-    originals: Rc<HashMap<ParaId, String>>,
-    /// Scene and speaker per paragraph position, as opened.
+    originals: Rc<HashMap<ParaId, Paragraph>>,
+    /// Scene and speaker per paragraph position, for the live document as of
+    /// the last [`Self::rebuild_outline`]. Look positions up with
+    /// `doc.index_of(para)` and `get`, never with an as-opened index.
     ctx: Rc<Vec<ParaContext>>,
-    caps: Rc<Vec<bool>>,
+    /// [`structure_key`] as of the last outline rebuild.
+    structure: Vec<(ParaId, scriptorium_core::ElementKind)>,
+    /// A pending outline rebuild after text edits.
+    outline_task: Option<Task<()>>,
     view: View,
     /// Current item per review (None: finished).
     cur: Vec<Option<usize>>,
@@ -308,6 +339,9 @@ pub struct ScriptView {
     _subscription: Subscription,
 }
 
+/// Said when a rewrite is undone because its line went away.
+const REWRITE_LOST: &str = "The line you were rewriting was removed, so the rewrite was undone.";
+
 /// How often the app looks for changes another program made to its files.
 const WATCH_EVERY: Duration = Duration::from_millis(1000);
 
@@ -316,16 +350,7 @@ impl ScriptView {
         let Opened { script_path, raw, fdx, opened, session_path, dir, seen, unsynced, notices } = opened;
         let sessionfile::ResumedSession { session, doc, base, .. } = opened;
         let synced = doc.log().len();
-        let originals: HashMap<ParaId, String> = fdx.to_script().paragraphs.iter().map(|p| (p.id, p.text())).collect();
-        let ctx = annotate(&fdx.to_script());
-        let caps: Vec<bool> = fdx.paragraphs().iter().map(|p| fdx.is_caps(&p.kind)).collect();
-        let scene_rows = Rc::new(
-            ctx.iter()
-                .enumerate()
-                .filter(|(_, c)| c.heading)
-                .map(|(ix, c)| Row::SceneLink(ParaId(ix as u64), c.scene.clone().into()))
-                .collect(),
-        );
+        let originals: HashMap<ParaId, Paragraph> = fdx.to_script().paragraphs.into_iter().map(|p| (p.id, p)).collect();
 
         let editor = cx.new(|cx| ScriptEditor::new(doc, cx));
         let subscription = cx.subscribe_in(&editor, window, Self::on_editor_event);
@@ -348,15 +373,16 @@ impl ScriptView {
             fdx: Rc::new(fdx),
             session_path,
             originals: Rc::new(originals),
-            ctx: Rc::new(ctx),
-            caps: Rc::new(caps),
+            ctx: Rc::default(),
+            structure: vec![],
+            outline_task: None,
             view: View::Script,
             cur: vec![None; n],
             hi: 0,
             rewriting: None,
             focus: cx.focus_handle(),
             rows: vec![],
-            scene_rows,
+            scene_rows: Rc::default(),
             row_of_item: vec![],
             item_by_para: vec![],
             queue_scroll: UniformListScrollHandle::new(),
@@ -383,11 +409,12 @@ impl ScriptView {
     /// Items are listed in script order, the order their numbers follow
     /// (`scriptorium_tools::item_numbers`, as the CLI and tools number them).
     fn build_rows(&mut self, cx: &App) {
+        self.rebuild_outline(cx);
         let doc = self.doc(cx);
         let ctx = &self.ctx;
-        let scene_name = |ix: usize| -> SharedString {
-            let s = &ctx[ix].scene;
-            if s.is_empty() { "Before the first scene".into() } else { s.clone().into() }
+        let scene_of = |para: ParaId| -> &str { para_ctx(ctx, doc, para).map_or("", |c| c.scene.as_str()) };
+        let scene_name = |scene: &str| -> SharedString {
+            if scene.is_empty() { "Before the first scene".into() } else { scene.to_string().into() }
         };
         let (mut rows, mut row_of_item, mut item_by_para) = (vec![], vec![], vec![]);
         for review in &self.session.reviews {
@@ -395,9 +422,9 @@ impl ScriptView {
             let mut last_scene: Option<&str> = None;
             for i in in_script_order(doc, &review.items) {
                 let item = &review.items[i];
-                let scene = ctx[item.index].scene.as_str();
+                let scene = scene_of(item.para);
                 if last_scene != Some(scene) {
-                    rs.push(Row::Scene(scene_name(item.index)));
+                    rs.push(Row::Scene(scene_name(scene)));
                     last_scene = Some(scene);
                 }
                 of[i] = rs.len();
@@ -609,8 +636,44 @@ impl ScriptView {
 
     // ---- view state ----------------------------------------------------------
 
+    /// Scenes and speakers for the live document. The scene list is replaced
+    /// only if it changed, so the sidebar doesn't move under the writer.
+    fn rebuild_outline(&mut self, cx: &App) {
+        self.outline_task = None;
+        let script = self.doc(cx).script();
+        let ctx = annotate(script);
+        let rows = scene_rows(script, &ctx);
+        self.structure = structure_key(script);
+        self.ctx = Rc::new(ctx);
+        if *self.scene_rows != rows {
+            self.scene_rows = Rc::new(rows);
+        }
+    }
+
+    /// Catch the outline up with the document: at once after a structural
+    /// edit, else (text edits, which can rename a scene or speaker) once
+    /// typing pauses.
+    fn update_outline(&mut self, cx: &mut Context<Self>) {
+        if structure_key(self.doc(cx).script()) != self.structure {
+            self.rebuild_outline(cx);
+        } else {
+            self.outline_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(OUTLINE_SETTLE).await;
+                this.update(cx, |w, cx| {
+                    w.rebuild_outline(cx);
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+    }
+
     /// Push the current line and the margin marks to the editor.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if structure_key(self.doc(cx).script()) != self.structure {
+            self.rebuild_outline(cx);
+        }
+        let protect = self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para);
         let mut decor = Decor { originals: self.originals.clone(), ..Decor::default() };
         if let Some(r) = self.review() {
             let doc = self.doc(cx);
@@ -621,6 +684,7 @@ impl ScriptView {
         }
         self.editor.update(cx, |e, cx| {
             e.decor = decor;
+            e.protect = protect;
             cx.notify();
         });
         cx.notify();
@@ -730,18 +794,51 @@ impl ScriptView {
     }
 
     /// Record the rewrite's result, as one undo step with everything since E.
-    fn finish_rewrite(&mut self, rw: &Rewriting, cx: &mut Context<Self>) {
+    /// If the line under review is gone (removed or merged into another by an
+    /// edit the editor couldn't stop, e.g. deleting a selection across it),
+    /// there is nothing to record: the rewrite is undone instead, with a
+    /// notice. Returns whether it was recorded.
+    fn finish_rewrite(&mut self, rw: &Rewriting, cx: &mut Context<Self>) -> bool {
+        let para = self.session.item(rw.r, rw.i).para;
+        if self.doc(cx).paragraph(para).is_none() {
+            self.undo_to(rw.depth, cx);
+            self.say(REWRITE_LOST);
+            self.refresh(cx);
+            return false;
+        }
         self.record_hand_edit(rw.r, rw.i, cx);
         let depth = rw.depth;
         self.editor.update(cx, |e, _| e.doc.merge_undo_since(depth));
         self.schedule_autosave(cx);
+        true
+    }
+
+    /// Undo back to undo depth `depth` (where a rewrite started).
+    fn undo_to(&mut self, depth: usize, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| {
+            e.run(cx, |doc, sel| {
+                let mut sel = sel;
+                while doc.undo_depth() > depth {
+                    match doc.undo() {
+                        Some(s) => sel = s,
+                        None => break,
+                    }
+                }
+                Ok(sel)
+            })
+        });
     }
 
     fn commit_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rw) = self.rewriting.take() else { return };
-        self.finish_rewrite(&rw, cx);
+        let recorded = self.finish_rewrite(&rw, cx);
         window.focus(&self.focus, cx);
-        self.advance(rw.r, rw.i, cx);
+        if recorded {
+            self.advance(rw.r, rw.i, cx);
+        } else {
+            self.show_item(rw.r, rw.i, cx);
+            self.refresh(cx);
+        }
     }
 
     /// Finish a rewrite without moving on (switching view or item).
@@ -753,18 +850,7 @@ impl ScriptView {
 
     fn cancel_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rw) = self.rewriting.take() else { return };
-        self.editor.update(cx, |e, cx| {
-            e.run(cx, |doc, sel| {
-                let mut sel = sel;
-                while doc.undo_depth() > rw.depth {
-                    match doc.undo() {
-                        Some(s) => sel = s,
-                        None => break,
-                    }
-                }
-                Ok(sel)
-            })
-        });
+        self.undo_to(rw.depth, cx);
         window.focus(&self.focus, cx);
         self.refresh(cx);
     }
@@ -781,6 +867,7 @@ impl ScriptView {
         match event {
             EditorEvent::Edited => {
                 self.schedule_autosave(cx);
+                self.update_outline(cx);
                 self.refresh(cx);
             }
             EditorEvent::Clicked(para) => {
@@ -810,12 +897,16 @@ impl ScriptView {
                 } else if let Some((r, i)) = self.current()
                     && self.editor.read(cx).sel.head.para == self.session.item(r, i).para
                 {
-                    // Edited the line under review by hand, then Enter: that's a decision.
+                    // Edited the line under review by hand, then Cmd/Ctrl+Enter: that's a decision.
                     self.record_hand_edit(r, i, cx);
                     window.focus(&self.focus, cx);
                     self.advance(r, i, cx);
-                } else {
-                    self.say("Enter doesn't add paragraphs yet. Esc goes back to the review.");
+                }
+            }
+            EditorEvent::Split => {
+                // Enter used to finish a line rewrite; it now splits the line.
+                if self.rewriting.is_some() && crate::settings::first_time(crate::settings::ENTER_SPLITS) {
+                    self.say(format!("Enter now starts a new line. Press {COMMIT_KEY} when you're done."));
                     cx.notify();
                 }
             }
@@ -1129,7 +1220,14 @@ impl ScriptView {
                     format!("Couldn't write {}: {e}", out.display())
                 }
             },
-            Err(e) => format!("Not written: {e}"),
+            Err(e) => {
+                // E.g. a structural edit the .fdx writer can't make: never hidden.
+                self.say("");
+                self.say_error(format!("Not written: {e}"));
+                self.save_session(cx);
+                cx.notify();
+                return;
+            }
         };
         self.say(said);
         self.save_session(cx);
@@ -1335,8 +1433,12 @@ impl ScriptView {
 
     // ---- rendering ----------------------------------------------------------
 
+    /// Lines changed, added or retyped, plus lines removed, since the file was opened.
     fn changed_lines(&self, cx: &App) -> usize {
-        self.doc(cx).paragraphs().iter().filter(|p| self.originals.get(&p.id).is_some_and(|o| *o != p.text())).count()
+        let doc = self.doc(cx);
+        let live = doc.paragraphs().iter().filter(|p| is_changed(&self.originals, p)).count();
+        let removed = self.originals.keys().filter(|id| doc.paragraph(**id).is_none()).count();
+        live + removed
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -1538,8 +1640,9 @@ impl ScriptView {
 
         let doc = self.doc(cx);
         let item = self.session.item(r, i);
-        let ctx = &self.ctx[item.index];
-        let caps = self.caps.get(item.index).copied().unwrap_or(false);
+        let fallback = ParaContext::default();
+        let ctx = para_ctx(&self.ctx, doc, item.para).unwrap_or(&fallback);
+        let caps = doc.paragraph(item.para).is_some_and(|p| self.fdx.is_caps(p.kind.name()));
         let kind = doc.paragraph(item.para).map(|p| p.kind.name().to_lowercase()).unwrap_or_default();
         let who = if ctx.heading {
             "Scene heading".to_string()
@@ -1575,7 +1678,7 @@ impl ScriptView {
         if rewriting_here {
             body.push(label("Rewriting in the script"));
             body.push(
-                small("Edit the highlighted line. Enter saves and moves on; Esc puts it back.".to_string())
+                small(format!("Edit the highlighted line. {COMMIT_KEY} saves and moves on; Esc puts it back."))
                     .into_any_element(),
             );
             return shell.children(body);
@@ -1727,7 +1830,7 @@ impl ScriptView {
             View::Script => {
                 left = left.child(format!("Script · {} paragraphs", self.doc(cx).paragraphs().len()));
                 format!(
-                    "Edit text inside lines · {} undo · {} write .fdx",
+                    "Enter new line · Tab line type · {} undo · {} write .fdx",
                     crate::menus::shortcut("z"),
                     crate::menus::shortcut("s")
                 )
@@ -1775,6 +1878,12 @@ impl ScriptView {
 }
 
 /// Indexes into `items` in script order (by their numbers).
+/// Paragraph `para`'s scene and speaker, by its live position. None if it's
+/// gone (or the outline hasn't caught up with it yet).
+fn para_ctx<'a>(ctx: &'a [ParaContext], doc: &Document, para: ParaId) -> Option<&'a ParaContext> {
+    ctx.get(doc.index_of(para)?)
+}
+
 fn in_script_order(doc: &Document, items: &[scriptorium_review::Item]) -> Vec<usize> {
     let numbers = item_numbers(doc, items);
     let mut order: Vec<usize> = (0..items.len()).collect();
@@ -2027,5 +2136,47 @@ impl Render for ScriptView {
                     .children(card),
             )
             .child(self.render_status(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scriptorium_core::{ElementKind, Pos, Selection};
+
+    fn doc() -> Document {
+        Document::new(Script {
+            paragraphs: vec![
+                Paragraph::plain(ParaId(0), ElementKind::SceneHeading, "INT. HOUSE - DAY"),
+                Paragraph::plain(ParaId(1), ElementKind::Character, "ANA"),
+                Paragraph::plain(ParaId(2), ElementKind::Dialogue, "Hi."),
+            ],
+            ..Script::default()
+        })
+    }
+
+    #[test]
+    fn typing_keeps_the_structure_key_and_splits_change_it() {
+        let mut d = doc();
+        let key = structure_key(d.script());
+        d.insert_text(Selection::cursor(Pos::new(ParaId(2), 3)), " there").unwrap();
+        assert_eq!(structure_key(d.script()), key);
+        d.enter(Selection::cursor(Pos::new(ParaId(2), 2))).unwrap();
+        assert_ne!(structure_key(d.script()), key);
+    }
+
+    #[test]
+    fn context_is_looked_up_by_live_position() {
+        let mut d = doc();
+        // A paragraph inserted above moves the dialogue down: an as-opened
+        // index would now point at the wrong line (or past the end).
+        d.enter(Selection::cursor(Pos::new(ParaId(1), 0))).unwrap();
+        assert_eq!(d.index_of(ParaId(2)), Some(3));
+        let ctx = annotate(d.script());
+        assert_eq!(para_ctx(&ctx, &d, ParaId(2)).unwrap().speaker, "ANA");
+        assert!(para_ctx(&ctx, &d, ParaId(99)).is_none());
+        // A stale, shorter outline gives None rather than panicking.
+        assert!(para_ctx(&ctx[..1], &d, ParaId(2)).is_none());
+        assert_eq!(scene_rows(d.script(), &ctx).len(), 1);
     }
 }

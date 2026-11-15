@@ -109,7 +109,10 @@ impl Opened {
             sources.push(sessionfile::ReviewSource { name: stored.clone(), path: stored, text });
         }
         let caps = |k: &ElementKind| fdx.is_caps(k.name());
-        let opened = sessionfile::resume(sources, s, &raw, saved.as_deref(), &caps, &script_name);
+        // Always checked: reader 1 also misnumbered files without DualDialogue
+        // (nested paragraphs in scene summaries and arc beats), and it's cheap.
+        let reader_1 = Some(fdx.legacy_script());
+        let opened = sessionfile::resume(sources, s, reader_1.as_ref(), &raw, saved.as_deref(), &caps, &script_name);
         if let Resumed::Discarded(why) = &opened.how {
             if !read_only {
                 return Err(format!(

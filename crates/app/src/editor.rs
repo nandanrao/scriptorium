@@ -7,22 +7,27 @@
 //!
 //! The window around it ([`crate::workspace`]) runs review decisions through
 //! [`ScriptEditor::run`], sets [`Decor`] (current line, gutter marks), and
-//! listens for [`EditorEvent`]s. While `structural` is false (the default),
-//! editing stays inside paragraphs: saving can't write new, removed or retyped
-//! paragraphs yet.
+//! listens for [`EditorEvent`]s. Editing is structural everywhere: Enter
+//! splits, Backspace/Delete at an edge join, Tab retypes, a selection across
+//! paragraphs deletes as one; edits [`scriptorium_core::Script::fixed`]
+//! paragraphs (dual dialogue) can't take are refused with a notice. Copy puts
+//! typed paragraphs beside the plain text ([`ClipboardMeta`]), so a paste back
+//! keeps kinds; plain text from elsewhere is classified
+//! ([`scriptorium_core::paste`]).
 
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    IntoElement, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, Styled, UTF16Selection, Window, WrappedLine, actions, div, list, point,
-    prelude::*, px, size,
+    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, IntoElement, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, Styled, UTF16Selection, Window, WrappedLine, actions, div,
+    list, point, prelude::*, px, size,
 };
 use scriptorium_core::doc::{DocError, Document};
-use scriptorium_core::{ParaId, Paragraph, Pos, Selection};
+use scriptorium_core::paste::{self, ClipboardMeta, Pasted};
+use scriptorium_core::{FIXED_MESSAGE, ParaId, Paragraph, Pos, Selection};
 
 use crate::elements::{InputArea, ParaElement};
 use crate::layout;
@@ -56,6 +61,7 @@ actions!(
         PageUp,
         PageDown,
         Enter,
+        CommitLine,
         Tab,
         ShiftTab,
         Copy,
@@ -73,8 +79,14 @@ actions!(
 pub struct Decor {
     pub current: Option<ParaId>,
     pub marks: HashMap<ParaId, Mark>,
-    /// Text as opened from the file, to put Final Draft's `*` beside changed lines.
-    pub originals: Rc<HashMap<ParaId, String>>,
+    /// Paragraphs as opened from the file, to put Final Draft's `*` beside changed lines.
+    pub originals: Rc<HashMap<ParaId, Paragraph>>,
+}
+
+/// Whether `p` differs from the file: new, retyped, or with other text.
+/// Nothing is changed before the originals are known (an empty map).
+pub fn is_changed(originals: &HashMap<ParaId, Paragraph>, p: &Paragraph) -> bool {
+    !originals.is_empty() && originals.get(&p.id).is_none_or(|o| o.kind != p.kind || o.text() != p.text())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,15 +105,27 @@ pub enum EditorEvent {
     /// The user clicked in a paragraph.
     Clicked(ParaId),
     Escape,
-    /// Enter while structural edits are off: "I'm done with this line".
+    /// Cmd/Ctrl+Enter: "I'm done with this line".
     Commit,
+    /// Enter split a paragraph (the window may explain the key, once).
+    Split,
     /// Something the user should be told (e.g. why a key did nothing).
     Notice(String),
 }
 
 impl EventEmitter<EditorEvent> for ScriptEditor {}
 
-const NO_STRUCTURE: &str = "Adding, joining and retyping paragraphs isn't supported yet: do that in Final Draft.";
+/// Said when a join would take away the line being rewritten.
+pub(crate) const PROTECTED_JOIN: &str =
+    "That would join away the line you're rewriting. Finish or cancel the rewrite first.";
+
+/// What to tell the writer about a refused edit.
+pub(crate) fn refusal(e: &DocError) -> String {
+    match e {
+        DocError::Fixed(_) => FIXED_MESSAGE.to_string(),
+        e => format!("edit failed: {e}"),
+    }
+}
 
 /// Text being composed by an IME or a dead key, shown inline but not yet in the document.
 #[derive(Debug, Clone)]
@@ -165,8 +189,9 @@ pub struct ScriptEditor {
     goal_x: Option<Pixels>,
     selecting: bool,
     pub decor: Decor,
-    /// Allow edits that add, remove, join or retype paragraphs.
-    pub structural: bool,
+    /// The line under review while it's being rewritten (E): a join that
+    /// would remove it or merge it into another line is refused.
+    pub protect: Option<ParaId>,
     /// Where the paragraph list was painted last frame.
     pub(crate) viewport: Bounds<Pixels>,
 }
@@ -186,7 +211,7 @@ impl ScriptEditor {
             goal_x: None,
             selecting: false,
             decor: Decor::default(),
-            structural: false,
+            protect: None,
             viewport: Bounds::default(),
         }
     }
@@ -221,18 +246,6 @@ impl ScriptEditor {
         cx.notify();
     }
 
-    /// Refuse an edit that would change the paragraph structure, if those are off.
-    fn refuse(&self, cx: &mut Context<Self>) -> bool {
-        if !self.structural {
-            cx.emit(EditorEvent::Notice(NO_STRUCTURE.into()));
-        }
-        !self.structural
-    }
-
-    fn spans_paragraphs(&self) -> bool {
-        self.sel.anchor.para != self.sel.head.para
-    }
-
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
     }
@@ -240,12 +253,13 @@ impl ScriptEditor {
     // ---- applying changes --------------------------------------------------
 
     /// Run a document command, then update selection, list and view.
+    /// Returns whether the document changed.
     fn edit(
         &mut self,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Document, Selection) -> Result<Selection, DocError>,
-    ) {
-        self.apply(cx, true, f);
+    ) -> bool {
+        self.apply(cx, true, f)
     }
 
     fn apply(
@@ -253,22 +267,24 @@ impl ScriptEditor {
         cx: &mut Context<Self>,
         reveal: bool,
         f: impl FnOnce(&mut Document, Selection) -> Result<Selection, DocError>,
-    ) {
+    ) -> bool {
         self.marked = None;
         let before = self.doc.log().len();
         match f(&mut self.doc, self.sel) {
             Ok(sel) => self.sel = sel,
-            Err(e) => cx.emit(EditorEvent::Notice(format!("edit failed: {e}"))),
+            Err(e) => cx.emit(EditorEvent::Notice(refusal(&e))),
         }
         self.sync_list();
         self.goal_x = None;
         if reveal {
             self.reveal_head();
         }
-        if self.doc.log().len() != before {
+        let changed = self.doc.log().len() != before;
+        if changed {
             cx.emit(EditorEvent::Edited);
         }
         cx.notify();
+        changed
     }
 
     /// Tell the list which items changed, by comparing with what it showed before.
@@ -352,17 +368,9 @@ impl ScriptEditor {
 
     // ---- actions -------------------------------------------------------------
 
-    /// Would deleting backward/forward from here join paragraphs?
-    fn deletes_across(&self, forward: bool) -> bool {
-        if !self.sel.is_collapsed() {
-            return self.spans_paragraphs();
-        }
-        let h = self.sel.head;
-        if forward { h.offset >= self.doc.paragraph(h.para).map_or(0, |p| p.text().len()) } else { h.offset == 0 }
-    }
-
     fn delete_dir(&mut self, forward: bool, word: bool, cx: &mut Context<Self>) {
-        if self.deletes_across(forward) && self.refuse(cx) {
+        if self.protect.is_some() && self.doc.removed_by_join(self.sel, forward) == self.protect {
+            cx.emit(EditorEvent::Notice(PROTECTED_JOIN.into()));
             return;
         }
         if forward {
@@ -384,24 +392,21 @@ impl ScriptEditor {
         self.delete_dir(true, true, cx);
     }
     fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
-        if self.structural {
-            self.edit(cx, |d, s| d.enter(s));
-        } else {
-            cx.emit(EditorEvent::Commit);
+        if self.edit(cx, |d, s| d.enter(s)) {
+            cx.emit(EditorEvent::Split);
         }
+    }
+    fn commit_line(&mut self, _: &CommitLine, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(EditorEvent::Commit);
     }
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(EditorEvent::Escape);
     }
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.refuse(cx) {
-            self.edit(cx, |d, s| d.cycle_kind(s, true));
-        }
+        self.edit(cx, |d, s| d.cycle_kind(s, true));
     }
     fn shift_tab(&mut self, _: &ShiftTab, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.refuse(cx) {
-            self.edit(cx, |d, s| d.cycle_kind(s, false));
-        }
+        self.edit(cx, |d, s| d.cycle_kind(s, false));
     }
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
         self.edit(cx, |d, s| Ok(d.undo().unwrap_or(s)));
@@ -506,30 +511,41 @@ impl ScriptEditor {
         self.page(true, window, cx);
     }
 
+    /// Plain text for other programs (Final Draft takes it untyped), and the
+    /// typed paragraphs as JSON metadata for a paste back into Scriptorium.
+    fn copy_selection(&self, cx: &mut Context<Self>) {
+        let paras = self.doc.fragment(self.sel);
+        let text = paste::plain_text(&paras);
+        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, ClipboardMeta::new(paras)));
+    }
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.sel.is_collapsed() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.doc.text_in(self.sel)));
+            self.copy_selection(cx);
         }
     }
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        if self.spans_paragraphs() && self.refuse(cx) {
-            return;
-        }
         if !self.sel.is_collapsed() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.doc.text_in(self.sel)));
+            self.copy_selection(cx);
             self.edit(cx, |d, s| d.delete_backward(s, false));
         }
     }
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
-        if self.spans_paragraphs() && self.refuse(cx) {
-            return;
+        let Some(item) = cx.read_from_clipboard() else { return };
+        let Some(text) = item.text() else { return };
+        let meta = match item.entries() {
+            [ClipboardEntry::String(s)] => s.metadata_json::<ClipboardMeta>(),
+            _ => None,
+        };
+        // `for_clipboard` drops characters a script file can't hold.
+        match paste::for_clipboard(&text, meta) {
+            Pasted::Text(t) if t.is_empty() => {}
+            Pasted::Text(t) => {
+                self.edit(cx, |d, s| d.insert_text(s, &t));
+            }
+            Pasted::Paras(paras) => {
+                self.edit(cx, |d, s| d.paste_fragment(s, &paras));
+            }
         }
-        let lines = text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty());
-        // Screenplay text copied from elsewhere separates paragraphs with blank
-        // lines. Without structural edits, it all goes into this paragraph.
-        let text = lines.collect::<Vec<_>>().join(if self.structural { "\n" } else { " " });
-        self.edit(cx, |d, s| d.insert_text(s, &text));
     }
 
     // ---- mouse -------------------------------------------------------------
@@ -670,7 +686,10 @@ impl EntityInputHandler for ScriptEditor {
         } else {
             self.sel
         };
-        let text = text.to_string();
+        let text = paste::writable(text);
+        if text.is_empty() && target.is_collapsed() {
+            return;
+        }
         self.edit(cx, move |d, _| d.insert_text(target, &text));
     }
 
@@ -682,6 +701,8 @@ impl EntityInputHandler for ScriptEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Composed text a script file can't hold never reaches the document.
+        let new_text = &paste::writable(new_text);
         let pos = match self.marked.take() {
             Some(m) => m.pos,
             None => {
@@ -785,6 +806,7 @@ impl Render for ScriptEditor {
             .on_action(cx.listener(Self::page_up))
             .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::enter))
+            .on_action(cx.listener(Self::commit_line))
             .on_action(cx.listener(Self::tab))
             .on_action(cx.listener(Self::shift_tab))
             .on_action(cx.listener(Self::copy))
@@ -804,5 +826,27 @@ impl Render for ScriptEditor {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .child(InputArea { editor: cx.entity(), child: items.into_any_element() }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_retyped_and_edited_lines_count_as_changed() {
+        use scriptorium_core::ElementKind::*;
+        let orig = Paragraph::plain(ParaId(0), Action, "Hello.");
+        let originals: HashMap<ParaId, Paragraph> = [(orig.id, orig.clone())].into();
+        assert!(!is_changed(&originals, &orig));
+        assert!(is_changed(&originals, &Paragraph { kind: Dialogue, ..orig.clone() }));
+        assert!(is_changed(&originals, &Paragraph::plain(ParaId(0), Action, "Hello!")));
+        assert!(is_changed(&originals, &Paragraph::plain(ParaId(9), Action, "Hello.")));
+    }
+
+    #[test]
+    fn dual_dialogue_refusals_read_as_the_shared_message() {
+        assert_eq!(refusal(&DocError::Fixed(ParaId(3))), FIXED_MESSAGE);
+        assert!(refusal(&DocError::LastParagraph).starts_with("edit failed: "));
     }
 }

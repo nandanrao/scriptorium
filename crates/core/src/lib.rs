@@ -9,9 +9,10 @@ pub mod diff;
 pub mod doc;
 pub mod model;
 pub mod outline;
+pub mod paste;
 pub mod rules;
 pub mod spans;
 pub mod text;
 
-pub use doc::{Document, Pos, Selection};
+pub use doc::{DocError, Document, Edit, FIXED_MESSAGE, Group, NewPara, Pos, Selection};
 pub use model::{ElementKind, ParaId, Paragraph, Script, Span, Style};

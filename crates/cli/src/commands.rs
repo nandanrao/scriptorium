@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use scriptorium_core::outline::annotate;
 use scriptorium_core::text::looks_same;
-use scriptorium_core::{ElementKind, ParaId, Script};
+use scriptorium_core::{ElementKind, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::file::{FORMAT_HEADER, append_block, insert_id};
 use scriptorium_review::matching::{Para, match_entries};
@@ -82,6 +82,32 @@ REVIEWING
         (--accept-all: also take option 1 of every pending suggestion).
         Default output: \"<script> (scriptorium).fdx\" next to the script
 
+EDITING STRUCTURE
+  Each is one undoable step (`undo` reverses it), saved to the session; ids
+  are from `dump`. TYPE is an element name; case, spaces and dashes don't matter (scene heading,
+  scene-heading and SCENEHEADING all work): Scene Heading, Action,
+  Character, Parenthetical, Dialogue, Transition, Shot, General. Lines inside
+  a dual dialogue block take text edits only: these are refused there.
+  With --json, each prints {\"new\":[ids],\"removed\":[ids],\"paras\":[{id,kind,text}]}.
+
+  scriptorium insert <script.fdx> (--after <id> | --start | --end)
+                     (--block '<TYPE: text>\\n<TYPE: text>...' | --guess '<plain text>'
+                      | <TYPE> <text>) [--json]
+        add paragraphs, one `TYPE: text` per line, in one step; --guess takes
+        untyped screenplay text and guesses each line's type as the app does
+        when pasting plain text (blank lines dropped)
+  scriptorium remove <script.fdx> <id>[..<id>] [--json]
+        remove a paragraph, or from the first to the second in script order
+        (not a numeric range; refused if the second is above the first, and
+        for the last remaining paragraph)
+  scriptorium split <script.fdx> <id> (--at <text> | --offset <n>) [--json]
+        split before the first occurrence of text, or after n characters;
+        the original id keeps the original text
+  scriptorium join <script.fdx> <first id> <second id> [--json]
+        join the next paragraph onto the first
+  scriptorium retype <script.fdx> <id> <TYPE> [--json]
+  `apply` writes these into the .fdx as far as the writer supports them.
+
 AGENT TOOLS
   scriptorium tool <script.fdx> <name> ['<json args>'] [--review-file <review.txt>]
         run one of the tools the built-in agent and the MCP server use:
@@ -107,6 +133,7 @@ pub fn run(args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
         ["dump", path] => dump(path, false, notes),
         ["dump", path, "--json"] => dump(path, true, notes),
         ["roundtrip", path] => load(path).and_then(|f| roundtrip(&f)),
+        [cmd, rest @ ..] if crate::structure::COMMANDS.contains(cmd) => crate::structure::command(cmd, rest, notes),
         [cmd, rest @ ..] if REVIEW_COMMANDS.contains(cmd) => review_command(cmd, rest, notes),
         ["-h" | "--help" | "help"] => Ok(USAGE.to_string()),
         _ => Err(format!("unrecognized arguments\n\n{USAGE}")),
@@ -549,9 +576,7 @@ pub fn edit(script: &str, para: u64, text: &str, reviews: &[&str], notes: &mut V
     if o.doc.paragraph(para).is_none() {
         return Err(format!("no paragraph {id} (use list_paragraphs to find ids)"));
     }
-    if text.contains('\n') {
-        return Err("one paragraph at a time: the text can't contain newlines".into());
-    }
+    crate::structure::check_text(text)?;
     let sel = o.sel();
     o.doc.replace_text(sel, para, text, &[]).map_err(|e| e.to_string())?;
     o.save()?;
@@ -755,16 +780,27 @@ pub fn apply(
     }
     let raw = o.fdx.write_script(o.doc.script()).map_err(|e| e.to_string())?;
     let original = o.fdx.to_script();
-    let changed = o.doc.paragraphs().iter().zip(&original.paragraphs).filter(|(a, b)| a.text() != b.text()).count();
+    let changed = changed_paragraphs(&original.paragraphs, o.doc.paragraphs());
     write_atomic(&out, raw.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
     Ok(format!("wrote {} ({changed} paragraphs changed)\n", out.display()))
+}
+
+/// Paragraphs that differ between the original and the edited script, by id:
+/// inserted, removed, and those whose text or kind changed.
+fn changed_paragraphs(original: &[Paragraph], edited: &[Paragraph]) -> usize {
+    let old: std::collections::HashMap<_, _> = original.iter().map(|p| (p.id, p)).collect();
+    let new: std::collections::HashSet<_> = edited.iter().map(|p| p.id).collect();
+    let removed = original.iter().filter(|p| !new.contains(&p.id)).count();
+    let rest =
+        edited.iter().filter(|p| old.get(&p.id).is_none_or(|o| o.text() != p.text() || o.kind != p.kind)).count();
+    removed + rest
 }
 
 /// The session lock of `script`, for a command that writes (see the module
 /// docs); a script that isn't there fails as opening it would.
 /// The script's session lock; None (with a note on stderr) when the file
 /// system has no locks, as the app goes on. Busy past the wait is an error.
-fn lock(script: &str) -> Result<Option<SessionLock>, String> {
+pub(crate) fn lock(script: &str) -> Result<Option<SessionLock>, String> {
     let at = Path::new(script).canonicalize().map_err(|e| format!("{script}: {e}"))?;
     match SessionLock::for_script(&at) {
         Ok(l) => Ok(Some(l)),
@@ -977,4 +1013,20 @@ pub fn tool(
         o.save()?;
     }
     Ok(applied.message + "\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_paragraphs_count_by_id() {
+        let p = |id, k: ElementKind, t: &str| Paragraph::plain(ParaId(id), k, t);
+        let a = ElementKind::Action;
+        let original = [p(0, a.clone(), "x"), p(1, a.clone(), "y"), p(2, a.clone(), "z"), p(3, a.clone(), "w")];
+        // 0 same, 1 removed, 2 retyped, 3 retexted, 9 inserted.
+        let edited = [p(0, a.clone(), "x"), p(9, a.clone(), "n"), p(2, ElementKind::Shot, "z"), p(3, a, "w2")];
+        assert_eq!(changed_paragraphs(&original, &edited), 4);
+        assert_eq!(changed_paragraphs(&original, &original), 0);
+    }
 }

@@ -9,11 +9,13 @@
 //! - [`fsio`]: atomic writes; every file this crate writes goes through
 //!   [`fsio::write_atomic`]. Every command that writes holds the script's
 //!   [`fsio::SessionLock`] from opening the session to saving it.
+//! - [`structure`]: insert, remove, split, join and retype, as typed functions.
 //! - [`commands`]: each command, returning the text it prints.
 
 pub mod commands;
 pub mod fsio;
 pub mod opened;
+pub mod structure;
 
 pub use commands::{Choice, SuggestionRef, USAGE, run, tool, tool_specs};
 pub use fsio::{SessionLock, write_atomic};

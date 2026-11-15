@@ -7,7 +7,9 @@
 //!
 //! UIs never mutate the script directly. They call commands
 //! ([`Document::insert_text`], [`Document::enter`], …) with a [`Selection`] and
-//! get back the selection to show next.
+//! get back the selection to show next. Every command, and anything outside
+//! core that changes the script (CLI commands, review decisions), is built from
+//! the primitives of [`Edit`], run in one transaction by [`Document::edit`].
 //!
 //! Paragraph identity rules (a first version, see AGENTS.md):
 //! - Typing, deleting and retyping never change a paragraph's id.
@@ -18,6 +20,13 @@
 //! - Joining two paragraphs keeps the first one's id, except that removing an
 //!   empty paragraph never costs its non-empty neighbour its id.
 //! - Undo and redo restore the exact ids that existed before.
+//! - A fresh id is never one that was used before, even if no paragraph has
+//!   it now ([`Document::next_id`], [`Script::id_floor`]): an exporter takes
+//!   an id for the file's paragraph it came from. Only
+//!   [`Edit::insert_para_with_id`] (restoring removed lines) brings one back.
+//! - [`Script::fixed`] paragraphs take text edits only: [`Edit`] refuses to
+//!   add, remove, split, join or retype them ([`DocError::Fixed`]). Replaying
+//!   logged ops, undo and redo are not checked (logs made before the rule).
 //!
 //! Besides the script, a document holds *metadata*: string keys and values
 //! that other crates attach (e.g. a review decision). Metadata changes are ops
@@ -26,6 +35,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
@@ -157,6 +167,13 @@ pub enum DocError {
     MissingParagraph(ParaId),
     /// An op didn't match the document (a bug in the caller or a corrupt log).
     Mismatch(&'static str),
+    /// A structural edit (adding, removing, splitting, joining or retyping
+    /// lines) touching this [`Script::fixed`] paragraph, which takes text
+    /// edits only.
+    Fixed(ParaId),
+    /// Removing the only remaining paragraph: a document is never empty. For a
+    /// full replace, insert the new paragraphs before removing the old ones.
+    LastParagraph,
 }
 
 impl fmt::Display for DocError {
@@ -164,11 +181,22 @@ impl fmt::Display for DocError {
         match self {
             Self::MissingParagraph(id) => write!(f, "no paragraph with id {}", id.0),
             Self::Mismatch(what) => write!(f, "operation does not match the document: {what}"),
+            Self::LastParagraph => write!(f, "the last paragraph can't be removed: insert the replacement first"),
+            Self::Fixed(id) => write!(
+                f,
+                "paragraph {} takes text edits only: lines can't be added, removed, split, joined or retyped there",
+                id.0
+            ),
         }
     }
 }
 
 impl std::error::Error for DocError {}
+
+/// What to tell a writer when an edit is refused with [`DocError::Fixed`]
+/// (the app's notice; the CLI and tool validation say the same).
+pub const FIXED_MESSAGE: &str =
+    "Dual dialogue lines can't be added, removed or split here; edit their text, or change them in Final Draft.";
 
 #[derive(Debug, Clone)]
 pub struct Document {
@@ -189,15 +217,17 @@ impl Document {
         Self::with_meta(script, BTreeMap::new())
     }
 
-    /// Like [`Document::new`], starting with metadata `meta`.
+    /// Like [`Document::new`], starting with metadata `meta`. Fresh ids start
+    /// above every live id and at [`Script::id_floor`] or later.
     pub fn with_meta(mut script: Script, meta: BTreeMap<String, String>) -> Self {
         for p in &mut script.paragraphs {
             spans::normalize(&mut p.spans);
         }
         if script.paragraphs.is_empty() {
-            script.paragraphs.push(Paragraph { id: ParaId(0), kind: ElementKind::Action, spans: vec![] });
+            let id = ParaId(script.id_floor);
+            script.paragraphs.push(Paragraph { id, kind: ElementKind::Action, spans: vec![] });
         }
-        let next_id = script.paragraphs.iter().map(|p| p.id.0 + 1).max().unwrap_or(0);
+        let next_id = script.paragraphs.iter().map(|p| p.id.0 + 1).max().unwrap_or(0).max(script.id_floor);
         Self {
             initial: script.clone(),
             initial_meta: meta.clone(),
@@ -212,8 +242,13 @@ impl Document {
 
     /// Make the current state the starting point: the log and undo history are
     /// dropped. Used for state loaded from a file, which undo shouldn't undo.
+    /// The new starting script's [`Script::id_floor`] is this document's
+    /// [`Document::next_id`], so ids used and since removed stay used (also
+    /// for [`Document::initial`], which a rebuild replays from).
     pub fn rebase(self) -> Self {
-        Self::with_meta(self.script, self.meta)
+        let mut script = self.script;
+        script.id_floor = self.next_id;
+        Self::with_meta(script, self.meta)
     }
 
     /// Rebuild a document by replaying `events` over `initial`.
@@ -249,6 +284,12 @@ impl Document {
 
     pub fn script(&self) -> &Script {
         &self.script
+    }
+
+    /// The id the next new paragraph gets. Every id below it has been used
+    /// (it may be absent now); none at or above it has.
+    pub fn next_id(&self) -> u64 {
+        self.next_id
     }
 
     pub fn initial(&self) -> &Script {
@@ -471,6 +512,33 @@ impl Document {
         })
     }
 
+    /// The paragraph a Backspace (`forward` false) or Delete at `sel` would
+    /// remove or merge away by joining, if it would join: a collapsed cursor
+    /// at the start (end) of a paragraph with one above (below). The rules
+    /// are [`Edit::join`]'s: an empty paragraph goes, else the second one is
+    /// merged into the first.
+    pub fn removed_by_join(&self, sel: Selection, forward: bool) -> Option<ParaId> {
+        let sel = self.clamp_selection(sel);
+        if !sel.is_collapsed() {
+            return None;
+        }
+        let pos = sel.head;
+        let i = self.index_of(pos.para)?;
+        let (first, second) = if forward {
+            if pos.offset < self.para_len(pos.para) {
+                return None;
+            }
+            (pos.para, self.script.paragraphs.get(i + 1)?.id)
+        } else {
+            if pos.offset > 0 || i == 0 {
+                return None;
+            }
+            (self.script.paragraphs[i - 1].id, pos.para)
+        };
+        let empty = |id| self.para_len(id) == 0;
+        Some(if empty(first) && !empty(second) { first } else { second })
+    }
+
     /// Give every paragraph touched by the selection the element `kind`.
     pub fn set_kind(&mut self, sel: Selection, kind: ElementKind) -> Result<Selection, DocError> {
         let sel = self.clamp_selection(sel);
@@ -478,10 +546,7 @@ impl Document {
         let ids: Vec<ParaId> = self.script.paragraphs[self.key(a).0..=self.key(b).0].iter().map(|p| p.id).collect();
         self.transact(sel, Group::Other, |tx| {
             for id in ids {
-                let from = tx.doc.paragraph(id).ok_or(DocError::MissingParagraph(id))?.kind.clone();
-                if from != kind {
-                    tx.push(Op::SetKind { para: id, from, to: kind.clone() })?;
-                }
+                tx.set_kind(id, kind.clone())?;
             }
             Ok(sel)
         })
@@ -518,22 +583,11 @@ impl Document {
             let style = if removed.is_empty() { spans::style_at(&p.spans, pre) } else { removed[0].style };
             vec![Span { text: new_mid.to_string(), style }]
         };
-        let changes: Vec<Op> = meta
-            .iter()
-            .filter(|(k, v)| self.meta(k) != *v)
-            .map(|(k, v)| Op::SetMeta {
-                key: k.to_string(),
-                from: self.meta.get(*k).cloned(),
-                to: v.map(str::to_string),
-            })
-            .collect();
         let end = Pos::new(para, text.len() - suf);
         self.transact(sel, Group::Other, |tx| {
-            if old != text {
-                tx.push(Op::Splice { para, at: pre, removed, inserted })?;
-            }
-            for op in changes {
-                tx.push(op)?;
+            tx.splice(para, pre..old.len() - suf, inserted)?;
+            for (key, to) in meta {
+                tx.set_meta(key, *to)?;
             }
             Ok(Selection::cursor(end))
         })
@@ -622,31 +676,46 @@ impl Document {
 
     // ---- internals ---------------------------------------------------------
 
-    /// Run `f` with a transaction builder. On error every applied op is rolled
-    /// back and nothing is logged. A transaction with no ops is not logged either.
+    /// Run `f` with the [`Edit`] builder as one transaction (one undo step,
+    /// unless `group` coalesces it with its neighbours). `before` is the
+    /// selection undo returns to; `f` returns the selection to show after
+    /// (which redo returns to) and a value for the caller. On error every
+    /// applied op is rolled back, no fresh id is spent and nothing is logged.
+    /// A transaction with no ops is not logged either.
+    pub fn edit<T>(
+        &mut self,
+        before: Selection,
+        group: Group,
+        f: impl FnOnce(&mut Edit<'_>) -> Result<(Selection, T), DocError>,
+    ) -> Result<T, DocError> {
+        let next_id = self.next_id;
+        let mut tx = Edit { doc: self, ops: vec![] };
+        let result = f(&mut tx);
+        let ops = std::mem::take(&mut tx.ops);
+        match result {
+            Ok((after, value)) => {
+                if !ops.is_empty() {
+                    self.record_edit(Transaction { ops, before, after, group });
+                }
+                Ok(value)
+            }
+            Err(e) => {
+                for op in ops.iter().rev() {
+                    self.apply_op(&op.inverse()).expect("rollback applies cleanly");
+                }
+                self.next_id = next_id;
+                Err(e)
+            }
+        }
+    }
+
     fn transact(
         &mut self,
         before: Selection,
         group: Group,
-        f: impl FnOnce(&mut Tx) -> Result<Selection, DocError>,
+        f: impl FnOnce(&mut Edit<'_>) -> Result<Selection, DocError>,
     ) -> Result<Selection, DocError> {
-        let mut tx = Tx { doc: self, ops: vec![] };
-        match f(&mut tx) {
-            Ok(after) => {
-                let ops = std::mem::take(&mut tx.ops);
-                if !ops.is_empty() {
-                    self.record_edit(Transaction { ops, before, after, group });
-                }
-                Ok(after)
-            }
-            Err(e) => {
-                let ops = std::mem::take(&mut tx.ops);
-                for op in ops.iter().rev() {
-                    self.apply_op(&op.inverse()).expect("rollback applies cleanly");
-                }
-                Err(e)
-            }
-        }
+        self.edit(before, group, |tx| f(tx).map(|after| (after, after)))
     }
 
     fn record_edit(&mut self, t: Transaction) {
@@ -714,8 +783,11 @@ impl Document {
                 paras.insert(*index, para.clone());
             }
             Op::RemovePara { index, para } => {
-                if paras.get(*index) != Some(para) || paras.len() == 1 {
-                    return Err(DocError::Mismatch("remove paragraph: differs, or it is the last one"));
+                if paras.get(*index) != Some(para) {
+                    return Err(DocError::Mismatch("remove paragraph: differs from the document"));
+                }
+                if paras.len() == 1 {
+                    return Err(DocError::LastParagraph);
                 }
                 paras.remove(*index);
             }
@@ -733,16 +805,195 @@ impl Document {
     }
 }
 
-/// Builds a transaction by applying ops as it goes, so later steps see earlier ones.
-struct Tx<'a> {
+/// A paragraph to add: its id comes from the document ([`Edit::insert_para`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewPara {
+    pub kind: ElementKind,
+    pub spans: Vec<Span>,
+}
+
+impl NewPara {
+    /// A paragraph of plain, unstyled text.
+    pub fn plain(kind: ElementKind, text: impl Into<String>) -> Self {
+        Self { kind, spans: vec![Span { text: text.into(), style: Default::default() }] }
+    }
+}
+
+/// The transaction builder handed out by [`Document::edit`]. Each primitive
+/// applies its op at once, so later steps see earlier ones; if the closure
+/// fails, the whole transaction is rolled back.
+pub struct Edit<'a> {
     doc: &'a mut Document,
     ops: Vec<Op>,
 }
 
-impl Tx<'_> {
+impl Edit<'_> {
+    /// The document as edited so far in this transaction.
+    pub fn doc(&self) -> &Document {
+        self.doc
+    }
+
+    /// Replace bytes `range` of paragraph `para`'s text with `spans`. The range
+    /// must lie within the text, on char boundaries. Allowed on fixed
+    /// paragraphs. A splice that changes nothing records nothing.
+    pub fn splice(&mut self, para: ParaId, range: Range<usize>, mut spans: Vec<Span>) -> Result<(), DocError> {
+        let p = self.para(para)?;
+        let text = p.text();
+        let ok = range.start <= range.end
+            && range.end <= text.len()
+            && text.is_char_boundary(range.start)
+            && text.is_char_boundary(range.end);
+        if !ok {
+            return Err(DocError::Mismatch("splice: range outside the text or not on a char boundary"));
+        }
+        spans::normalize(&mut spans);
+        let removed = spans::slice(&p.spans, range.clone());
+        if removed == spans {
+            return Ok(());
+        }
+        self.push(Op::Splice { para, at: range.start, removed, inserted: spans })
+    }
+
+    /// Add paragraph `p` at `index` (0 = first, `len` = last) with a fresh id,
+    /// which it returns. Refused between two paragraphs of the same fixed group.
+    pub fn insert_para(&mut self, index: usize, p: NewPara) -> Result<ParaId, DocError> {
+        self.check_insert(index)?;
+        let id = self.doc.fresh_id();
+        self.push_insert(index, id, p)?;
+        Ok(id)
+    }
+
+    /// Like [`Edit::insert_para`], but bring back id `id`, which was used before
+    /// and is absent now (else `Mismatch`). This is the only way an id is ever
+    /// reused: it exists for restoring removed lines (`restore_run`: keep mine /
+    /// undecide after a block suggestion was accepted). Every other insert takes
+    /// a fresh id, and undo/redo replay the inverse ops directly, so they never
+    /// allocate ids.
+    pub fn insert_para_with_id(&mut self, index: usize, id: ParaId, p: NewPara) -> Result<(), DocError> {
+        if id.0 >= self.doc.next_id || self.doc.paragraph(id).is_some() {
+            return Err(DocError::Mismatch("insert paragraph with id: the id is live or was never used"));
+        }
+        self.check_insert(index)?;
+        self.push_insert(index, id, p)
+    }
+
+    /// Remove paragraph `id`. Refused for a fixed paragraph, and for the last
+    /// paragraph ([`DocError::LastParagraph`]): a document is never empty, so
+    /// callers insert the new paragraphs before removing the old ones for a
+    /// full replace.
+    pub fn remove_para(&mut self, id: ParaId) -> Result<(), DocError> {
+        self.refuse_fixed(id)?;
+        let index = self.index(id)?;
+        let para = self.doc.script.paragraphs[index].clone();
+        self.push(Op::RemovePara { index, para })
+    }
+
+    /// Give paragraph `id` the element `kind`. Refused for a fixed paragraph,
+    /// unless it already is that kind (then nothing is recorded).
+    pub fn set_kind(&mut self, id: ParaId, kind: ElementKind) -> Result<(), DocError> {
+        let from = self.para(id)?.kind.clone();
+        if from == kind {
+            return Ok(());
+        }
+        self.refuse_fixed(id)?;
+        self.push(Op::SetKind { para: id, from, to: kind })
+    }
+
+    /// Split at `at` as Enter does, returning the new paragraph's id: at offset
+    /// 0 of a non-empty paragraph a new empty paragraph of the same kind goes
+    /// above; at the end a new empty one of [`rules::next_kind`] goes below; in
+    /// the middle the original keeps the head and the tail (same kind) gets
+    /// the new id. So the original id stays with the original text. Refused
+    /// for a fixed paragraph.
+    pub fn split(&mut self, at: Pos) -> Result<ParaId, DocError> {
+        let p = self.para(at.para)?;
+        let (len, kind) = (spans::len(&p.spans), p.kind.clone());
+        if at.offset > len || !p.text().is_char_boundary(at.offset) {
+            return Err(DocError::Mismatch("split: offset outside the text or not on a char boundary"));
+        }
+        self.refuse_fixed(at.para)?;
+        let new_id = self.doc.fresh_id();
+        if at.offset == 0 && len > 0 {
+            let index = self.index(at.para)?;
+            self.push(Op::InsertPara { index, para: Paragraph { id: new_id, kind, spans: vec![] } })?;
+        } else {
+            let new_kind = if at.offset == len { rules::next_kind(&kind) } else { kind };
+            self.push(Op::Split { para: at.para, at: at.offset, new_para: new_id, new_kind })?;
+        }
+        Ok(new_id)
+    }
+
+    /// Join `second` onto `first`, which it must directly follow. An empty
+    /// paragraph is removed instead, so the paragraph with text keeps its id
+    /// and kind. Returns the join point. Refused if a fixed paragraph would be
+    /// removed or merged; removing an empty plain neighbour of a fixed one is
+    /// allowed.
+    pub fn join(&mut self, first: ParaId, second: ParaId) -> Result<Pos, DocError> {
+        let (p1, p2) = (self.para(first)?.clone(), self.para(second)?.clone());
+        let i1 = self.index(first)?;
+        if self.index(second)? != i1 + 1 {
+            return Err(DocError::Mismatch("join: paragraphs not adjacent"));
+        }
+        if p1.spans.is_empty() && !p2.spans.is_empty() {
+            self.refuse_fixed(first)?;
+            self.push(Op::RemovePara { index: i1, para: p1 })?;
+            return Ok(Pos::new(second, 0));
+        }
+        let at = spans::len(&p1.spans);
+        self.refuse_fixed(second)?;
+        if p2.spans.is_empty() {
+            self.push(Op::RemovePara { index: i1 + 1, para: p2 })?;
+        } else {
+            self.refuse_fixed(first)?;
+            self.push(Op::Merge { para: first, at, next: second, next_kind: p2.kind })?;
+        }
+        Ok(Pos::new(first, at))
+    }
+
+    /// Set metadata `key` to `to` (`None` removes it). Records nothing if it
+    /// already has that value.
+    pub fn set_meta(&mut self, key: &str, to: Option<&str>) -> Result<(), DocError> {
+        if self.doc.meta(key) == to {
+            return Ok(());
+        }
+        let from = self.doc.meta.get(key).cloned();
+        self.push(Op::SetMeta { key: key.to_string(), from, to: to.map(str::to_string) })
+    }
+
+    // ---- internals ---------------------------------------------------------
+
     fn push(&mut self, op: Op) -> Result<(), DocError> {
         self.doc.apply_op(&op)?;
         self.ops.push(op);
+        Ok(())
+    }
+
+    fn push_insert(&mut self, index: usize, id: ParaId, p: NewPara) -> Result<(), DocError> {
+        let mut spans = p.spans;
+        spans::normalize(&mut spans);
+        self.push(Op::InsertPara { index, para: Paragraph { id, kind: p.kind, spans } })
+    }
+
+    fn refuse_fixed(&self, id: ParaId) -> Result<(), DocError> {
+        if self.doc.script.is_fixed(id) { Err(DocError::Fixed(id)) } else { Ok(()) }
+    }
+
+    /// A paragraph may go at `index` unless that puts it inside a fixed group
+    /// (between two of its paragraphs); between two different groups is fine.
+    fn check_insert(&self, index: usize) -> Result<(), DocError> {
+        let script = &self.doc.script;
+        let paras = &script.paragraphs;
+        if index > paras.len() {
+            return Err(DocError::Mismatch("insert paragraph: index past the end"));
+        }
+        if index > 0 && index < paras.len() {
+            let (above, below) = (paras[index - 1].id, paras[index].id);
+            if let (Some(a), Some(b)) = (script.fixed_group(above), script.fixed_group(below))
+                && a == b
+            {
+                return Err(DocError::Fixed(below));
+            }
+        }
         Ok(())
     }
 
@@ -754,7 +1005,9 @@ impl Tx<'_> {
         self.doc.index_of(id).ok_or(DocError::MissingParagraph(id))
     }
 
-    fn delete_selection(&mut self, sel: Selection) -> Result<Pos, DocError> {
+    /// Delete the selection. Across paragraphs this records no empty splices
+    /// (older builds did; `next_undo_paras` now counts one paragraph there).
+    pub(crate) fn delete_selection(&mut self, sel: Selection) -> Result<Pos, DocError> {
         let (a, b) = self.doc.ordered(sel);
         self.delete_range(a, b)
     }
@@ -765,40 +1018,26 @@ impl Tx<'_> {
             return Ok(a);
         }
         if a.para == b.para {
-            let removed = spans::slice(&self.para(a.para)?.spans, a.offset..b.offset);
-            self.push(Op::Splice { para: a.para, at: a.offset, removed, inserted: vec![] })?;
+            self.splice(a.para, a.offset..b.offset, vec![])?;
             return Ok(a);
         }
-        let first = self.para(a.para)?;
-        let removed = spans::slice(&first.spans, a.offset..spans::len(&first.spans));
-        self.push(Op::Splice { para: a.para, at: a.offset, removed, inserted: vec![] })?;
-        let removed = spans::slice(&self.para(b.para)?.spans, 0..b.offset);
-        self.push(Op::Splice { para: b.para, at: 0, removed, inserted: vec![] })?;
-        let ia = self.index(a.para)?;
-        while self.doc.script.paragraphs.get(ia + 1).is_some_and(|p| p.id != b.para) {
-            let para = self.doc.script.paragraphs[ia + 1].clone();
-            self.push(Op::RemovePara { index: ia + 1, para })?;
-        }
+        self.delete_between(a, b)?;
         self.join(a.para, b.para)
     }
 
-    /// Join `second` onto `first` (adjacent). An empty paragraph is removed
-    /// instead, so the paragraph with text keeps its id and kind. Returns
-    /// where the cursor goes: the join point.
-    fn join(&mut self, first: ParaId, second: ParaId) -> Result<Pos, DocError> {
-        let (p1, p2) = (self.para(first)?.clone(), self.para(second)?.clone());
-        let i1 = self.index(first)?;
-        if p1.spans.is_empty() && !p2.spans.is_empty() {
-            self.push(Op::RemovePara { index: i1, para: p1 })?;
-            return Ok(Pos::new(second, 0));
+    /// Delete from `a` to `b` (document order, different paragraphs) without
+    /// joining: `a`'s paragraph keeps its text before `a`, `b`'s its text
+    /// after `b`, and the paragraphs between are removed. Both keep their ids
+    /// and kinds.
+    pub(crate) fn delete_between(&mut self, a: Pos, b: Pos) -> Result<(), DocError> {
+        let len_a = spans::len(&self.para(a.para)?.spans);
+        self.splice(a.para, a.offset..len_a, vec![])?;
+        self.splice(b.para, 0..b.offset, vec![])?;
+        let ia = self.index(a.para)?;
+        while let Some(id) = self.doc.script.paragraphs.get(ia + 1).map(|p| p.id).filter(|id| *id != b.para) {
+            self.remove_para(id)?;
         }
-        let at = spans::len(&p1.spans);
-        if p2.spans.is_empty() {
-            self.push(Op::RemovePara { index: i1 + 1, para: p2 })?;
-        } else {
-            self.push(Op::Merge { para: first, at, next: second, next_kind: p2.kind })?;
-        }
-        Ok(Pos::new(first, at))
+        Ok(())
     }
 
     fn insert_plain(&mut self, pos: Pos, text: &str) -> Result<Pos, DocError> {
@@ -806,24 +1045,15 @@ impl Tx<'_> {
             return Ok(pos);
         }
         let style = spans::style_at(&self.para(pos.para)?.spans, pos.offset);
-        let inserted = vec![Span { text: text.to_string(), style }];
-        self.push(Op::Splice { para: pos.para, at: pos.offset, removed: vec![], inserted })?;
+        self.splice(pos.para, pos.offset..pos.offset, vec![Span { text: text.to_string(), style }])?;
         Ok(Pos::new(pos.para, pos.offset + text.len()))
     }
 
-    /// Enter at `pos`; see the identity rules in the module docs.
+    /// Enter at `pos` ([`Edit::split`]); returns where the cursor goes.
     fn enter_at(&mut self, pos: Pos) -> Result<Pos, DocError> {
-        let p = self.para(pos.para)?;
-        let (len, kind) = (spans::len(&p.spans), p.kind.clone());
-        let new_id = self.doc.fresh_id();
-        if pos.offset == 0 && len > 0 {
-            let index = self.index(pos.para)?;
-            self.push(Op::InsertPara { index, para: Paragraph { id: new_id, kind, spans: vec![] } })?;
-            return Ok(pos);
-        }
-        let new_kind = if pos.offset >= len { rules::next_kind(&kind) } else { kind };
-        self.push(Op::Split { para: pos.para, at: pos.offset, new_para: new_id, new_kind })?;
-        Ok(Pos::new(new_id, 0))
+        let above = pos.offset == 0 && self.doc.para_len(pos.para) > 0;
+        let new_id = self.split(pos)?;
+        Ok(if above { pos } else { Pos::new(new_id, 0) })
     }
 }
 

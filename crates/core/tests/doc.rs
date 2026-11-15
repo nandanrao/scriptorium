@@ -8,6 +8,7 @@ fn script(paras: &[(&str, &str)]) -> Script {
             .enumerate()
             .map(|(i, (k, t))| Paragraph::plain(ParaId(i as u64), ElementKind::from_name(k), *t))
             .collect(),
+        ..Script::default()
     }
 }
 
@@ -54,7 +55,7 @@ fn typing_takes_the_style_before_the_cursor() {
         kind: ElementKind::Action,
         spans: vec![Span { text: "a ".into(), style: Style::default() }, Span { text: "truco".into(), style: italic }],
     };
-    let mut doc = Document::new(Script { paragraphs: vec![p] });
+    let mut doc = Document::new(Script { paragraphs: vec![p], ..Script::default() });
     doc.insert_text(at(0, 7), "s").unwrap();
     assert_eq!(doc.paragraphs()[0].spans[1], Span { text: "trucos".into(), style: italic });
 }
@@ -297,6 +298,7 @@ fn replace_text_keeps_styles_outside_the_change() {
                 Span { text: " (cards game).".into(), style: Style::default() },
             ],
         }],
+        ..Script::default()
     };
     let mut doc = Document::new(s);
     let sel = Selection::cursor(doc.start());

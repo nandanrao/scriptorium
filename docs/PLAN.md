@@ -83,13 +83,16 @@ installed — GPUI fell back to another renderer and still drew fine):
 - Hand-tested by the user: "overall good". Typing, scrolling, selection and
   undo felt right.
 - Known gaps, for when editing becomes a feature:
-  - **Copy/paste loses element types and styles**: it goes through the
-    clipboard as plain text and takes the type of the paragraph it lands in.
-    Fix: put the paragraphs (kind + spans) on the clipboard as JSON metadata
-    alongside the plain text (`ClipboardItem::new_string_with_json_metadata`),
-    and add a core `paste_fragment` command that keeps the types when pasting
-    whole paragraphs. Plain text stays for pasting into other apps.
-  - Saving handles text edits only (no added/removed/retyped paragraphs).
+  - Scene summaries: fixed in v0.3.0; v0.2.0 could corrupt Scene Headings
+    that have a scene summary (`<SceneProperties><Summary>`) when edited.
+  - The legacy .fdx reader (reader 1, kept to check old sessions' line ids)
+    is removed in v0.5.0.
+  - Until A6/A7 land: structural edits in the app while the CLI or Claude adds
+    lines at the same moment can clash (a new paragraph number may be taken by
+    both; the app keeps its work in a set-aside file). A suggestion whose line
+    was removed isn't yet shown as "line removed", and split/joined lines get no
+    "line changed" notice. Dual dialogue lines can't be split, joined or removed
+    yet.
   - Not yet tried: a real IME (fcitx5/ibus), macOS, Windows, spellcheck.
 
 ## Roadmap: AI features (draft, 2026-11-14)

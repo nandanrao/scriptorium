@@ -35,13 +35,29 @@ fn source(text: &str) -> ReviewSource {
 
 fn resume(text: &str, saved: Option<&str>) -> sessionfile::ResumedSession {
     let f = fdx();
-    sessionfile::resume(vec![source(text)], f.to_script(), f.raw(), saved, &|k| f.is_caps(k.name()), "sample.fdx")
+    sessionfile::resume(
+        vec![source(text)],
+        f.to_script(),
+        Some(&f.legacy_script()),
+        f.raw(),
+        saved,
+        &|k| f.is_caps(k.name()),
+        "sample.fdx",
+    )
 }
 
 /// A session with no reviews attached.
 fn empty() -> sessionfile::ResumedSession {
     let f = fdx();
-    sessionfile::resume(vec![], f.to_script(), f.raw(), None, &|k| f.is_caps(k.name()), "sample.fdx")
+    sessionfile::resume(
+        vec![],
+        f.to_script(),
+        Some(&f.legacy_script()),
+        f.raw(),
+        None,
+        &|k| f.is_caps(k.name()),
+        "sample.fdx",
+    )
 }
 
 fn saved(o: &sessionfile::ResumedSession) -> String {
@@ -525,7 +541,7 @@ fn para_on_a_non_editable_paragraph_is_not_editable() {
 "#;
     let f = FdxFile::parse(xml.to_string()).unwrap();
     let caps = |k: &scriptorium_core::ElementKind| f.is_caps(k.name());
-    let mut o = sessionfile::resume(vec![source("Id: n\n")], f.to_script(), f.raw(), None, &caps, "x.fdx");
+    let mut o = sessionfile::resume(vec![source("Id: n\n")], f.to_script(), None, f.raw(), None, &caps, "x.fdx");
     let doc = o.doc.clone();
     assert!(!doc.paragraphs()[1].kind.is_editable());
     for para_only in [true, false] {

@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use scriptorium_core::doc::{DocError, Event};
-use scriptorium_core::{Document, ElementKind, Script};
+use scriptorium_core::doc::{DocError, Event, Op};
+use scriptorium_core::{Document, ElementKind, ParaId, Paragraph, Script};
 use serde::{Deserialize, Serialize};
 
 use crate::{Review, Session};
@@ -27,11 +27,24 @@ pub use sync::{
 /// Version 1 files are still read.
 pub const VERSION: u32 = 2;
 
+/// Version of the script reader whose paragraph ids the saved events use
+/// (`scriptorium_fdx::READER_VERSION`; a test keeps them equal). Session files
+/// without it were made by reader 1.
+pub const READER: u32 = 2;
+
+fn reader_1() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionFile {
     pub version: u32,
     /// [`hash`] of the script file the events apply to.
     pub script_hash: String,
+    /// The script reader version that assigned the paragraph ids ([`READER`]
+    /// when written now; 1 in files saved before this was recorded).
+    #[serde(default = "reader_1")]
+    pub reader: u32,
     /// The review files attached to the script, so opening the script brings
     /// them back. Empty in version 1 files.
     #[serde(default)]
@@ -71,6 +84,7 @@ impl SessionFile {
         Self {
             version: VERSION,
             script_hash: hash(script_contents),
+            reader: READER,
             reviews,
             base: Some(base.to_vec()),
             events: events.to_vec(),
@@ -177,9 +191,18 @@ pub struct ReviewSource {
 /// so when the file's `STATUS` lines disagree with it, and the file has
 /// changed since the session last attached or wrote it ([`Attached::text_hash`];
 /// always checked for sessions saved before that was recorded).
+///
+/// `reader_1` is the same script file as reader version 1 read it
+/// (`FdxFile::legacy_script`; the CLI and the app always pass it), or `None`
+/// only if reader 1 is known to have numbered the file as `script`. A
+/// session saved by reader 1 is used only if every paragraph id means the
+/// same line under both readers ([`same_ids`], given the ids its saved
+/// events touch); otherwise its ids mean other lines now and it's discarded
+/// with a note (the caller sets the old file aside).
 pub fn resume(
     sources: Vec<ReviewSource>,
     script: Script,
+    reader_1: Option<&Script>,
     script_contents: &str,
     saved: Option<&str>,
     is_caps: &dyn Fn(&ElementKind) -> bool,
@@ -212,6 +235,22 @@ pub fn resume(
     };
     if !file.is_for(script_contents) {
         return fresh(Resumed::Discarded("the script has changed since the session was saved".into()));
+    }
+    if file.reader > READER {
+        return fresh(Resumed::Discarded(format!(
+            "the session was saved by a newer Scriptorium (script reader {})",
+            file.reader
+        )));
+    }
+    if file.reader < READER {
+        let touched = touched_ids(file.base.iter().flatten().chain(&file.events));
+        if !reader_1.is_none_or(|old| same_ids(old, &script, &touched)) {
+            return fresh(Resumed::Discarded(
+                "it was saved by an older Scriptorium that numbered this script's lines differently (around \
+                 dual dialogue or scene summaries), so its line numbers no longer fit"
+                    .into(),
+            ));
+        }
     }
     let doesnt_apply = |e: DocError| Resumed::Discarded(format!("the saved session doesn't apply: {e}"));
     let how = Resumed::Resumed { events: file.events.len() };
@@ -264,6 +303,49 @@ pub fn resume(
     ResumedSession { session, doc, base, how, notes }
 }
 
+/// Whether every paragraph id means the same line in both scripts: same
+/// count, same ids, same text. Kinds may differ (the old reader mistyped the
+/// first line of a dual dialogue block). Two Scene Headings at the same id
+/// count as the same line whatever their text (reader 1 read a heading's
+/// scene summary as (part of) its text, which doesn't move any id), unless
+/// the id is in `touched` (see [`touched_ids`]): saved edits to that heading
+/// were made on reader 1's text, so they'd land on the wrong bytes.
+pub fn same_ids(a: &Script, b: &Script, touched: &HashSet<ParaId>) -> bool {
+    let heading = |p: &Paragraph| p.kind == ElementKind::SceneHeading && !touched.contains(&p.id);
+    a.paragraphs.len() == b.paragraphs.len()
+        && a.paragraphs
+            .iter()
+            .zip(&b.paragraphs)
+            .all(|(x, y)| x.id == y.id && (x.text() == y.text() || heading(x) && heading(y)))
+}
+
+/// The paragraphs that the ops in `events` name (edited, split, joined,
+/// retyped, inserted or removed). Undo and redo replay those same ops, and
+/// metadata names no paragraph, so neither adds any. Decision meta values
+/// carry `@<para>` but are ignored on purpose: a decision doesn't depend on
+/// the paragraph's text, so it doesn't make that paragraph's text matter.
+pub fn touched_ids<'a>(events: impl IntoIterator<Item = &'a Event>) -> HashSet<ParaId> {
+    let mut ids = HashSet::new();
+    for event in events {
+        let Event::Edit(t) = event else { continue };
+        for op in &t.ops {
+            match op {
+                Op::Splice { para, .. } | Op::SetKind { para, .. } => {
+                    ids.insert(*para);
+                }
+                Op::Split { para, new_para: other, .. } | Op::Merge { para, next: other, .. } => {
+                    ids.extend([*para, *other]);
+                }
+                Op::InsertPara { para, .. } | Op::RemovePara { para, .. } => {
+                    ids.insert(para.id);
+                }
+                Op::SetMeta { .. } => {}
+            }
+        }
+    }
+    ids
+}
+
 /// FNV-1a, 64-bit, as 16 hex digits. Stable across platforms and Rust versions
 /// (unlike `std`'s hasher); not cryptographic.
 pub fn hash(s: &str) -> String {
@@ -300,6 +382,7 @@ mod tests {
         let back = SessionFile::from_json(&f.to_json()).unwrap();
         assert_eq!(back, f);
         assert_eq!(back.version, 2);
+        assert_eq!(back.reader, READER);
         assert!(back.is_for("<FinalDraft/>"));
         assert!(!back.is_for("<FinalDraft />"));
     }
@@ -311,6 +394,7 @@ mod tests {
         assert!(f.reviews.is_empty());
         assert_eq!(f.base, None);
         assert_eq!(f.events, vec![Event::Undo]);
+        assert_eq!(f.reader, 1);
         assert!(SessionFile::from_json(&v1.replace(r#""version":1"#, r#""version":3"#)).is_err());
     }
 

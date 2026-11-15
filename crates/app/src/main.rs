@@ -9,6 +9,7 @@ mod layout;
 mod log;
 mod menus;
 mod script_view;
+mod settings;
 mod theme;
 mod workspace;
 
@@ -54,6 +55,7 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("pageup", PageUp, ctx),
         KeyBinding::new("pagedown", PageDown, ctx),
         KeyBinding::new("enter", Enter, ctx),
+        KeyBinding::new(sec!("enter"), CommitLine, ctx),
         KeyBinding::new("tab", Tab, ctx),
         KeyBinding::new("shift-tab", ShiftTab, ctx),
         KeyBinding::new(sec!("a"), SelectAll, ctx),

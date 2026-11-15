@@ -349,7 +349,7 @@ mod tests {
             .enumerate()
             .map(|(i, l)| Paragraph::plain(ParaId(i as u64), ElementKind::Action, *l))
             .collect();
-        Document::new(Script { paragraphs })
+        Document::new(Script { paragraphs, ..Script::default() })
     }
 
     /// A decision as the review session makes one: the line's text and a key, one step.

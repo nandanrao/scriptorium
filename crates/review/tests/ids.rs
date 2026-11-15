@@ -22,7 +22,15 @@ fn source(r: &Review) -> sessionfile::ReviewSource {
 }
 
 fn resume(sources: Vec<sessionfile::ReviewSource>, fdx: &FdxFile, saved: Option<&str>) -> sessionfile::ResumedSession {
-    sessionfile::resume(sources, fdx.to_script(), fdx.raw(), saved, &|k| fdx.is_caps(k.name()), "sample.fdx")
+    sessionfile::resume(
+        sources,
+        fdx.to_script(),
+        Some(&fdx.legacy_script()),
+        fdx.raw(),
+        saved,
+        &|k| fdx.is_caps(k.name()),
+        "sample.fdx",
+    )
 }
 
 fn statuses(o: &sessionfile::ResumedSession, r: usize) -> Vec<Status> {

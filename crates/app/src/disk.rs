@@ -278,7 +278,7 @@ mod tests {
             .enumerate()
             .map(|(i, l)| Paragraph::plain(ParaId(i as u64), ElementKind::Action, *l))
             .collect();
-        Script { paragraphs }
+        Script { paragraphs, ..Script::default() }
     }
 
     fn session(text: &str, doc: &Document) -> Session {

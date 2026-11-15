@@ -29,7 +29,7 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use scriptorium_core::ParaId;
+use scriptorium_core::{ElementKind, ParaId};
 
 pub const FORMAT_HEADER: &str = "SCRIPT REVIEW v1";
 
@@ -437,5 +437,122 @@ AFTER: They are playing truco (Argentinian card game).
         assert_eq!(r.entries[0].options, ["b"]);
         assert_eq!(r.entries[0].chosen, None);
         assert_eq!(r.warnings.len(), 1);
+    }
+}
+
+/// How strictly [`parse_typed_lines`] reads the TYPE before the colon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Case {
+    /// Capitals only (`SCENE HEADING`): the review-file grammar.
+    Upper,
+    /// Any case, spaces or dashes (`scene-heading`, `SceneHeading`): the command line.
+    Any,
+}
+
+/// Parse a standalone block of typed lines (B1's block grammar, outside a
+/// review file): one `TYPE: text` per paragraph, `TYPE` one of SCENE HEADING,
+/// ACTION, CHARACTER, PARENTHETICAL, DIALOGUE, TRANSITION, SHOT, GENERAL
+/// (capitals only for `Case::Upper`; any case, spaces or dashes for
+/// `Case::Any`). Blank lines are skipped; a line indented deeper than the first
+/// typed line continues the previous paragraph (joined with a space); an
+/// untyped line at the typed indent is refused. `[cut]` alone is the empty
+/// list. A block with no paragraphs is refused.
+pub fn parse_typed_lines(block: &str, case: Case) -> Result<Vec<(ElementKind, String)>, String> {
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let mut lines = block.lines().filter(|l| !l.trim().is_empty()).peekable();
+    if lines.peek().is_some_and(|l| l.trim() == "[cut]") {
+        lines.next();
+        return match lines.next() {
+            None => Ok(vec![]),
+            Some(extra) => Err(format!("[cut] stands alone, but the block goes on with {:?}", extra.trim())),
+        };
+    }
+    let mut out: Vec<(ElementKind, String)> = vec![];
+    let mut base = None;
+    for line in lines {
+        let indent = indent_of(line);
+        let base = *base.get_or_insert(indent);
+        if indent > base
+            && let Some((_, text)) = out.last_mut()
+        {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(line.trim());
+            continue;
+        }
+        let typed = line.trim_start().split_once(':').and_then(|(t, text)| {
+            let kind = ElementKind::parse_editable(t)?;
+            (case == Case::Any || t == kind.name().to_uppercase()).then(|| (kind, text.trim().to_string()))
+        });
+        match typed {
+            Some(p) => out.push(p),
+            None => {
+                let t = line.trim_start().split_once(':').map(|(t, _)| t.trim());
+                let capitals = if case == Case::Upper { " in capitals" } else { "" };
+                return Err(match t {
+                    Some(t) if !t.is_empty() && ElementKind::parse_editable(t).is_none() => {
+                        format!("unknown element type {t:?} in block line {:?}", line.trim())
+                    }
+                    _ => format!(
+                        "block line {:?} should be `TYPE: text` with TYPE{capitals} (SCENE HEADING, ACTION, \
+                         CHARACTER, PARENTHETICAL, DIALOGUE, TRANSITION, SHOT, GENERAL)",
+                        line.trim()
+                    ),
+                });
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("the block has no paragraphs".into());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod typed_lines_tests {
+    use super::*;
+
+    #[test]
+    fn typed_lines() {
+        let got = parse_typed_lines("CHARACTER: MARIA\n\n  \nDIALOGUE: Hi: there.\n", Case::Upper).unwrap();
+        assert_eq!(got, [(ElementKind::Character, "MARIA".into()), (ElementKind::Dialogue, "Hi: there.".into())]);
+        let got = parse_typed_lines("  ACTION: one\n    more\n  SCENE HEADING: INT. X", Case::Upper).unwrap();
+        assert_eq!(got[0].1, "one more");
+        assert_eq!(got[1].0, ElementKind::SceneHeading);
+    }
+
+    #[test]
+    fn refusals_and_cut() {
+        assert!(parse_typed_lines("Dialogue: lowercase", Case::Upper).is_err());
+        assert!(parse_typed_lines("DIALOGUE: ok\nuntyped", Case::Upper).is_err());
+        assert!(parse_typed_lines("BANANA: x", Case::Upper).is_err());
+        assert!(parse_typed_lines("  \n", Case::Upper).is_err());
+        assert_eq!(parse_typed_lines("[cut]", Case::Upper).unwrap(), vec![]);
+        assert!(parse_typed_lines("[cut]\nACTION: x", Case::Upper).is_err());
+    }
+
+    #[test]
+    fn any_case_accepts_spellings_and_names_unknown_types() {
+        let got = parse_typed_lines(
+            "  action: a\ndialogue: b\nscene-heading: c\nSCENEHEADING: d\nScene Heading: e",
+            Case::Any,
+        )
+        .unwrap();
+        let kinds: Vec<_> = got.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(
+            kinds,
+            [
+                ElementKind::Action,
+                ElementKind::Dialogue,
+                ElementKind::SceneHeading,
+                ElementKind::SceneHeading,
+                ElementKind::SceneHeading
+            ]
+        );
+        assert_eq!(got[1].1, "b");
+        let err = parse_typed_lines("BANANA: x", Case::Any).unwrap_err();
+        assert!(err.contains("unknown element type \"BANANA\""), "{err}");
+        assert!(parse_typed_lines("action: x", Case::Upper).is_err());
     }
 }
