@@ -1,6 +1,6 @@
 [package]
 name = "scriptorium-chat"
-description = "Chat threads for the built-in agent: the panel's pure core (labels, naming, thread list model), plus thread files beside the script, per-thread locks and the clock, behind the shell feature."
+description = "Chat threads for the built-in agent: the panel's pure core (labels, naming, thread list model), plus thread files beside the script, per-thread locks, the clock, the one apply path into a thread's review and the CLI's run loop, behind the shell feature."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,13 +8,29 @@ rust-version.workspace = true
 
 [features]
 default = ["shell"]
-shell = ["dep:scriptorium-fsio"]
+shell = [
+    "dep:scriptorium-fsio",
+    "dep:scriptorium-providers",
+    "dep:scriptorium-tools",
+    "dep:scriptorium-review",
+    "dep:scriptorium-core",
+]
 
 [dependencies]
 scriptorium-agent.workspace = true
-scriptorium-fsio = { workspace = true, optional = true }
 serde_json.workspace = true
 unicode-segmentation.workspace = true
+# The shell: the apply path, the file store and the run loop.
+scriptorium-core = { workspace = true, optional = true }
+scriptorium-fsio = { workspace = true, optional = true, features = ["opened"] }
+# Without the keyring: the CLI and the app turn it on by depending on providers themselves.
+scriptorium-providers = { workspace = true, optional = true, default-features = false, features = ["shell"] }
+scriptorium-review = { workspace = true, optional = true }
+scriptorium-tools = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+scriptorium-fdx.workspace = true
+scriptorium-fsio.workspace = true
