@@ -16,7 +16,7 @@
 //!   OS keyring. Keys are read from stdin, never from the command line, and
 //!   never printed.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::Path;
@@ -342,7 +342,6 @@ fn run_chat(args: &[&str]) -> ChatEnd {
         Err(e) => return setup("transport", e.to_string()),
     };
     let store = ThreadStore::for_script(script_path);
-    let before = thread_ids(&store);
 
     let mut req = Request::new(script_path, which.clone(), message.as_deref());
     req.account = a.get("--account");
@@ -359,6 +358,7 @@ fn run_chat(args: &[&str]) -> ChatEnd {
         prompting,
         mid_line: false,
         not_asked: false,
+        created: None,
         added: vec![],
     };
     let env = Env { accounts: &accounts, keys: &keys, seen: &mut seen, clocks: &mut clocks };
@@ -372,10 +372,7 @@ fn run_chat(args: &[&str]) -> ChatEnd {
             // The thread, if this run got as far as making one.
             let id = match &which {
                 Which::Thread(id) => Some(id.clone()),
-                Which::New => {
-                    let new: Vec<String> = thread_ids(&store).difference(&before).cloned().collect();
-                    (new.len() == 1).then(|| new[0].clone())
-                }
+                Which::New => ui.created.clone(),
             };
             let saved = id.as_deref().filter(|id| store.read(id).is_ok());
             let rerun = command_line(&original);
@@ -516,10 +513,6 @@ fn can_resend(file: &ThreadFile) -> bool {
         .is_some_and(|m| m.role != Role::Assistant || !m.tool_calls().is_empty())
 }
 
-fn thread_ids(store: &ThreadStore) -> BTreeSet<String> {
-    store.list().map(|l| l.into_iter().map(|t| t.id).collect()).unwrap_or_default()
-}
-
 fn agent_kind(e: &AgentError) -> &'static str {
     match e {
         AgentError::Api { kind, .. } => match kind {
@@ -615,6 +608,8 @@ struct TermUi {
     mid_line: bool,
     /// The disclosure was refused because there was nobody to ask.
     not_asked: bool,
+    /// The new thread this run created ([`Ui::thread_created`]).
+    created: Option<String>,
     added: Vec<Added>,
 }
 
@@ -674,6 +669,10 @@ impl Ui for TermUi {
     fn notice(&mut self, text: &str) {
         self.line_break();
         eprintln!("note: {text}");
+    }
+
+    fn thread_created(&mut self, id: &str) {
+        self.created = Some(id.to_string());
     }
 
     fn disclose(&mut self, text: &str) -> bool {

@@ -147,6 +147,7 @@ struct TestUi {
     notices: Vec<String>,
     asked: Vec<String>,
     finished: Vec<CallDone>,
+    created: Vec<String>,
     cancel_on_text: Option<CancelToken>,
     cancel_on_tool: Option<CancelToken>,
     /// While the disclosure is shown, whether thread `.1` of script `.0` was
@@ -180,6 +181,9 @@ impl Ui for TestUi {
     }
     fn notice(&mut self, text: &str) {
         self.notices.push(text.to_string());
+    }
+    fn thread_created(&mut self, id: &str) {
+        self.created.push(id.to_string());
     }
     fn disclose(&mut self, _text: &str) -> bool {
         self.disclosed += 1;
@@ -272,6 +276,7 @@ fn a_tool_round_creates_the_threads_review() {
     assert_eq!(done.thread.review_id.as_deref(), Some("thread-t0001"));
     assert_eq!(done.thread.review_path.as_deref(), Some("Tighten the smile.review.txt"));
     assert_eq!(ui.disclosed, 1);
+    assert_eq!(ui.created, ["t0001"]);
     assert_eq!(ui.texts.concat(), "One suggestion is waiting in your review.");
     let added = ui.finished[0].added.clone().unwrap();
     assert_eq!(added.review_id, "thread-t0001");
