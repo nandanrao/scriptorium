@@ -726,7 +726,7 @@ fn threads(args: &[&str], notes: &mut Vec<String>) -> Result<String, Failed> {
         [script] => list_threads(script, json, notes),
         [script, "show", id] => show_thread(script, id, json, notes),
         [script, "remove", id] => remove_thread(script, id, json),
-        [script, "set-model", id, account, model] => set_model(script, id, account, model, json),
+        [script, "set-model", id, account, model] => set_model(script, id, account, model, json, notes),
         _ => Err(usage(format!("wrong arguments for `threads`\n\n{}", crate::USAGE))),
     }
 }
@@ -943,9 +943,17 @@ fn remove_thread(script: &str, id: &str, json: bool) -> Result<String, Failed> {
     })
 }
 
-fn set_model(script: &str, id: &str, account: &str, model: &str, json: bool) -> Result<String, Failed> {
+fn set_model(
+    script: &str,
+    id: &str,
+    account: &str,
+    model: &str,
+    json: bool,
+    notes: &mut Vec<String>,
+) -> Result<String, Failed> {
     let (_, accounts) = load_accounts()?;
     let resolved = accounts.resolve(account, Some(model)).map_err(|e| e.to_string())?;
+    notes.extend(resolved.warnings());
     let now = clock::from_env()?.clock.now();
     let store = ThreadStore::for_script(Path::new(script));
     let (lock, mut file) = store.lock_and_read(id, CLI_WAIT).map_err(store_failed)?;

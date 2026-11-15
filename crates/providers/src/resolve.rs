@@ -9,8 +9,8 @@ use scriptorium_agent::protocol::{self, Call, Request, Thinking, ToolSpec};
 use scriptorium_agent::{Effort, Origin, Protocol, Thread};
 
 use crate::ProvidersError;
-use crate::account::{Account, header_problem};
-use crate::models::{ChatTools, capabilities};
+use crate::account::{Account, Provider, header_problem};
+use crate::models::{ChatTools, Retired, capabilities, openai_retired};
 
 /// The output limit for a known model when the account sets none. Streaming,
 /// so a large limit doesn't risk a timeout; long review passes need room.
@@ -29,10 +29,18 @@ pub struct Resolved {
     pub needs_key: bool,
     pub max_tokens: Option<u64>,
     pub effort: Option<Effort>,
-    /// Send `reasoning_effort: "none"` in place of [`Resolved::effort`]: an
-    /// OpenAI model that calls tools on Chat Completions only without
-    /// reasoning ([`ChatTools::WithoutReasoning`]).
+    /// Send `reasoning_effort: "none"` in place of [`Resolved::effort`]: a
+    /// model on OpenAI's own API that calls tools on Chat Completions only
+    /// without reasoning ([`ChatTools::WithoutReasoning`]).
     pub reasoning_off: bool,
+    /// The account's effort, set aside by [`Resolved::reasoning_off`].
+    pub ignored_effort: Option<Effort>,
+    /// On OpenAI's own API: whether the model calls tools there, if known.
+    /// `None` elsewhere (custom endpoints and OpenRouter route models
+    /// their own way).
+    pub chat_tools: Option<ChatTools>,
+    /// On OpenAI's own API: the model is shutting down.
+    pub retired: Option<Retired>,
     pub thinking: Thinking,
     /// Extra headers: the provider's, then the account's valid,
     /// non-reserved ones.
@@ -49,9 +57,10 @@ pub struct Resolved {
 /// it. For any other model, effort and the output limit are sent as the
 /// writer set them (no limit set: the protocol's default) and thinking is
 /// left to the model's default: the table only removes what a known model
-/// would refuse. On the OpenAI Chat Completions protocol, a model that takes
-/// tools only without reasoning gets `reasoning_effort: "none"` whatever
-/// effort the account sets.
+/// would refuse. On OpenAI's own API ([`Provider::Openai`]), a model that
+/// takes tools only without reasoning gets `reasoning_effort: "none"`
+/// whatever effort the account sets; see [`Resolved::warnings`] for what's
+/// worth telling the writer.
 pub fn resolve(account: &Account, model: Option<&str>) -> Result<Resolved, ProvidersError> {
     let model = model
         .filter(|m| !m.trim().is_empty())
@@ -72,9 +81,12 @@ pub fn resolve(account: &Account, model: Option<&str>) -> Result<Resolved, Provi
         ),
         None => (account.effort, account.max_tokens, Thinking::Default),
     };
-    let reasoning_off =
-        protocol == Protocol::OpenaiChat && caps.is_some_and(|c| c.chat_tools == ChatTools::WithoutReasoning);
+    let openai = account.provider == Provider::Openai;
+    let chat_tools = caps.filter(|_| openai).map(|c| c.chat_tools);
+    let reasoning_off = chat_tools == Some(ChatTools::WithoutReasoning);
+    let ignored_effort = account.effort.filter(|_| reasoning_off);
     let effort = if reasoning_off { None } else { effort };
+    let retired = if openai { openai_retired(&model) } else { None };
     Ok(Resolved {
         account: account.id.clone(),
         protocol,
@@ -84,6 +96,9 @@ pub fn resolve(account: &Account, model: Option<&str>) -> Result<Resolved, Provi
         max_tokens,
         effort,
         reasoning_off,
+        ignored_effort,
+        chat_tools,
+        retired,
         thinking,
         headers: headers(account),
     })
@@ -124,6 +139,35 @@ impl Resolved {
             thinking: self.thinking,
             extra_headers: &self.headers,
         }
+    }
+
+    /// Whether the model may not call tools on this connection, so it
+    /// couldn't read or edit the script. The request is still sent.
+    pub fn refuses_tools(&self) -> bool {
+        self.chat_tools == Some(ChatTools::No)
+    }
+
+    /// Things worth telling the writer about this model on this account, in
+    /// plain words: it may not call tools here, it is shutting down, or the
+    /// account's effort is set aside. None of them stops a run.
+    pub fn warnings(&self) -> Vec<String> {
+        let m = &self.model;
+        let mut out = vec![];
+        if self.refuses_tools() {
+            out.push(format!(
+                "{m} may not support tools on this connection (OpenAI keeps them to its Responses API), so it may not be able to read or edit the script"
+            ));
+        }
+        if let Some(r) = self.retired {
+            out.push(format!("OpenAI shuts {m} down on {}; switch to {}", r.shutdown, r.replacement));
+        }
+        if let Some(e) = self.ignored_effort {
+            out.push(format!(
+                "{m} uses tools only without reasoning on this connection, so the account's effort ({}) is ignored",
+                e.name()
+            ));
+        }
+        out
     }
 
     fn key<'a>(&self, api_key: Option<&'a str>) -> Result<&'a str, ProvidersError> {
@@ -263,18 +307,43 @@ mod tests {
         let r = resolve(&a, Some("gpt-5.2")).unwrap();
         assert!(!r.reasoning_off);
         assert_eq!(build_request(&r, Some("k"), "", &[], &thread()).unwrap().body["reasoning_effort"], "medium");
-        // A tool-less model goes out as written; the account warns instead.
+        assert!(r.warnings().is_empty());
+        // A model without tools here goes out as written, with a warning.
         let r = resolve(&a, Some("gpt-6.1-sol")).unwrap();
+        assert!(r.refuses_tools());
         assert_eq!(build_request(&r, Some("k"), "", &[], &thread()).unwrap().body["reasoning_effort"], "medium");
-        // Only on the OpenAI protocol: OpenRouter's ids aren't OpenAI's.
+        // Only on OpenAI's own API: not OpenRouter, nor a custom endpoint
+        // speaking its protocol (which may serve the model its own way).
         let or = Account::new("or", "OpenRouter", Provider::Openrouter);
         assert!(!resolve(&or, Some("openai/gpt-6-sol")).unwrap().reasoning_off);
-        let anthropic = Account::new(
+        let mut custom = Account::new(
             "c",
             "Proxy",
-            Provider::Custom { protocol: Protocol::Anthropic, base_url: "https://proxy.example/v1".into() },
+            Provider::Custom { protocol: Protocol::OpenaiChat, base_url: "https://proxy.example/v1".into() },
         );
-        assert!(!resolve(&anthropic, Some("gpt-6-sol")).unwrap().reasoning_off);
+        custom.effort = Some(Effort::Low);
+        for model in ["gpt-6-sol", "gpt-6.1-sol", "gpt-5"] {
+            let r = resolve(&custom, Some(model)).unwrap();
+            assert!(!r.reasoning_off && !r.refuses_tools() && r.warnings().is_empty(), "{model}");
+            let req = build_request(&r, Some("k"), "", &[], &thread()).unwrap();
+            assert_eq!(req.body["reasoning_effort"], "low", "{model}: the account's effort");
+        }
+    }
+
+    #[test]
+    fn warnings_for_the_thread_model() {
+        let mut a = Account::new("o", "OpenAI", Provider::Openai);
+        assert!(resolve(&a, None).unwrap().warnings().is_empty(), "the default model");
+        let w = resolve(&a, Some("gpt-6-astra")).unwrap().warnings();
+        assert!(w.len() == 1 && w[0].contains("may not support tools"), "{w:?}");
+        let w = resolve(&a, Some("gpt-5-mini")).unwrap().warnings();
+        assert!(w.len() == 1 && w[0].contains("2026-12-11") && w[0].contains("gpt-5.6-terra"), "{w:?}");
+        a.effort = Some(Effort::High);
+        let r = resolve(&a, Some("gpt-6-luna")).unwrap();
+        assert_eq!(r.ignored_effort, Some(Effort::High));
+        let w = r.warnings();
+        assert!(w.len() == 1 && w[0].contains("effort (high) is ignored"), "{w:?}");
+        assert!(resolve(&a, Some("gpt-5.2")).unwrap().warnings().is_empty(), "effort is used");
     }
 
     #[test]

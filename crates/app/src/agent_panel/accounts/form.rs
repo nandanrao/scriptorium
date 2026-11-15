@@ -212,10 +212,15 @@ pub fn plain_warnings(a: &Account) -> Vec<String> {
     if a.insecure_http() {
         out.push("This address isn't secure (http). Your key and script text would be sent unencrypted.".into());
     }
-    if let Some(model) = a.refuses_tools() {
-        out.push(format!("{model} can't use tools here, so it can't read or edit your script. Pick another model."));
+    if let Ok(r) = scriptorium_providers::resolve(a, None) {
+        out.extend(r.warnings().into_iter().map(|w| format!("{}.", capitalised(&w))));
     }
     out
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// A friendlier name for a suggested model id.

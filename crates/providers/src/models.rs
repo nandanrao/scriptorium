@@ -230,11 +230,21 @@ const fn openai(context_window: u64, chat_tools: ChatTools) -> Capabilities {
     Capabilities { context_window, max_output: 128_000, adaptive_thinking: false, efforts: OPENAI_EFFORTS, chat_tools }
 }
 
-/// OpenAI's current models, checked 2026-11-15 against
-/// <https://developers.openai.com/api/docs/models> and the migration
-/// guide's "Starting with GPT-5.4, Chat Completions does not support tool
-/// calling with `reasoning_effort` values other than `none`"; GPT-6 Astra,
-/// GPT-6.1 Sol and GPT-6.1 Terra take tools only on the Responses API.
+/// OpenAI's current models, checked 2026-11-15. Sources:
+/// - <https://developers.openai.com/api/docs/guides/migrate-to-responses>:
+///   "Starting with GPT-5.4, Chat Completions does not support tool calling
+///   with `reasoning_effort` values other than `none`."
+/// - The per-model pages, `https://developers.openai.com/api/docs/models/<id>`
+///   (context windows, output limits, which efforts each takes): gpt-6-sol
+///   and gpt-6-luna say Chat Completions calls functions only with
+///   `reasoning_effort: "none"`; gpt-6.1-sol and gpt-6.1-terra take no
+///   `none`-free tool calls there ("tool calling requires Responses", also in
+///   <https://developers.openai.com/api/docs/guides/latest-model>).
+/// - GPT-6 Astra: its model page doesn't say; it rejects `none` and the
+///   function-calling and reasoning guides
+///   (<https://developers.openai.com/api/docs/guides/function-calling>)
+///   group it with GPT-6.1 Sol as Responses-only. Treated as [`ChatTools::No`]
+///   and warned about softly.
 const OPENAI: &[(&str, Capabilities)] = {
     use ChatTools::{No, WithoutReasoning as Off, Yes};
     &[
@@ -255,6 +265,26 @@ const OPENAI: &[(&str, Capabilities)] = {
     ]
 };
 
+/// A model its provider is shutting down, and what to move to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retired {
+    /// The shutdown date, `YYYY-MM-DD`.
+    pub shutdown: &'static str,
+    /// A current model that calls tools on the same connection.
+    pub replacement: &'static str,
+}
+
+/// OpenAI's models shutting down, from
+/// <https://developers.openai.com/api/docs/deprecations> (checked
+/// 2026-11-15). OpenAI's own suggested replacements for gpt-5 and gpt-5-mini
+/// (GPT-6.1 Sol and Terra) call tools only on the Responses API, so these
+/// name the nearest ones that call tools over Chat Completions.
+const OPENAI_RETIRED: &[(&str, Retired)] = &[
+    ("gpt-5", Retired { shutdown: "2026-12-11", replacement: "gpt-6-sol" }),
+    ("gpt-5-mini", Retired { shutdown: "2026-12-11", replacement: "gpt-5.6-terra" }),
+    ("gpt-5-nano", Retired { shutdown: "2026-12-11", replacement: "gpt-6-luna" }),
+];
+
 /// The Anthropic table entry for `model`, also found by the name other
 /// endpoints give it: OpenRouter's `anthropic/claude-opus-4.6` or
 /// `anthropic/claude-sonnet-4.6:thinking` (vendor prefix and `:variant`
@@ -269,15 +299,27 @@ fn find(model: &str) -> Option<&'static Model> {
 /// snapshot of it (`gpt-5.2-2025-12-11`). Not OpenRouter's `openai/...`,
 /// which OpenRouter serves its own way.
 fn find_openai(model: &str) -> Option<Capabilities> {
+    let undated = undated(model);
+    OPENAI.iter().find(|(id, _)| *id == model || *id == undated).map(|(_, c)| *c)
+}
+
+/// If OpenAI is shutting `model` down (an id as OpenAI writes it, or a
+/// dated snapshot of it): when, and what to use instead.
+pub fn openai_retired(model: &str) -> Option<Retired> {
+    let undated = undated(model);
+    OPENAI_RETIRED.iter().find(|(id, _)| *id == model || *id == undated).map(|(_, r)| *r)
+}
+
+/// `model` without a `-YYYY-MM-DD` snapshot date.
+fn undated(model: &str) -> &str {
     let is_date = |d: &[u8]| {
         d.len() == 11
             && d.iter().enumerate().all(|(i, b)| if matches!(i, 0 | 5 | 8) { *b == b'-' } else { b.is_ascii_digit() })
     };
-    let undated = match model.len().checked_sub(11) {
+    match model.len().checked_sub(11) {
         Some(i) if is_date(&model.as_bytes()[i..]) => &model[..i],
         _ => model,
-    };
-    OPENAI.iter().find(|(id, _)| *id == model || *id == undated).map(|(_, c)| *c)
+    }
 }
 
 /// What `model` accepts, if it's a model we know.
@@ -317,6 +359,12 @@ mod tests {
         assert_eq!(capabilities("gpt-6.1-sol").unwrap().chat_tools, ChatTools::No);
         assert_eq!(capabilities("openai/gpt-6.1-sol"), None, "OpenRouter's");
         assert_eq!(capabilities("gpt-5.2-x"), None);
+        assert_eq!(openai_retired("gpt-5-2025-08-07").unwrap().replacement, "gpt-6-sol");
+        assert_eq!(openai_retired("gpt-5-mini").unwrap().shutdown, "2026-12-11");
+        assert_eq!(openai_retired("gpt-5.2"), None);
+        for (_, r) in OPENAI_RETIRED {
+            assert_eq!(capabilities(r.replacement).unwrap().chat_tools, ChatTools::WithoutReasoning);
+        }
         assert_eq!(capabilities("claude-haiku-4-5").unwrap().context_window, 200_000);
         assert_eq!(capabilities("gpt-5"), None);
         let opus_price = anthropic_price("claude-opus-5-5").unwrap();

@@ -630,6 +630,23 @@ Order: C1 → (C2 ‖ C3a ‖ C3b ‖ U0) → C3c → (C4 ‖ U1 ‖ U2) → (U3
 → U4 → (U6 ‖ U7) → U9. A live smoke test per provider with the user's keys
 (`--record`) before release, not in CI.
 
+### Needs a live smoke test before release
+
+- **OpenAI, reasoning off with an output limit.** From GPT-5.4 on, the
+  providers crate sends `reasoning_effort: "none"` so Chat Completions
+  accepts tools, and it always sends `max_completion_tokens` for models in
+  its table (64k unless the account sets one). A community report says
+  GPT-5.4 ignores `none` when `max_completion_tokens` is set: it reasons,
+  spends the whole budget and returns an empty reply with
+  `finish_reason: "length"`
+  (<https://community.openai.com/t/gpt-5-4-ignores-reasoning-effort-none-when-max-completion-tokens-is-used/1378362>).
+  Not confirmed by OpenAI. Check with `gpt-6-sol`, `gpt-5.6-terra` and
+  `gpt-6-luna`: a tool call goes through and the reply has no reasoning
+  tokens. If it fails, drop the limit for these models or move OpenAI to the
+  Responses API.
+- **OpenAI, GPT-6 Astra.** Warned as "may not support tools": its model page
+  doesn't say. One tool call settles it.
+
 ## Deferred past v0.4.0
 
 Drag-resizing the panel; live model listing; renaming threads; implicit
