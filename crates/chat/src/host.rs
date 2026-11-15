@@ -426,6 +426,9 @@ fn run_inner(
             break (existing, resolved, key);
         }
     };
+    for w in resolved.warnings() {
+        ui.notice(&w);
+    }
     let created = existing.is_none();
     let (lock, mut file) = match existing {
         Some((lock, mut file)) => {

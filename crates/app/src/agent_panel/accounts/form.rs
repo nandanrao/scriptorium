@@ -166,7 +166,7 @@ impl Form {
     }
 
     /// Something worth telling the writer now, before saving: plain http to
-    /// another machine.
+    /// another machine, or a model that can't call tools.
     pub fn warnings(&self, file: &AccountsFile, base: Option<&Account>) -> Vec<String> {
         plain_warnings(&self.draft(self.id_for(file), base))
     }
@@ -208,11 +208,19 @@ impl Form {
 /// Warnings about an account in plain words (the library's own carry the
 /// account's internal id).
 pub fn plain_warnings(a: &Account) -> Vec<String> {
-    if a.warnings().is_empty() {
-        vec![]
-    } else {
-        vec!["This address isn't secure (http). Your key and script text would be sent unencrypted.".into()]
+    let mut out = vec![];
+    if a.insecure_http() {
+        out.push("This address isn't secure (http). Your key and script text would be sent unencrypted.".into());
     }
+    if let Ok(r) = scriptorium_providers::resolve(a, None) {
+        out.extend(r.warnings().into_iter().map(|w| format!("{}.", capitalised(&w))));
+    }
+    out
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// A friendlier name for a suggested model id.
@@ -222,11 +230,14 @@ pub fn model_label(id: &str) -> String {
         "claude-sonnet-5-5" => "Claude Sonnet 5.5",
         "claude-haiku-5-5" => "Claude Haiku 5.5",
         "claude-fable-5-2" => "Claude Fable 5.2",
-        "gpt-5" => "GPT-5",
-        "gpt-5-mini" => "GPT-5 mini",
+        "gpt-6-sol" => "GPT-6 Sol",
+        "gpt-5.6-terra" => "GPT-5.6 Terra",
+        "gpt-6-luna" => "GPT-6 Luna",
+        "gpt-5.2" => "GPT-5.2",
         "anthropic/claude-opus-5.5" => "Claude Opus 5.5",
         "anthropic/claude-sonnet-5.5" => "Claude Sonnet 5.5",
-        "openai/gpt-5" => "GPT-5",
+        "anthropic/claude-haiku-5.5" => "Claude Haiku 5.5",
+        "anthropic/claude-fable-5.2" => "Claude Fable 5.2",
         _ => return id.to_string(),
     };
     name.to_string()
@@ -392,7 +403,7 @@ mod tests {
     fn empty_model_falls_back_for_a_named_provider() {
         let mut f = Form::new(Kind::Openai);
         f.model = "  ".into();
-        assert_eq!(f.account(&AccountsFile::default(), None).unwrap().model.as_deref(), Some("gpt-5"));
+        assert_eq!(f.account(&AccountsFile::default(), None).unwrap().model.as_deref(), Some("gpt-6-sol"));
         f.model = "gpt-9-custom".into();
         assert_eq!(f.account(&AccountsFile::default(), None).unwrap().model.as_deref(), Some("gpt-9-custom"));
     }
