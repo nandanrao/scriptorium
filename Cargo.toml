@@ -17,10 +17,12 @@ scriptorium-tools = { path = "crates/tools" }
 scriptorium-cli = { path = "crates/cli" }
 scriptorium-providers = { path = "crates/providers" }
 fs4 = "1"
+keyring = { version = "3.6", default-features = false }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-segmentation = "1.10"
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
