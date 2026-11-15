@@ -92,8 +92,9 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "decide_suggestion",
-            "Decide one suggestion, as the person would in the app: accept an option, keep the current line, \
-             rewrite it with your own text, or undo the decision (undecide). Only when the person asked you to decide.",
+            "Decide one suggestion, as the person would in the app: accept an option, keep the current lines, \
+             rewrite them with your own (text for a line suggestion, lines for a block), or undo the decision \
+             (undecide). Only when the person asked you to decide.",
             json!({
                 "script": script,
                 "review": review,
@@ -105,7 +106,19 @@ pub fn list() -> Vec<Value> {
                 },
                 "decision": { "type": "string", "enum": ["accept", "keep", "rewrite", "undecide"] },
                 "option": { "type": "integer", "minimum": 1, "description": "With accept: which option (default 1)." },
-                "text": { "type": "string", "description": "With rewrite: the new text for the line." },
+                "text": { "type": "string", "description": "With rewrite of a line suggestion: the new text for the line (a block takes `lines`)." },
+                "lines": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": { "kind": { "type": "string", "enum": scriptorium_tools::KINDS }, "text": { "type": "string" } },
+                        "required": ["kind", "text"],
+                        "additionalProperties": false,
+                    },
+                    "description": "With rewrite of a block suggestion: its new lines, {kind, text} each \
+                                    (kind: Scene Heading, Action, Character, Parenthetical, Dialogue, Transition, \
+                                    Shot or General). an option `[]` cuts the lines (give `lines: []`).",
+                },
             }),
             &["script", "n", "decision"],
             &undoable,
@@ -190,7 +203,10 @@ pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
             let choice = match a.str("decision")?.as_str() {
                 "accept" => Choice::Accept(a.opt_positive("option")?),
                 "keep" => Choice::Keep,
-                "rewrite" => Choice::Rewrite(a.str("text")?),
+                "rewrite" => match a.0.get("lines").filter(|v| !v.is_null()) {
+                    Some(lines) => Choice::RewriteBlock(commands::block_lines(&typed_lines(lines)?)?),
+                    None => Choice::Rewrite(a.str("text")?),
+                },
                 "undecide" => Choice::Undecide,
                 d => return Err(format!("unknown decision {d:?}: accept, keep, rewrite or undecide").into()),
             };
@@ -305,6 +321,30 @@ fn finish(result: Result<String, String>, notes: &[String]) -> Result<String, Fa
         if notes.is_empty() { text } else { format!("{text}\n\n{notes}") }
     };
     result.map(join).map_err(|e| Failure::Tool(join(e)))
+}
+
+/// `lines` (`[{kind, text}]`) as `TYPE: text` lines for
+/// [`commands::block_lines`]; `[]` is a cut.
+fn typed_lines(lines: &Value) -> Result<String, String> {
+    let list = lines.as_array().ok_or("`lines` must be a list of {kind, text}")?;
+    if list.is_empty() {
+        return Ok("[cut]".into());
+    }
+    let mut out = String::new();
+    for l in list {
+        let (Some(kind), Some(text)) = (l.get("kind").and_then(Value::as_str), l.get("text").and_then(Value::as_str))
+        else {
+            return Err("each line is {\"kind\": <element type>, \"text\": <text>}".into());
+        };
+        if [kind, text].iter().any(|s| s.contains(['\n', '\r', '\u{2028}', '\u{2029}'])) {
+            return Err("a line can't contain a newline: give each paragraph as its own line".into());
+        }
+        if kind.contains(':') {
+            return Err(format!("unknown element type {kind:?}"));
+        }
+        out.push_str(&format!("{kind}: {text}\n"));
+    }
+    Ok(out)
 }
 
 /// A tool call's arguments, with errors phrased for the model.

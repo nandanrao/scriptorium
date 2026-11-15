@@ -44,6 +44,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::model::{ElementKind, ParaId, Paragraph, Script, Span};
 use crate::{rules, spans};
 
+mod run;
+pub use run::{Replaced, Run};
+
 /// A position: a byte offset into a paragraph's text, on a char boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pos {

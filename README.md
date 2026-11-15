@@ -11,7 +11,7 @@ CLI, so you (or your coding agent) can add what you need. See [AGENTS.md](AGENTS
 agent can do from the command line (suggest changes, accept them, rewrite a
 line, undo), working on the same saved session you see in the app.
 
-**Status:** reviewing works (first version); roadmap being planned.
+**Status:** v0.3.0: reviewing, full editing and multi-line suggestions work; see the roadmap.
 
 ## Try it
 
@@ -29,7 +29,7 @@ back.
 
 The sidebar switches between the plain script and each review; a review lists
 its changes. Keys on the review card: `A`/`Enter` accept, `1` `2` `3` pick an
-option, `Tab` next option, `R` keep mine, `E` rewrite the line in place (`Ctrl/Cmd+Enter`
+option, `Tab` next option, `R` keep mine, `E` rewrite the line in place (`Cmd+Return`
 saves, `Esc` puts it back), `J`/`K` next/previous, `U` undo, `Shift+U` redo.
 Click the script to edit text inside a line; `Esc` returns to the card.
 `Ctrl+0`/`Ctrl+1`… switch views, `Ctrl+S` writes `MY SCRIPT (scriptorium).fdx`
@@ -59,6 +59,20 @@ scriptorium join "MY SCRIPT.fdx" 12 13
 scriptorium retype "MY SCRIPT.fdx" 12 Action
 ```
 
+## Suggestions
+
+A suggestion can change several lines at once: cut lines, add lines, or rework
+a passage. In the app the script keeps its dots, and the card shows the lines
+that go struck through in red and new lines in green (with a bar). In review
+files `[cut]` means remove.
+
+```
+scriptorium suggest review.txt "MY SCRIPT.fdx" --paras 412..415 --block $'CHARACTER: MARIA\nDIALOGUE: What?'
+scriptorium suggest review.txt "MY SCRIPT.fdx" --paras 412..415 --block '[cut]'
+```
+
+Sharing a folder with someone needs the same Scriptorium version on both sides.
+
 Problems are logged to `~/Library/Logs/Scriptorium/scriptorium.log` (macOS) or
 `~/.local/state/scriptorium/scriptorium.log` (Linux).
 
@@ -66,7 +80,7 @@ Problems are logged to `~/Library/Logs/Scriptorium/scriptorium.log` (macOS) or
 
 Being planned; see [docs/PLAN.md](docs/PLAN.md). Direction so far: writing stays
 in Final Draft at first, and Scriptorium starts with **review** and
-**translation**. Structural editing (add, remove, split, join, retype) exists now, in the app and the CLI; full editing is v0.3.0 Phase A, and block suggestions come next.
+**translation**. v0.3.0 is done: full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
 
 Done so far: the document model, Final Draft import/export with byte-identical
 round trips, an event-sourced editing core (undo/redo, stable paragraph ids), a

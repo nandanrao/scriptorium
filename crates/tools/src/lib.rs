@@ -13,6 +13,7 @@
 //! edits), never the file as it was opened.
 
 mod args;
+mod block;
 mod catalogue;
 pub mod prompt;
 mod read;
@@ -25,11 +26,12 @@ use scriptorium_core::{Document, ElementKind};
 use scriptorium_review::{Entry, Session};
 use serde_json::Value;
 
+pub use block::{MAX_LINES, Spot, block_entry};
 pub use catalogue::{
-    HostField, MAX_BATCH, MAX_OPTIONS, MAX_PAGE, PAGE, ToolSpec, add_before, add_host_fields, catalogue,
+    HostField, KINDS, MAX_BATCH, MAX_OPTIONS, MAX_PAGE, PAGE, ToolSpec, add_before, add_host_fields, catalogue,
 };
 pub use read::{MIN_READ_BUDGET, NOT_EDITABLE, READ_BUDGET, script_size};
-pub use reviews::{find_review, item_numbered, item_numbers};
+pub use reviews::{SuggestionRow, find_review, item_numbered, item_numbers, suggestion_rows};
 pub use suggest::apply;
 
 /// What a tool call can see.

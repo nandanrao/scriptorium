@@ -2,6 +2,7 @@
 //!
 //! Usage: `scriptorium-app [SCRIPT.fdx [REVIEW.txt ...]]`. See docs/PLAN.md.
 
+mod blocks;
 mod disk;
 mod editor;
 mod elements;
@@ -176,4 +177,47 @@ fn main() {
         })
         .detach();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Action, KeyContext, Keymap, Keystroke};
+
+    /// The action `key` runs with focus in `focus` (inside the script view,
+    /// inside the workspace), as GPUI's dispatcher resolves it.
+    fn action_for(key: &'static str, focus: &str) -> Option<&'static str> {
+        let keymap = Keymap::new(bindings());
+        let stack: Vec<KeyContext> =
+            ["Workspace", "ScriptView", focus].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack);
+        found.first().map(|b| b.action().name())
+    }
+
+    fn is(key: &'static str, focus: &str, action: &dyn Action) -> bool {
+        action_for(key, focus) == Some(action.name())
+    }
+
+    /// The review card's keys: Tab and Right switch option (not accept or
+    /// keep), A/Enter accept, R keeps, E rewrites; in the script editor
+    /// Cmd/Ctrl+Enter records the line and Tab changes the line type.
+    #[test]
+    fn review_and_editor_keys() {
+        assert!(is("tab", "Review", &NextOption));
+        assert!(is("right", "Review", &NextOption));
+        assert!(is("shift-tab", "Review", &PrevOption));
+        assert!(is("left", "Review", &PrevOption));
+        assert!(is("a", "Review", &Accept));
+        assert!(is("enter", "Review", &Accept));
+        assert!(is("r", "Review", &KeepMine));
+        assert!(is("e", "Review", &Rewrite));
+        assert!(is("2", "Review", &Accept2));
+        let commit = if cfg!(target_os = "macos") { "cmd-enter" } else { "ctrl-enter" };
+        assert!(is(commit, "ScriptEditor", &CommitLine));
+        assert!(is("enter", "ScriptEditor", &Enter));
+        assert!(is("tab", "ScriptEditor", &Tab));
+        assert!(is("right", "ScriptEditor", &Right));
+        // Ctrl+Enter on the card isn't Accept (it does nothing there).
+        assert_eq!(action_for(commit, "Review"), None);
+    }
 }

@@ -478,3 +478,112 @@ fn concurrent_decides_all_land() {
         assert_eq!(statuses, [status; N], "round {round}: a decision was lost");
     }
 }
+
+#[test]
+fn suggest_and_decide_blocks() {
+    let f = Folder::new("blocks");
+    let out = f.ok(&[
+        "suggest",
+        "c.review.txt",
+        "film.fdx",
+        "--paras",
+        "2-3",
+        "--block",
+        "character: CESAR\ndialogue: I go to town.",
+        "--block",
+        "[cut]",
+        "--why",
+        "tighter",
+    ]);
+    assert_eq!(out.trim(), "added suggestion #1 (e0, ¶2–¶3) to c.review.txt");
+    let text = std::fs::read_to_string(f.path("c.review.txt")).unwrap();
+    assert!(text.starts_with("SCRIPT REVIEW v2"), "{text}");
+    assert!(text.contains("PARA: 2, 3") && text.contains("AFTER: [cut]"), "{text}");
+    f.ok(&["reviews", "film.fdx", "add", "c.review.txt"]);
+    // Option 2 cuts both lines.
+    let out = f.ok(&["decide", "film.fdx", "c.review.txt", "1", "accept", "2"]);
+    assert!(out.contains("[cut]"), "{out}");
+    let dump = f.ok(&["dump", "film.fdx"]);
+    assert!(!dump.contains("CESAR"), "{dump}");
+    // Rewritten with the writer's own lines (any case for TYPE).
+    let out = f.ok(&["decide", "film.fdx", "c.review.txt", "1", "--rewrite-block", "Action: Cesar shrugs."]);
+    assert!(out.contains("ACTION: Cesar shrugs."), "{out}");
+    let dump = f.ok(&["dump", "film.fdx"]);
+    assert!(dump.contains("Cesar shrugs.") && !dump.contains("I am go"), "{dump}");
+    // Undecided: the lines it was made on come back.
+    f.ok(&["decide", "film.fdx", "c.review.txt", "1", "undecide"]);
+    let dump = f.ok(&["dump", "film.fdx"]);
+    assert!(dump.contains("CESAR") && dump.contains("I am go to the town tomorrow."), "{dump}");
+    // '' cuts too.
+    let out = f.ok(&["decide", "film.fdx", "c.review.txt", "1", "rewrite-block", ""]);
+    assert!(out.contains("[cut]"), "{out}");
+    let (ok, text) = f.run(&["decide", "film.fdx", "c.review.txt", "1", "--rewrite-block", "MONTAGE: x"]);
+    assert!(!ok && text.contains("unknown element type"), "{text}");
+}
+
+#[test]
+fn suggest_insert_after_and_block_refusals() {
+    let f = Folder::new("blockinsert");
+    let out = f.ok(&["suggest", "c.review.txt", "film.fdx", "--insert-after", "1", "--block", "ACTION: Thunder."]);
+    assert_eq!(out.trim(), "added suggestion #1 (e0, after ¶1) to c.review.txt");
+    let text = std::fs::read_to_string(f.path("c.review.txt")).unwrap();
+    assert!(text.contains("PARA: 1\n") && text.contains("ACTION: Laura smiles.\n  ACTION: Thunder."), "{text}");
+    // A one-line block on one paragraph (a retype) and a list of ids.
+    let out = f.ok(&["suggest", "d.review.txt", "film.fdx", "--para", "1", "--block", "general: Laura smiles."]);
+    assert!(out.contains("(e0, ¶1)"), "{out}");
+    let out = f.ok(&["suggest", "e.review.txt", "film.fdx", "--paras", "2,3", "--block", ""]);
+    assert!(out.contains("(e0, ¶2–¶3)"), "{out}");
+
+    let refused = |args: &[&str], want: &str| {
+        let (ok, text) = f.run(args);
+        assert!(!ok && text.contains(want), "{args:?}: {text}");
+    };
+    let base = ["suggest", "x.review.txt", "film.fdx"];
+    let with = |rest: &[&'static str]| base.iter().copied().chain(rest.iter().copied()).collect::<Vec<_>>();
+    refused(&with(&["--insert-after", "1", "--block", "[cut]"]), "insert_after adds lines");
+    refused(&with(&["--paras", "2-3", "--after", "x"]), "give the lines with --block");
+    refused(&with(&["--paras", "2-3"]), "give at least one --block");
+    refused(&with(&["--paras", "3-2", "--block", ""]), "comes before");
+    refused(&with(&["--paras", "1,3", "--block", ""]), "aren't next to each other");
+    refused(&with(&["--para", "1", "--paras", "2-3", "--block", ""]), "give exactly one of");
+    refused(
+        &with(&["--paras", "2-3", "--block", "CHARACTER: CESAR\nDIALOGUE: I am go to the town tomorrow."]),
+        "wouldn't be visible",
+    );
+    refused(&with(&["--paras", "2-3", "--block", "just text"]), "TYPE: text");
+    assert!(!f.path("x.review.txt").exists());
+}
+
+#[test]
+fn block_listing_and_plain_rewrite_refusal() {
+    let f = Folder::new("blocklist");
+    f.ok(&[
+        "suggest",
+        "c.review.txt",
+        "film.fdx",
+        "--paras",
+        "2-3",
+        "--block",
+        "character: CESAR\ndialogue: I go to town.",
+        "--block",
+        "[cut]",
+        "--why",
+        "tighter",
+    ]);
+    f.ok(&["reviews", "film.fdx", "add", "c.review.txt"]);
+    let out = f.ok(&["suggestions", "film.fdx"]);
+    assert!(out.contains("#1 ¶2–¶3 block pending"), "{out}");
+    assert!(out.contains("  now:\n    CHARACTER: CESAR\n"), "{out}");
+    assert!(out.contains("  1:\n    CHARACTER: CESAR\n    DIALOGUE: I go to town.\n"), "{out}");
+    assert!(out.contains("  2:\n    [cut]\n"), "{out}");
+    let json: serde_json::Value = serde_json::from_str(&f.ok(&["suggestions", "film.fdx", "--json"])).unwrap();
+    assert_eq!(json[0]["paragraph_ids"], serde_json::json!([2, 3]));
+    assert_eq!(json[0]["shape"], "block");
+    assert_eq!(json[0]["options"][0][1]["kind"], "Dialogue");
+    assert_eq!(json[0]["options"][1], serde_json::json!([]));
+    assert_eq!(json[0]["current"][0]["text"], "CESAR");
+    // Plain text would collapse the block into one line.
+    let (ok, text) = f.run(&["decide", "film.fdx", "1", "rewrite", "one line"]);
+    assert!(!ok && text.contains("--rewrite-block") && text.contains("lines"), "{text}");
+    assert!(f.ok(&["dump", "film.fdx"]).contains("CESAR"));
+}

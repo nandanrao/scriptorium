@@ -33,6 +33,10 @@ pub fn keep_edge_whitespace(original: &str, text: &str) -> String {
     format!("{lead}{t}{trail}")
 }
 
+/// [`similarity`] at or above which two versions of a line count as the same
+/// line edited (fuzzy review matching; pairing lines in `Edit::replace_run`).
+pub const FUZZY_THRESHOLD: f64 = 0.85;
+
 /// Sørensen–Dice similarity over character bigrams of normalized text, 0..=1.
 pub fn similarity(a: &str, b: &str) -> f64 {
     let x: Vec<char> = normalize(a).to_lowercase().chars().collect();

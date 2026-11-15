@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, MouseButton,
     ScrollStrategy, SharedString, Stateful, StyledText, Subscription, Task, UniformListScrollHandle, Window, actions,
-    div, prelude::*, px, uniform_list,
+    div, prelude::*, px, relative, uniform_list,
 };
 use scriptorium_core::diff::{WordOp, word_diff};
 use scriptorium_core::doc::Event;
@@ -28,9 +28,10 @@ use scriptorium_core::outline::{ParaContext, annotate};
 use scriptorium_core::{Document, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::sessionfile::{self, Change, Disk, Resumed, Seen, SessionFile};
-use scriptorium_review::{Decision, LineChange, Review, Session, Status};
+use scriptorium_review::{Decision, LineChange, Refusal, Review, Session, Status};
 use scriptorium_tools::item_numbers;
 
+use crate::blocks::{self, CardLine, Side};
 use crate::disk::{self, Plan};
 use crate::editor::{Decor, EditorEvent, Mark, ScriptEditor, is_changed};
 use crate::layout;
@@ -188,8 +189,8 @@ fn resume_from_disk(
     let reader_1 = Some(fdx.legacy_script());
     let opened =
         sessionfile::resume(sources, fdx.to_script(), reader_1.as_ref(), raw, saved.as_deref(), &caps, &script_name);
-    for review in &opened.session.reviews {
-        notices.append(&mut review_notes(review));
+    for r in 0..opened.session.reviews.len() {
+        notices.append(&mut review_notes(&opened.session, r));
     }
     (opened, seen, notices)
 }
@@ -205,10 +206,21 @@ fn read_review(path: &Path, dir: &Path) -> Result<sessionfile::ReviewSource, Str
 }
 
 /// What to tell the user about a review just opened.
-fn review_notes(review: &Review) -> Vec<String> {
+fn review_notes(session: &Session, r: usize) -> Vec<String> {
+    let review = &session.reviews[r];
     let mut notes: Vec<String> = review.warnings.iter().map(|w| format!("{}: {w}", review.name)).collect();
-    if !review.unmatched.is_empty() {
-        let n = review.unmatched.len();
+    // Blocks whose lines another review cut are named (they can't be
+    // placed), and not counted again as not matching.
+    let mut n = 0;
+    for u in &review.unmatched {
+        match &u.why {
+            Some(why @ scriptorium_review::Unplaced::RemovedBy { .. }) => {
+                notes.push(format!("{}: a suggestion's {}.", review.name, session.unplaced_label(why)));
+            }
+            _ => n += 1,
+        }
+    }
+    if n > 0 {
         notes.push(format!(
             "{}: {n} suggestion{} didn't match a line (`scriptorium review` lists them).",
             review.name,
@@ -421,12 +433,11 @@ impl ScriptView {
             if scene.is_empty() { "Before the first scene".into() } else { scene.to_string().into() }
         };
         let (mut rows, mut row_of_item, mut item_by_para) = (vec![], vec![], vec![]);
-        for review in &self.session.reviews {
+        for (r, review) in self.session.reviews.iter().enumerate() {
             let (mut rs, mut of) = (vec![], vec![0; review.items.len()]);
             let mut last_scene: Option<&str> = None;
             for i in in_script_order(doc, &review.items) {
-                let item = &review.items[i];
-                let scene = scene_of(item.para);
+                let scene = scene_of(anchor_para(&self.session, doc, r, i));
                 if last_scene != Some(scene) {
                     rs.push(Row::Scene(scene_name(scene)));
                     last_scene = Some(scene);
@@ -436,7 +447,7 @@ impl ScriptView {
             }
             rows.push(Rc::new(rs));
             row_of_item.push(of);
-            item_by_para.push(review.items.iter().enumerate().map(|(i, it)| (it.para, i)).collect());
+            item_by_para.push(items_by_para(&self.session, doc, r));
         }
         self.rows = rows;
         self.row_of_item = row_of_item;
@@ -528,7 +539,6 @@ impl ScriptView {
                 &script_name,
             )
             .with_path(source.path);
-            let mut more = review_notes(&review);
             let restored = review.restored();
             let r = match Rc::make_mut(&mut self.session).add(review) {
                 Ok(r) => r,
@@ -537,7 +547,6 @@ impl ScriptView {
                     continue;
                 }
             };
-            notes.append(&mut more);
             self.attached_since_sync.push(p.clone());
             // Attached: pin the review's id into a file that has no `Id:`
             // header, so later edits to the file don't orphan its decisions.
@@ -567,6 +576,15 @@ impl ScriptView {
                 ));
             }
             first.get_or_insert(r);
+        }
+        // Blocks whose lines another review cut, named once all are added.
+        if let Some(r0) = first {
+            let doc = self.doc(cx).clone();
+            let session = Rc::make_mut(&mut self.session);
+            session.note_removed_by(&doc);
+            for r in r0..session.reviews.len() {
+                notes.append(&mut review_notes(session, r));
+            }
         }
         self.build_rows(cx);
         if let Some(r) = first {
@@ -690,12 +708,19 @@ impl ScriptView {
         self.numbers = self.session.reviews.iter().map(|review| item_numbers(doc, &review.items)).collect();
         let protect = self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para);
         let mut decor = Decor { originals: self.originals.clone(), ..Decor::default() };
+        // Lines move under blocks (accepting one gives its lines new ids), so
+        // which item a line belongs to is worked out again each time.
+        self.item_by_para = (0..self.session.reviews.len()).map(|r| items_by_para(&self.session, doc, r)).collect();
         if let Some(r) = self.review() {
             let doc = self.doc(cx);
-            for (i, item) in self.session.reviews[r].items.iter().enumerate() {
-                decor.marks.insert(item.para, mark_of(&self.session, doc, r, i));
+            // One dot per line, of the item the line belongs to (a line a
+            // suggestion covers wins over a cut's position on it).
+            let marks: Vec<Mark> =
+                (0..self.session.reviews[r].items.len()).map(|i| mark_of(&self.session, doc, r, i)).collect();
+            decor.marks = self.item_by_para[r].iter().map(|(&para, &i)| (para, marks[i])).collect();
+            if let Some(i) = self.cur[r] {
+                decor.current = dot_paras(&self.session, doc, r, i).into_iter().collect();
             }
-            decor.current = self.cur[r].map(|i| self.session.item(r, i).para);
         }
         self.editor.update(cx, |e, cx| {
             e.decor = decor;
@@ -730,7 +755,7 @@ impl ScriptView {
 
     /// Scroll the script and the queue to item `i`.
     fn show_item(&mut self, r: usize, i: usize, cx: &mut Context<Self>) {
-        let para = self.session.item(r, i).para;
+        let para = anchor_para(&self.session, self.doc(cx), r, i);
         self.editor.update(cx, |e, cx| e.reveal(para, cx));
         self.queue_scroll.scroll_to_item(self.row_of_item[r][i], ScrollStrategy::Center);
     }
@@ -763,7 +788,7 @@ impl ScriptView {
     fn decide(&mut self, decision: Decision, window: &mut Window, cx: &mut Context<Self>) {
         let Some((r, i)) = self.current() else { return };
         if let Err(e) = self.session.check(self.doc(cx), r, i, &decision) {
-            self.say(e.message(REWRITE_HINT));
+            self.say(self.refusal_text(&e, r, i, cx));
             cx.notify();
             return;
         }
@@ -787,6 +812,10 @@ impl ScriptView {
     /// E: put the highlighted option into the line and edit it in the script.
     fn start_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((r, i)) = self.current() else { return };
+        if self.session.item(r, i).block {
+            self.edit_block(r, i, window, cx);
+            return;
+        }
         let item = self.session.item(r, i).clone();
         let original = self.text_of(item.para, cx);
         let start = if self.session.status(self.doc(cx), r, i) == Status::Rewritten {
@@ -805,6 +834,62 @@ impl ScriptView {
         let focus = self.editor.read(cx).focus_handle().clone();
         window.focus(&focus, cx);
         self.refresh(cx);
+    }
+
+    /// E on a block: accept the highlighted option (unless it is already what
+    /// the lines say, or the writer has rewritten them), then put the cursor
+    /// in its first changed line and hand the keys to the editor. There is no
+    /// separate block editor: the writer edits with the normal editor, the
+    /// status follows from the lines (B3), and Cmd/Ctrl+Enter on one of the
+    /// lines records it and moves on.
+    fn edit_block(&mut self, r: usize, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let k = self.hi.min(self.session.item(r, i).option_lines.len().saturating_sub(1));
+        let status = self.session.status(self.doc(cx), r, i);
+        let accept = !matches!(status, Status::Rewritten) && status != Status::Accepted(k);
+        // Refused (lines restructured, decided in another review...): still
+        // put the cursor on the block's lines, so the writer can edit them
+        // there as the message says.
+        let mut refused = None;
+        if accept {
+            match self.session.check(self.doc(cx), r, i, &Decision::Accept(k)) {
+                Err(e) => refused = Some(self.refusal_text(&e, r, i, cx)),
+                Ok(()) => {
+                    self.rewriting = None;
+                    let session = self.session.clone();
+                    self.editor
+                        .update(cx, |e, cx| e.run(cx, |doc, sel| session.decide(doc, sel, r, i, Decision::Accept(k))));
+                }
+            }
+        }
+        let doc = self.doc(cx);
+        let item = self.session.item(r, i);
+        let run = self.session.live_run(doc, r, i);
+        let first = if self.session.status(doc, r, i) == Status::Accepted(k) {
+            blocks::first_changed(&item.before_lines, &item.option_lines[k]).and_then(|j| run.get(j).copied())
+        } else {
+            None
+        };
+        let target = first.or_else(|| run.first().copied()).unwrap_or_else(|| anchor_para(&self.session, doc, r, i));
+        self.editor.update(cx, |e, cx| {
+            e.cursor_to_end(target, cx);
+            e.reveal(target, cx);
+        });
+        self.say(refused.unwrap_or_else(|| {
+            format!("Edit the lines in the script. {COMMIT_KEY} records them and moves on; Esc back to the card.")
+        }));
+        let focus = self.editor.read(cx).focus_handle().clone();
+        window.focus(&focus, cx);
+        self.schedule_autosave(cx);
+        self.refresh(cx);
+    }
+
+    /// A refusal as the app words it: lines named by their first words, the
+    /// app's own way out, and (lines partly gone) which review removed them.
+    fn refusal_text(&self, refusal: &Refusal, r: usize, i: usize, cx: &App) -> String {
+        let doc = self.doc(cx);
+        let item = self.session.item(r, i);
+        let words = |id| line_words(item, doc, id);
+        refusal_text(refusal, hint_for(item), words, self.session.removed_by(doc, r, i))
     }
 
     /// Record what the line now says (an option, the original, or a rewrite).
@@ -915,10 +1000,11 @@ impl ScriptView {
                 if self.rewriting.is_some() {
                     self.commit_rewrite(window, cx);
                 } else if let Some((r, i)) = self.current()
-                    && self.editor.read(cx).sel.head.para == self.session.item(r, i).para
+                    && dot_paras(&self.session, self.doc(cx), r, i).contains(&self.editor.read(cx).sel.head.para)
                 {
                     // Edited the line under review by hand, then Cmd/Ctrl+Enter: that's a decision.
                     self.record_hand_edit(r, i, cx);
+                    self.say("");
                     window.focus(&self.focus, cx);
                     self.advance(r, i, cx);
                 }
@@ -1132,6 +1218,7 @@ impl ScriptView {
             }
         }
         self.attached_since_sync = still;
+        session.note_removed_by(&replayed.doc);
 
         let mut summary = disk::summarize(&self.session, &start, &session, &reloaded);
         summary.kept = count_changes(&session, &replayed.kept);
@@ -1556,7 +1643,7 @@ impl ScriptView {
                 .items
                 .iter()
                 .enumerate()
-                .map(|(i, it)| (mark_of(&self.session, doc, r, i), self.text_of(it.para, cx).into()))
+                .map(|(i, _)| (mark_of(&self.session, doc, r, i), item_text(&self.session, doc, r, i).into()))
                 .collect(),
             View::Script => vec![],
         });
@@ -1700,6 +1787,12 @@ impl ScriptView {
 
         let doc = self.doc(cx);
         let item = self.session.item(r, i);
+        if item.block {
+            self.block_card(&mut body, r, i, cx);
+            let status = self.session.status(self.doc(cx), r, i);
+            self.card_footer(&mut body, r, i, status, focused, cx);
+            return shell.children(body);
+        }
         let fallback = ParaContext::default();
         let ctx = para_ctx(&self.ctx, doc, item.para).unwrap_or(&fallback);
         let caps = doc.paragraph(item.para).is_some_and(|p| self.fdx.is_caps(p.kind.name()));
@@ -1809,6 +1902,184 @@ impl ScriptView {
                     .into_any_element(),
             );
         }
+        self.card_footer(&mut body, r, i, status, focused, cx);
+        shell.children(body)
+    }
+
+    /// The card's middle for a block: its heading, why it can't be decided
+    /// (if so), the lines it left once decided, and each option as BEFORE
+    /// struck in red and AFTER in green, laid out by element kind.
+    fn block_card(&self, body: &mut Vec<AnyElement>, r: usize, i: usize, cx: &mut Context<Self>) {
+        let doc = self.doc(cx);
+        let item = self.session.item(r, i);
+        let status = self.session.status(doc, r, i);
+        let run = self.session.live_run(doc, r, i);
+        let hi = self.hi.min(item.option_lines.len().saturating_sub(1));
+        let fallback = ParaContext::default();
+        let ctx = para_ctx(&self.ctx, doc, anchor_para(&self.session, doc, r, i)).unwrap_or(&fallback);
+        let total = self.session.reviews[r].items.len();
+        let number = self.number(doc, r, i);
+        let words = |id| line_words(item, doc, id);
+        // Once decided, the heading is what was chosen, not what is highlighted.
+        let shown = match status {
+            Status::Accepted(k) => k,
+            _ => hi,
+        };
+        let headings: Vec<String> =
+            (0..item.option_lines.len()).map(|k| blocks::heading(item.shape(k), words)).collect();
+        let title = headings.get(shown).cloned().unwrap_or_default();
+        body.push(
+            div()
+                .flex()
+                .flex_col()
+                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(INK).child(title))
+                .child(small(format!(
+                    "{} \u{b7} change {number} of {total}",
+                    if ctx.scene.is_empty() { "Before the first scene" } else { &ctx.scene },
+                )))
+                .into_any_element(),
+        );
+        if item.fuzzy {
+            body.push(warn_box("Matched approximately: check these are the right lines.", None));
+        }
+        let removed_by = self.session.removed_by(doc, r, i);
+        let outdated = self.session.is_outdated(doc, r, i);
+        let cut_option = matches!(status, Status::Accepted(k) if item.option_lines[k].is_empty());
+        if let Some(text) = block_notice(status, removed_by, outdated, run.is_empty() && !cut_option) {
+            body.push(warn_box(&text, None));
+        }
+
+        let chip = match status {
+            Status::Pending | Status::Removed => None,
+            Status::Accepted(k) if item.option_lines.len() > 1 => Some(format!("accepted option {}", k + 1)),
+            Status::Accepted(_) => Some("accepted".into()),
+            Status::Rejected => Some("kept yours".into()),
+            Status::Rewritten if run.is_empty() => Some("lines cut".into()),
+            Status::Rewritten => Some("rewritten".into()),
+        };
+        if chip.is_some() {
+            body.push(label_with("Yours now", chip));
+            let mine: Vec<CardLine> = self
+                .session
+                .mine(doc, r, i)
+                .iter()
+                .map(|l| CardLine {
+                    kind: l.kind.clone().unwrap_or(scriptorium_core::ElementKind::Action),
+                    text: l.text.clone(),
+                    side: Side::Same,
+                    retyped_from: None,
+                })
+                .collect();
+            let lines = if mine.is_empty() {
+                vec![small("(no lines: cut)".to_string()).into_any_element()]
+            } else {
+                self.card_lines(&mine, INK_2)
+            };
+            body.push(div().border_l_2().border_color(RULE).pl_2().children(lines).into_any_element());
+        }
+
+        let multi = item.option_lines.len() > 1;
+        body.push(label(if multi { format!("{} options", item.option_lines.len()) } else { "Suggested".into() }));
+        for (k, o) in item.option_lines.iter().enumerate() {
+            let is_hi = k == hi;
+            let rows = blocks::card_lines(&item.before_lines, o);
+            body.push(
+                div()
+                    .id(("option", k))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if is_hi { ACCENT } else { RULE })
+                    .when(is_hi, |d| d.bg(ACCENT_SOFT))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.hi = k;
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(multi, |d| d.child(small(format!("{}", k + 1)).font_weight(FontWeight::BOLD)))
+                            .when(multi, |d| d.child(small(headings[k].clone())))
+                            .when(status == Status::Accepted(k), |d| d.child(chip_el("chosen", OK, OK_SOFT)))
+                            .child(div().flex_1())
+                            .child(
+                                button(
+                                    ("accept", k),
+                                    "Accept",
+                                    Some(if multi { ["1", "2", "3"].get(k).copied().unwrap_or("") } else { "A" }),
+                                    is_hi,
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| this.accept(k, window, cx))),
+                            ),
+                    )
+                    .children(self.card_lines(&rows, INK))
+                    .into_any_element(),
+            );
+        }
+    }
+
+    /// Lines of a block on the card, each placed and cased as on the page
+    /// (scaled to the card), struck in red or green by [`Side`]; unchanged
+    /// lines in `ink`.
+    fn card_lines(&self, rows: &[CardLine], ink: gpui::Rgba) -> Vec<AnyElement> {
+        rows.iter()
+            .enumerate()
+            .map(|(n, row)| {
+                let (left, width, align) = blocks::card_indent(&row.kind);
+                let caps = self.fdx.is_caps(row.kind.name()) || layout::geometry(&row.kind).caps;
+                let gap = n > 0 && layout::geometry(&row.kind).space_before >= 1.0;
+                let text = if caps { layout::display_caps(&row.text) } else { row.text.clone() };
+                let line = div()
+                    .w(relative(width))
+                    .font_family(SCRIPT_FONT)
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .when(align == layout::Align::Right, |d| d.text_right())
+                    .when(align == layout::Align::Center, |d| d.text_center())
+                    .map(|d| match row.side {
+                        Side::Same => d.text_color(ink),
+                        Side::Del => d.text_color(STRUCK).line_through(),
+                        // Not by colour alone: a bar on the left as well.
+                        Side::Ins => d.text_color(ADDED).bg(INS).border_l_2().border_color(ADDED).pl_1(),
+                    })
+                    .child(text);
+                let tag = row.retyped_from.as_ref().map(|from| {
+                    div().text_size(px(10.5)).text_color(INK_2).child(format!(
+                        "{} \u{2192} {}",
+                        from.name(),
+                        row.kind.name()
+                    ))
+                });
+                div()
+                    .w_full()
+                    .pl(relative(left))
+                    .when(gap, |d| d.mt(px(6.)))
+                    .child(line)
+                    .children(tag)
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    /// The card's lower part, the same for lines and blocks: why, the
+    /// buttons, back to undecided, and the focus hint.
+    fn card_footer(
+        &self,
+        body: &mut Vec<AnyElement>,
+        r: usize,
+        i: usize,
+        status: Status,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let item = self.session.item(r, i);
         if !item.why.is_empty() {
             body.push(
                 div()
@@ -1848,7 +2119,7 @@ impl ScriptView {
                 )
                 .into_any_element(),
         );
-        if status != Status::Pending {
+        if !matches!(status, Status::Pending | Status::Removed) {
             body.push(
                 button("b-undecide", "Back to undecided", None, false)
                     .on_click(cx.listener(|this, _, w, cx| {
@@ -1868,7 +2139,6 @@ impl ScriptView {
                 small("Typing goes to the script. Esc or click here for review keys.".to_string()).into_any_element(),
             );
         }
-        shell.children(body)
     }
 
     fn render_status(&self, cx: &mut Context<Self>) -> Div {
@@ -1983,6 +2253,142 @@ fn count_changes(session: &Session, changes: &[Change]) -> usize {
 /// How the app tells the writer to rewrite a line it can't decide
 /// (see [`scriptorium_review::Refusal::message`]).
 const REWRITE_HINT: &str = "press E to rewrite this line";
+
+/// How the app tells the writer to rewrite a block it can't accept.
+/// Ends with [`COMMIT_KEY`].
+const BLOCK_HINT: &str = if cfg!(target_os = "macos") {
+    "edit the lines in the script, then press Cmd+Enter"
+} else {
+    "edit the lines in the script, then press Ctrl+Enter"
+};
+
+fn hint_for(item: &scriptorium_review::Item) -> &'static str {
+    if item.block { BLOCK_HINT } else { REWRITE_HINT }
+}
+
+/// How the app names line `id` of `item`: the first words of its live text,
+/// else of the text it had when the suggestion was matched.
+fn line_words(item: &scriptorium_review::Item, doc: &Document, id: ParaId) -> String {
+    let text =
+        doc.paragraph(id).map(|p| p.text()).or_else(|| item.before_paras.iter().find(|p| p.id == id).map(|p| p.text()));
+    match text {
+        Some(t) => blocks::quote(&t),
+        None => "a line no longer in the script".into(),
+    }
+}
+
+/// [`Refusal::message`] in the app's words: lines named by `words` (their
+/// first words) rather than paragraph numbers, and lines partly gone named
+/// by the review that removed them (`removed_by`).
+fn refusal_text(refusal: &Refusal, hint: &str, words: impl Fn(ParaId) -> String, removed_by: Option<&str>) -> String {
+    let since = "since the suggestion was written";
+    match refusal {
+        Refusal::NoOption { .. } => refusal.message(hint),
+        Refusal::LineRemoved { para } => format!(
+            "Line removed: {} was removed (or joined into the line above) {since}, so this can't be decided",
+            words(*para)
+        ),
+        Refusal::LineChanged { para, how } => {
+            let how = if *how == LineChange::Split { "split" } else { "joined with the next line" };
+            format!("Line changed: {} was {how} {since}, so its text no longer fits the line; {hint}", words(*para))
+        }
+        Refusal::Restructured { para } => match removed_by {
+            Some(review) => format!(
+                "Lines removed by {review}: some of the lines from {} are gone, so this can't be accepted; {hint}",
+                words(*para)
+            ),
+            None => format!(
+                "Lines changed: the lines from {} were split, partly removed or moved apart {since}, so this can't \
+                 be accepted; {hint}",
+                words(*para)
+            ),
+        },
+        Refusal::RemovedBy { para, review } => {
+            format!("Line removed by {review}: {} is gone, so this can't be decided", words(*para))
+        }
+        Refusal::DecidedElsewhere { para, review } => {
+            format!("{} is decided in {review}; undecide it there first", words(*para))
+        }
+    }
+}
+
+/// The lines item `i` of review `r` puts its dot on (and the card's
+/// highlight): the live lines it covers ([`Session::live_run`]); for a
+/// block with none (a cut, or lines removed), the line before where they
+/// were ([`Session::current_run`]). Empty for a line suggestion whose line is gone.
+fn dot_paras(session: &Session, doc: &Document, r: usize, i: usize) -> Vec<ParaId> {
+    let run = session.live_run(doc, r, i);
+    let item = session.item(r, i);
+    if !run.is_empty() || !item.block {
+        return run;
+    }
+    // A cut (or lines gone): the line before where they were, or the first
+    // line if that was the start of the script.
+    let at = session.current_run(doc, r, i).after.or_else(|| doc.paragraphs().first().map(|p| p.id));
+    at.into_iter().collect()
+}
+
+/// The line to show item `i` of review `r` at: its first dot, else its
+/// first line (gone).
+fn anchor_para(session: &Session, doc: &Document, r: usize, i: usize) -> ParaId {
+    dot_paras(session, doc, r, i).first().copied().unwrap_or_else(|| session.item(r, i).para)
+}
+
+/// Which item of review `r` each line belongs to, for clicks and undo: a
+/// line a suggestion covers wins over a cut's position on it.
+fn items_by_para(session: &Session, doc: &Document, r: usize) -> HashMap<ParaId, usize> {
+    let mut map = HashMap::new();
+    let n = session.reviews[r].items.len();
+    let (mut covering, mut positions) = (vec![], vec![]);
+    for i in 0..n {
+        let run = session.live_run(doc, r, i);
+        if run.is_empty() {
+            positions.extend(dot_paras(session, doc, r, i).into_iter().map(|p| (p, i)));
+        } else {
+            covering.extend(run.into_iter().map(|p| (p, i)));
+        }
+    }
+    map.extend(positions);
+    map.extend(covering);
+    map
+}
+
+/// The sidebar's text for item `i`: its first live line, else what it was
+/// made on, after "Cut:" (a cut accepted) or "Lines gone:" (removed some
+/// other way; naming the review whose decision removed them, if one did).
+fn item_text(session: &Session, doc: &Document, r: usize, i: usize) -> String {
+    let item = session.item(r, i);
+    if let Some(p) = session.live_run(doc, r, i).first().and_then(|p| doc.paragraph(*p)) {
+        return p.text();
+    }
+    let Some(l) = item.before_lines.first().filter(|_| item.block) else {
+        return doc.paragraph(item.para).map(|p| p.text()).unwrap_or_default();
+    };
+    match session.status(doc, r, i) {
+        Status::Accepted(k) if item.option_lines.get(k).is_some_and(|o| o.is_empty()) => format!("Cut: {}", l.text),
+        _ => match session.removed_by(doc, r, i) {
+            Some(review) => format!("Lines gone (cut by {review}): {}", l.text),
+            None => format!("Lines gone: {}", l.text),
+        },
+    }
+}
+
+/// The card's warning for a block, if any: lines gone while pending (and
+/// which review cut them), lines cut by hand after deciding, or lines
+/// changed since the suggestion was written.
+fn block_notice(status: Status, removed_by: Option<&str>, outdated: bool, gone: bool) -> Option<String> {
+    match status {
+        Status::Removed => Some(match removed_by {
+            Some(review) => format!("Lines cut by {review}, so this can't be decided."),
+            None => "These lines have been removed, so the suggestion can't be decided.".into(),
+        }),
+        _ if gone && status != Status::Pending => {
+            Some("Lines cut: these lines were removed after this was decided.".into())
+        }
+        Status::Pending if outdated => Some("These lines have changed since the suggestion was written.".into()),
+        _ => None,
+    }
+}
 
 fn mark_of(session: &Session, doc: &Document, r: usize, i: usize) -> Mark {
     match session.status(doc, r, i) {
@@ -2280,5 +2686,98 @@ mod tests {
         assert!(cut.starts_with("Line cut"), "{cut}");
         let refusal = scriptorium_review::Refusal::LineChanged { para: ParaId(2), how: LineChange::Split };
         assert!(refusal.message(REWRITE_HINT).ends_with("; press E to rewrite this line"));
+    }
+
+    /// A block's dots: on each line it covers while pending; once a cut is
+    /// accepted, on the line before where it was, without taking that line
+    /// from the suggestion that covers it.
+    #[test]
+    fn block_dots_follow_the_lines_and_a_cut_sits_on_the_line_before() {
+        let d = doc();
+        let text = "SCRIPT REVIEW v2\n---\nPARA: 1, 2\nBEFORE:\n  CHARACTER: ANA\n  DIALOGUE: Hi.\nAFTER: [cut]\n";
+        let review = Review::open("r", text, d.script(), |_| false, "");
+        assert_eq!(review.items.len(), 1, "{:?}", review.unmatched);
+        let session = Session::new(vec![review]);
+        let mut d = d;
+        assert_eq!(dot_paras(&session, &d, 0, 0), vec![ParaId(1), ParaId(2)]);
+        assert!(session.item(0, 0).block);
+        let sel = Selection::cursor(d.start());
+        session.decide(&mut d, sel, 0, 0, Decision::Accept(0)).unwrap();
+        assert_eq!(session.status(&d, 0, 0), Status::Accepted(0));
+        assert_eq!(dot_paras(&session, &d, 0, 0), vec![ParaId(0)]);
+        assert_eq!(items_by_para(&session, &d, 0).get(&ParaId(0)), Some(&0));
+        assert_eq!(item_text(&session, &d, 0, 0), "Cut: ANA");
+    }
+
+    #[test]
+    fn block_notices_name_who_cut_the_lines() {
+        let by = block_notice(Status::Removed, Some("notes.review"), false, true).unwrap();
+        assert_eq!(by, "Lines cut by notes.review, so this can't be decided.");
+        assert!(block_notice(Status::Rewritten, None, false, true).unwrap().starts_with("Lines cut"));
+        assert!(block_notice(Status::Accepted(0), None, false, false).is_none());
+        assert!(block_notice(Status::Pending, None, true, false).unwrap().contains("changed"));
+        assert!(BLOCK_HINT.ends_with(&format!("press {COMMIT_KEY}")));
+        let refusal = Refusal::Restructured { para: ParaId(1) };
+        assert!(refusal.message(BLOCK_HINT).ends_with(COMMIT_KEY));
+    }
+
+    /// Refusals name lines by their first words, never by paragraph number,
+    /// and lines partly gone by the review that removed them.
+    #[test]
+    fn refusals_quote_lines_and_name_reviews() {
+        let words = |id: ParaId| blocks::quote(if id == ParaId(1) { "Grandma laughs." } else { "?" });
+        let all = [
+            Refusal::LineRemoved { para: ParaId(1) },
+            Refusal::LineChanged { para: ParaId(1), how: LineChange::Split },
+            Refusal::Restructured { para: ParaId(1) },
+            Refusal::RemovedBy { para: ParaId(1), review: "notes.review".into() },
+            Refusal::DecidedElsewhere { para: ParaId(1), review: "notes.review".into() },
+        ];
+        for r in &all {
+            let text = refusal_text(r, BLOCK_HINT, words, None);
+            assert!(text.contains("\u{201c}Grandma laughs.\u{201d}"), "{text}");
+            assert!(!text.contains('\u{b6}') && !text.contains("review notes"), "{text}");
+        }
+        let generic = refusal_text(&all[2], BLOCK_HINT, words, None);
+        assert!(generic.contains("split, partly removed or moved apart"), "{generic}");
+        let named = refusal_text(&all[2], BLOCK_HINT, words, Some("notes.review"));
+        assert!(named.starts_with("Lines removed by notes.review:"), "{named}");
+        assert!(named.ends_with(COMMIT_KEY), "{named}");
+        let elsewhere = refusal_text(&all[4], BLOCK_HINT, words, None);
+        assert_eq!(elsewhere, "\u{201c}Grandma laughs.\u{201d} is decided in notes.review; undecide it there first");
+    }
+
+    /// Lines another review's decision removed read "Lines gone", naming
+    /// that review, not "Cut:" (which is for a cut accepted).
+    #[test]
+    fn lines_gone_name_the_review_that_cut_them() {
+        let mut d = doc();
+        let cut =
+            "SCRIPT REVIEW v2\nId: a\n---\nPARA: 1, 2\nBEFORE:\n  CHARACTER: ANA\n  DIALOGUE: Hi.\nAFTER: [cut]\n";
+        let change = "SCRIPT REVIEW v2\nId: b\n---\nPARA: 1, 2\nBEFORE:\n  CHARACTER: ANA\n  DIALOGUE: Hi.\n\
+                      AFTER:\n  CHARACTER: ANA\n  DIALOGUE: Hello.\n";
+        let a = Review::open("a.review", cut, d.script(), |_| false, "");
+        let b = Review::open("b.review", change, d.script(), |_| false, "");
+        let session = Session::new(vec![a, b]);
+        let sel = Selection::cursor(d.start());
+        session.decide(&mut d, sel, 0, 0, Decision::Accept(0)).unwrap();
+        assert_eq!(item_text(&session, &d, 0, 0), "Cut: ANA");
+        assert_eq!(session.status(&d, 1, 0), Status::Removed);
+        assert_eq!(item_text(&session, &d, 1, 0), "Lines gone (cut by a.review): ANA");
+    }
+
+    /// A block whose lines another review cut is reported once on reopen,
+    /// not also as "didn't match".
+    #[test]
+    fn a_block_cut_elsewhere_is_reported_once() {
+        let d = doc();
+        let text = "SCRIPT REVIEW v2\nId: b\n---\nPARA: 1\nBEFORE:\n  CHARACTER: NOBODY\nAFTER:\n  CHARACTER: ANA\n";
+        let a = Review::open("a.review", "SCRIPT REVIEW v2\nId: a\n---\n", d.script(), |_| false, "");
+        let mut b = Review::open("b.review", text, d.script(), |_| false, "");
+        assert_eq!(b.unmatched.len(), 1);
+        b.unmatched[0].why = Some(scriptorium_review::Unplaced::RemovedBy { review: 0 });
+        let session = Session::new(vec![a, b]);
+        let notes = review_notes(&session, 1);
+        assert_eq!(notes, ["b.review: a suggestion's lines cut by a.review."], "{notes:?}");
     }
 }

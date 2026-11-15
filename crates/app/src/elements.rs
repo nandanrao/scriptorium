@@ -258,7 +258,7 @@ impl Element for ParaElement {
             let ed = self.editor.read(cx);
             let Some(p) = ed.doc.paragraphs().get(self.ix) else { return };
             let changed = crate::editor::is_changed(&ed.decor.originals, p);
-            (ed.decor.current == Some(p.id), ed.decor.marks.get(&p.id).copied(), changed)
+            (ed.decor.current.contains(&p.id), ed.decor.marks.get(&p.id).copied(), changed)
         };
         let pad = px(5.);
         let block = Bounds::from_corners(

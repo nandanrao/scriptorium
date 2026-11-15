@@ -15,7 +15,7 @@
 //! keeps kinds; plain text from elsewhere is classified
 //! ([`scriptorium_core::paste`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -77,7 +77,8 @@ actions!(
 /// in the left margin for each suggestion of the review being shown.
 #[derive(Clone, Default)]
 pub struct Decor {
-    pub current: Option<ParaId>,
+    /// The lines of the suggestion on the card (a block: every line it covers).
+    pub current: HashSet<ParaId>,
     pub marks: HashMap<ParaId, Mark>,
     /// Paragraphs as opened from the file, to put Final Draft's `*` beside changed lines.
     pub originals: Rc<HashMap<ParaId, Paragraph>>,

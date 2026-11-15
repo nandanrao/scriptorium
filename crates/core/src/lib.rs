@@ -14,5 +14,5 @@ pub mod rules;
 pub mod spans;
 pub mod text;
 
-pub use doc::{DocError, Document, Edit, FIXED_MESSAGE, Group, NewPara, Pos, Selection};
+pub use doc::{DocError, Document, Edit, FIXED_MESSAGE, Group, NewPara, Pos, Replaced, Run, Selection};
 pub use model::{ElementKind, ParaId, Paragraph, Script, Span, Style};

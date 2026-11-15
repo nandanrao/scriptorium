@@ -126,6 +126,12 @@ fn handshake_and_tool_list() {
     let suggest = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "suggest_change").unwrap();
     assert_eq!(suggest["inputSchema"]["properties"]["options"]["maxItems"], 3);
     assert!(suggest["inputSchema"]["properties"]["before"].is_object());
+    let decide =
+        tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "decide_suggestion").unwrap();
+    assert_eq!(
+        decide["inputSchema"]["properties"]["lines"]["items"]["properties"]["kind"]["enum"],
+        suggest["inputSchema"]["properties"]["options"]["items"]["anyOf"][1]["items"]["properties"]["kind"]["enum"]
+    );
     assert!(s.request("no/such/method", json!({}))["error"]["code"] == -32601);
 }
 
@@ -166,7 +172,7 @@ fn propose_decide_undo_write() {
     assert!(err && text.contains("no paragraph 999"), "{text}");
     let (text, err) =
         s.call("suggest_change", json!({ "script": "film.fdx", "review_file": "pass.review.txt", "options": ["x"] }));
-    assert!(err && text.contains("paragraph_id or before"), "{text}");
+    assert!(err && text.contains("give exactly one of paragraph_id"), "{text}");
 }
 
 #[test]
@@ -315,4 +321,48 @@ fn decide_takes_only_positive_numbers_or_entries() {
         s.call("decide_suggestion", json!({ "script": "film.fdx", "n": 1, "decision": "accept", "option": 0 }));
     assert!(err && text.contains("`option`"), "{text}");
     s.ok("decide_suggestion", json!({ "script": "film.fdx", "n": "e0", "decision": "keep" }));
+}
+
+#[test]
+fn suggest_changes_with_a_block_and_a_cut_then_list_and_rewrite() {
+    let mut s = Server::start("blocks");
+    // ¶0 heading, ¶1 action, ¶2 cue, ¶3 dialogue.
+    let out = s.ok(
+        "suggest_changes",
+        json!({ "script": "film.fdx", "review_file": "blocks.review.txt", "suggestions": [
+            { "paragraph_ids": [2, 3], "options": [[
+                { "kind": "Character", "text": "CESAR" },
+                { "kind": "Dialogue", "text": "I'm going to town tomorrow." },
+            ]], "why": "verb form" },
+            { "paragraph_id": 1, "options": [[]], "why": "not needed" },
+        ] }),
+    );
+    let result: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(result["added"], 2, "{out}");
+    assert_eq!(result["suggestions"][0]["paragraph_ids"], json!([2, 3]), "{out}");
+    assert_eq!(result["suggestions"][0]["shape"], "block", "{out}");
+
+    let list: Value = serde_json::from_str(&s.ok("list_suggestions", json!({ "script": "film.fdx" }))).unwrap();
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{list}");
+    assert_eq!(rows[0]["paragraph_ids"], json!([1]), "{list}");
+    assert_eq!(rows[0]["options"], json!([[]]), "a cut: {list}");
+    assert_eq!(rows[1]["paragraph_ids"], json!([2, 3]), "{list}");
+    assert_eq!(rows[1]["before"][1], json!({ "kind": "Dialogue", "text": "I am go to the town tomorrow." }));
+    assert_eq!(rows[1]["options"][0][1]["text"], "I'm going to town tomorrow.");
+
+    // A block rewritten with lines when the writer asks.
+    s.ok(
+        "decide_suggestion",
+        json!({ "script": "film.fdx", "n": 2, "decision": "rewrite",
+                "lines": [{ "kind": "Action", "text": "Cesar nods." }] }),
+    );
+    let scene = s.ok("read_scene", json!({ "script": "film.fdx", "scene": 1 }));
+    assert!(scene.contains("Cesar nods.") && !scene.contains("I am go"), "{scene}");
+    // Both shapes refuse string options where lines are needed.
+    let (text, err) = s.call(
+        "suggest_change",
+        json!({ "script": "film.fdx", "review_file": "other.review.txt", "insert_after": 0, "options": ["x"] }),
+    );
+    assert!(err && text.contains("list of lines"), "{text}");
 }

@@ -269,7 +269,7 @@ pub fn resume(
         Ok(d) => d,
         Err(e) => return fresh(doesnt_apply(e)),
     };
-    let session = open_all(Some(&doc), &mut notes);
+    let mut session = open_all(Some(&doc), &mut notes);
     for a in &file.reviews {
         if let Some(r) = session.reviews.iter().find(|r| r.path == a.path && r.id != a.id) {
             notes.push(format!(
@@ -300,6 +300,7 @@ pub fn resume(
             ));
         }
     }
+    session.note_removed_by(&doc);
     ResumedSession { session, doc, base, how, notes }
 }
 

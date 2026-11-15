@@ -65,12 +65,7 @@ fn saved(o: &sessionfile::ResumedSession) -> String {
 }
 
 fn entry(before: &str, para: Option<u64>, options: &[&str]) -> Entry {
-    Entry {
-        before: before.into(),
-        para: para.map(ParaId),
-        options: options.iter().map(|s| s.to_string()).collect(),
-        ..Entry::default()
-    }
+    Entry { para: para.map(ParaId).into_iter().collect(), ..Entry::single(before, options) }
 }
 
 /// (paragraph, item.before) per item, in item order.
@@ -420,7 +415,7 @@ fn append_entries_says_why_an_entry_got_no_item() {
         entry("Thank you very much.", Some(6), &["Many thanks."]), // ¶6 claimed by the one above
     ];
     let out = o.session.append_entries(&doc, 0, batch, true, caps).unwrap();
-    let why: Vec<_> = out.results.iter().map(|r| r.unplaced).collect();
+    let why: Vec<_> = out.results.iter().map(|r| r.unplaced.clone()).collect();
     assert_eq!(
         why,
         [
@@ -440,7 +435,7 @@ fn append_entries_says_why_an_entry_got_no_item() {
     // Without para_only: a BEFORE that fits only a taken line says so; nothing fitting is Missing.
     let more = vec![entry("Laura smiles.", None, &["Laura beams."]), entry("Nowhere at all.", None, &["x"])];
     let out = o.session.append_entries(&doc, 0, more, false, caps).unwrap();
-    let why: Vec<_> = out.results.iter().map(|r| r.unplaced).collect();
+    let why: Vec<_> = out.results.iter().map(|r| r.unplaced.clone()).collect();
     assert_eq!(why, [Some(Unplaced::Taken { entry: 0, item: Some(0) }), Some(Unplaced::Missing)]);
 
     // A BEFORE that only fits a taken line approximately is Taken too, not Missing.

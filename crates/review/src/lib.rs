@@ -19,8 +19,8 @@ mod meta;
 mod session;
 pub mod sessionfile;
 
-pub use file::{Entry, FileStatus, ReviewFile};
+pub use file::{Entry, FileStatus, Line, ReviewFile};
 pub use session::{
-    Appended, AppendedEntry, AppendedMany, Decision, Item, LineChange, Progress, Refusal, Review, Session, Status,
-    Unmatched, Unplaced,
+    Appended, AppendedEntry, AppendedMany, CurrentRun, Decision, Item, LineChange, Progress, Refusal, Review, Session,
+    Shape, Status, Unmatched, Unplaced,
 };

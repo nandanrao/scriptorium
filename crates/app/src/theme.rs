@@ -20,6 +20,10 @@ pub const WARN: Rgba = rgb_const(0xa2361f);
 pub const WARN_SOFT: Rgba = rgba_const(0xa2361f1a);
 pub const INS: Rgba = rgba_const(0x2c7a4b33);
 pub const DEL: Rgba = rgba_const(0xa2361f26);
+/// A block's BEFORE lines on the card: struck through in this red.
+pub const STRUCK: Rgba = rgb_const(0xb3261e);
+/// A block's AFTER lines on the card: this green.
+pub const ADDED: Rgba = rgb_const(0x1f6e3f);
 
 const fn rgb_const(hex: u32) -> Rgba {
     rgba_const((hex << 8) | 0xff)

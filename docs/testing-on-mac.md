@@ -3,6 +3,31 @@
 Thank you for testing this. Scriptorium is an early version, so things may
 be rough. Everything you notice helps, including the small things.
 
+## What's new in 0.3.0
+
+- **Full editing.** `Return` splits a line in two, `Backspace` at the start
+  of a line joins it to the one above, and `Tab` changes a line's type
+  (Action, Character, Dialogue and so on). You can select several lines and
+  delete them, and add new lines.
+- **Paste guesses line types.** Text pasted from another app is split into
+  lines and Scriptorium guesses each line's type; `Tab` fixes a wrong guess.
+- **Copy keeps types inside Scriptorium.** Copying and pasting within
+  Scriptorium keeps each line's type. Copying to Final Draft or another app
+  gives plain text only.
+- **Finish a suggestion's rewrite faster.** While rewriting a suggestion's
+  line (`E`), press `Cmd+Return` to save it (`Esc` puts it back).
+- **Bigger suggestions.** A suggestion can now change several lines at once:
+  cut lines, add lines, or rework a whole passage. The card shows what
+  happens: red struck-through text goes, green text is new. The script view
+  keeps its dots.
+- **Lines you changed under a suggestion.** If you removed or split a line
+  that a suggestion was about, the card says "line removed", "line
+  changed" or "line cut" (a suggestion you had decided whose lines were later
+  removed).
+
+Because 0.3.0 can now add and remove lines, please do the checks in
+section 8 before relying on it.
+
 ## 1. Download and install
 
 1. Double-click `Scriptorium-<version>-mac.zip` to unzip it. You'll get
@@ -36,11 +61,11 @@ Then open Scriptorium as usual.
    **File › Add review…** to add it, or drag it onto the window. You can add
    more than one. Reviews made by Claude (section 7) appear by themselves, so
    you don't need this for those.
-3. You can also drag files onto the window.
 
 The sidebar switches between your plain script and each review. A review
 lists its suggested changes, one card at a time. Click in the script to edit
-the text of a line yourself; press `Esc` to go back to the card.
+the script yourself (change text, split or join lines, add or remove lines,
+change a line's type); press `Esc` to go back to the card.
 
 Next time you open the script, its reviews come back by themselves.
 
@@ -67,9 +92,13 @@ On a review card:
 | `1` `2` `3` | Pick option 1, 2 or 3 |
 | `Tab` / `Shift+Tab` | Next / previous option |
 | `R` | Keep mine |
-| `E` | Rewrite the line yourself (`Return` saves, `Esc` puts it back) |
+| `E` | Rewrite the line yourself (`Cmd+Return` saves, `Esc` puts it back) |
 | `J` / `K` (or down / up arrow) | Next / previous change |
 | `U` / `Shift+U` | Undo / redo a decision |
+
+While editing the script: `Return` splits a line, `Backspace` at the start of
+a line joins it to the one above, `Tab` changes the line's type. Lines inside
+dual dialogue can be edited, but not split, joined or removed.
 
 While editing text, the usual Mac keys work: `Option+←/→` jumps a word,
 `Cmd+←/→` goes to the start or end of the line, `Cmd+↑/↓` to the start or end
@@ -169,6 +198,55 @@ Scriptorium version. Don't send the `.scriptorium.set-aside-*.json` or
 
 Claude Desktop and Cowork: when your version supports plugins, add the
 `scriptorium-plugin` folder in its plugin settings.
+
+## 8. Checking files in Final Draft (please do this before relying on 0.3.0)
+
+0.3.0 can add, remove, split and join lines, so the `.fdx` it writes needs
+checking in Final Draft. **Work on a copy of a script, never your only copy.**
+Take a screenshot of each result.
+
+1. Open the copy in Scriptorium and save (`Cmd+S`) without changing anything.
+   Open the new `(scriptorium).fdx` in Final Draft. It should look identical
+   to the original.
+2. Back in Scriptorium, on the copy, do each of these:
+   - add a new scene (a scene heading, an action line, a character, a line of
+     dialogue);
+   - delete a whole scene, including its heading;
+   - split an action paragraph (put the cursor in the middle, press `Return`);
+   - join two dialogue lines (`Backspace` at the start of the second);
+   - change an action line to dialogue (`Tab`);
+   - put a word in italics in one of the new lines.
+
+   Save (`Cmd+S`).
+3. Open the saved `.fdx` in Final Draft. Look for:
+   - new lines have the right font, indents and capitals;
+   - scene numbers run on with no gaps and no repeats;
+   - page count and page breaks look right;
+   - the italic word is still italic;
+   - the title page, headers and Navigator are fine;
+   - inserted lines have the same indents and spacing as other lines of the
+     same type;
+   - with revision colours turned on, the new and edited text looks normal
+     (not odd colours or marks);
+   - an Action line you changed to Character now shows in capitals with the
+     Character indent;
+   - a numbered Scene Heading you changed to Action has lost its scene number
+     and summary; an Action you changed to a Scene Heading gets a number from
+     Final Draft;
+   - a new empty line opens cleanly: no error, no stray characters;
+   - if you have a script saved with Windows line endings (skip if unsure; ask whoever sent
+     it), it should come back the same after step 1, and Final
+     Draft should open it after step 2.
+4. Save in Final Draft, then open that file in Scriptorium. The text should
+   match and there should be no warning.
+5. Copy three lines from Final Draft and paste them into Scriptorium; note any
+   line that gets the wrong type. Then copy three lines from Scriptorium and
+   paste them into Final Draft; note what you see (plain text is expected).
+6. If you have a script with dual dialogue: editing the text inside it should
+   work, and trying to delete a line inside it should be refused with a clear
+   message.
+
+Note anything that looks different and send a screenshot.
 
 ---
 

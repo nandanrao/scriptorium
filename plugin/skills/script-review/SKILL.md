@@ -1,6 +1,6 @@
 ---
 name: script-review
-description: Reviewing or revising a screenplay (Final Draft .fdx) with Scriptorium — proposing line changes for the writer to decide, a dialogue or grammar pass, checking a review's progress, or applying decisions. Use whenever the user asks for fixes, changes or a pass on their script.
+description: Reviewing or revising a screenplay (Final Draft .fdx) with Scriptorium — proposing changes for the writer to decide, a dialogue or grammar pass, checking a review's progress, or applying decisions. Use whenever the user asks for fixes, changes or a pass on their script.
 ---
 
 # Reviewing a screenplay with Scriptorium
@@ -29,8 +29,15 @@ propose anything.
    and that they can open the script in the Scriptorium app to decide; it
    picks up your changes as they happen.
 
-Change what the pass is about and nothing else; keep the writer's voice. One
-suggestion per line per review.
+Change what the pass is about and nothing else; keep the writer's voice.
+
+Use the smallest unit the writer can judge on its own: one line when one line
+changes (`paragraph_id`, options as strings). Group lines that only make sense
+together (a cue and its dialogue, an exchange, a beat) into one suggestion with
+`paragraph_ids` (every id of the lines, consecutive); the writer takes it whole, and
+each option is a list of `{kind, text}` lines. Use `insert_after` to add lines;
+an option `[]` cuts them. At most 3 options and 40 lines a side; a line is
+in at most one suggestion per review.
 
 ## When the writer asks you to decide or edit
 

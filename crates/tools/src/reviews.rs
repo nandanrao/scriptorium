@@ -4,11 +4,12 @@ use std::collections::HashMap;
 
 use scriptorium_core::outline::annotate;
 use scriptorium_core::{Document, ParaId};
-use scriptorium_review::{Item, Session, Status};
+use scriptorium_review::{Item, Line, Session, Status};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::args::Args;
+use crate::suggest::shape_name;
 use crate::{Ctx, ToolError};
 
 pub(crate) fn list_reviews(ctx: &Ctx, summary: bool) -> String {
@@ -161,34 +162,62 @@ fn pick_review(ctx: &Ctx, which: Option<&str>) -> Result<usize, ToolError> {
 }
 
 #[derive(Serialize)]
-struct SuggestionRow {
+pub struct SuggestionRow {
     /// Number in this listing (1-based, by position in the script); what `decide` takes.
-    n: usize,
+    pub n: usize,
     /// Stable position of the entry in the review file (0-based).
-    entry: usize,
-    paragraph: u64,
-    kind: String,
-    scene: String,
-    speaker: String,
-    status: String,
+    pub entry: usize,
+    /// The first line (a block's first; for an addition, the line it adds after).
+    pub paragraph: u64,
+    /// Every line it covers now ([`Session::live_run`]): a block's run, an
+    /// addition's anchor (and once accepted the added lines); empty for a
+    /// block whose lines are gone (cut).
+    pub paragraph_ids: Vec<u64>,
+    /// `line`, `block` or `insert`.
+    pub shape: &'static str,
+    pub kind: String,
+    pub scene: String,
+    pub speaker: String,
+    pub status: String,
     /// Pending, but the line changed since the suggestion was written.
-    outdated: bool,
+    pub outdated: bool,
     /// How the line was changed structurally since ("line removed", "line
     /// cut", "line split", "line joined with the next", "line retyped");
     /// absent if not.
     #[serde(skip_serializing_if = "Option::is_none")]
-    line: Option<&'static str>,
-    fuzzy: bool,
-    current: String,
-    before: String,
-    options: Vec<String>,
-    why: String,
+    pub line: Option<&'static str>,
+    pub fuzzy: bool,
+    /// What its lines read now: for a line suggestion the text, for a block
+    /// the lines as `[{kind, text}]` (`[]` once cut).
+    pub current: Value,
+    /// What it was made against: a string for a line suggestion, `[{kind,
+    /// text}]` for a block.
+    pub before: Value,
+    /// Strings for a line suggestion; for a block, each option as `[{kind,
+    /// text}]` (`[]` is a cut; an addition's options start with its anchor).
+    pub options: Value,
+    pub why: String,
+}
+
+/// Lines as `[{kind, text}]`.
+fn typed(lines: &[Line]) -> Value {
+    Value::Array(
+        lines
+            .iter()
+            .map(|l| json!({ "kind": l.kind.as_ref().map(|k| k.name()).unwrap_or_default(), "text": l.text }))
+            .collect(),
+    )
 }
 
 pub(crate) fn list_suggestions(ctx: &Ctx, a: &Args) -> Result<String, ToolError> {
     let r = pick_review(ctx, a.opt_str("review")?)?;
     let pending_only = a.bool("pending_only")?;
-    let (doc, session) = (ctx.doc, ctx.session);
+    let rows = suggestion_rows(ctx.doc, ctx.session, r, pending_only);
+    Ok(serde_json::to_string_pretty(&rows).expect("rows serialize"))
+}
+
+/// Review `r`'s suggestions as rows, sorted by number (what `list_suggestions` returns).
+pub fn suggestion_rows(doc: &Document, session: &Session, r: usize, pending_only: bool) -> Vec<SuggestionRow> {
     let cx = annotate(doc.script());
     let items = &session.reviews[r].items;
     let numbers = item_numbers(doc, items);
@@ -200,10 +229,21 @@ pub(crate) fn list_suggestions(ctx: &Ctx, a: &Args) -> Result<String, ToolError>
             let ix = doc.index_of(it.para);
             let p = ix.map(|ix| &doc.paragraphs()[ix]);
             let c = ix.map(|ix| &cx[ix]);
+            let (current, before, options) = if it.block {
+                (
+                    typed(&session.mine(doc, r, i)),
+                    typed(&it.before_lines),
+                    Value::Array(it.option_lines.iter().map(|o| typed(o)).collect()),
+                )
+            } else {
+                (json!(p.map(|p| p.text()).unwrap_or_default()), json!(it.before), json!(it.options))
+            };
             SuggestionRow {
                 n: numbers[i],
                 entry: it.entry,
                 paragraph: it.para.0,
+                paragraph_ids: session.live_run(doc, r, i).iter().map(|p| p.0).collect(),
+                shape: shape_name(it),
                 kind: p.map(|p| p.kind.name().to_string()).unwrap_or_default(),
                 scene: c.map(|c| c.scene.clone()).unwrap_or_default(),
                 speaker: c.map(|c| c.speaker.clone()).unwrap_or_default(),
@@ -211,13 +251,13 @@ pub(crate) fn list_suggestions(ctx: &Ctx, a: &Args) -> Result<String, ToolError>
                 outdated: session.is_outdated(doc, r, i),
                 line: session.line_label(doc, r, i),
                 fuzzy: it.fuzzy,
-                current: p.map(|p| p.text()).unwrap_or_default(),
-                before: it.before.clone(),
-                options: it.options.clone(),
+                current,
+                before,
+                options,
                 why: it.why.clone(),
             }
         })
         .collect();
     rows.sort_by_key(|row| row.n);
-    Ok(serde_json::to_string_pretty(&rows).expect("rows serialize"))
+    rows
 }

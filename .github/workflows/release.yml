@@ -99,4 +99,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             "${{ steps.zip.outputs.zip }}" "${{ steps.plugin.outputs.zip }}" \
             --title "Scriptorium $GITHUB_REF_NAME" \
-            --notes "Unsigned (ad-hoc) macOS build, macOS 13+. First launch: see docs/testing-on-mac.md (it covers the xattr quarantine step)."
+            --notes "Unsigned (ad-hoc) macOS build, macOS 13+. First launch: see docs/testing-on-mac.md (it covers the xattr quarantine step). New: full editing; multi-line suggestions (cut, add, rework; red/green card, dots in the script); Cmd+Return saves a rewrite. Check written .fdx files in Final Draft first (testing-on-mac.md section 8); work on a copy. Sharing a folder needs the same Scriptorium version."

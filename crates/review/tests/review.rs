@@ -4,7 +4,7 @@
 use scriptorium_core::{Document, ParaId, Selection};
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::matching::{Para, match_entries};
-use scriptorium_review::{Decision, Entry, FileStatus, Review, ReviewFile, Session, Status};
+use scriptorium_review::{Decision, Entry, FileStatus, Line, Review, ReviewFile, Session, Status};
 
 fn para(kind: &str, runs: &[&str]) -> String {
     let runs: Vec<String> = runs
@@ -57,7 +57,7 @@ AFTER: She says \"hello\" to everybody & leaves.
 ";
 
 fn e(before: &str, options: &[&str]) -> Entry {
-    Entry { before: before.into(), options: options.iter().map(|s| s.to_string()).collect(), ..Entry::default() }
+    Entry::single(before, options)
 }
 
 /// (index, fuzzy, options, option_src) per entry.
@@ -222,7 +222,7 @@ fn save_progress_round_trips_through_open() {
     s.decide(&mut doc, sel(), 0, 2, Decision::Rewrite("She leaves.".into())).unwrap();
     let saved = s.save_progress(&doc, 0);
     let f = ReviewFile::parse(&saved);
-    let statuses: Vec<_> = f.entries.iter().map(|e| (e.status, e.chosen, e.mine.clone())).collect();
+    let statuses: Vec<_> = f.entries.iter().map(|e| (e.status, e.chosen, e.mine.as_deref().map(Line::join))).collect();
     assert_eq!(
         statuses,
         [
@@ -232,7 +232,7 @@ fn save_progress_round_trips_through_open() {
             (FileStatus::Rewritten, None, Some("She leaves.".into())),
         ]
     );
-    assert_eq!(f.entries[2].before, "Not in this script.");
+    assert_eq!(Line::join(&f.entries[2].before), "Not in this script.");
 
     let (_, s2, doc2) = open(&saved, "sample.fdx");
     assert_eq!(s2.reviews[0].restored(), 2);

@@ -6,7 +6,7 @@ use scriptorium_core::{Document, ParaId, Selection};
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::file::{append_block, insert_id};
 use scriptorium_review::sessionfile::{self, Resumed};
-use scriptorium_review::{Decision, Entry, FileStatus, Review, ReviewFile, Session, Status};
+use scriptorium_review::{Decision, Entry, FileStatus, Line, Review, ReviewFile, Session, Status};
 
 const V2_FDX: &str = include_str!("fixtures/v2/sample.fdx");
 const V2_REVIEW: &str = include_str!("fixtures/v2/a.review.txt");
@@ -77,7 +77,7 @@ fn fdx() -> FdxFile {
 }
 
 fn entry(before: &str, options: &[&str]) -> Entry {
-    Entry { before: before.into(), options: options.iter().map(|s| s.to_string()).collect(), ..Entry::default() }
+    Entry::single(before, options)
 }
 
 /// Entries in file order (not script order): truco (¶4), go (¶3), thanks (¶6).
@@ -141,23 +141,23 @@ fn header_less_file_keeps_hash_id() {
 #[test]
 fn para_field_round_trips() {
     let file = ReviewFile::parse("---\nBEFORE: a\nPARA: 341\nAFTER: b\n---\nBEFORE: c\nPARA: x\nAFTER: d\n");
-    assert_eq!(file.entries[0].para, Some(ParaId(341)));
+    assert_eq!(file.entries[0].para, [ParaId(341)]);
     assert_eq!(file.entries[0].mine, None, "PARA has its own slot");
-    assert_eq!(file.entries[1].para, None);
+    assert!(file.entries[1].para.is_empty());
     assert_eq!(file.warnings.len(), 1);
     let text = file.serialize();
     assert!(text.contains("BEFORE: a\nPARA: 341\nAFTER: b\n"), "{text}");
 
     // Only `PARA:` in capitals: a wrapped Spanish line starting "Para:" is text.
     let es = ReviewFile::parse("---\nBEFORE: Lo dice\nPara: todos.\nAFTER: Lo dice para todos.\n");
-    assert_eq!(es.entries[0].before, "Lo dice Para: todos.");
-    assert_eq!(es.entries[0].para, None);
+    assert_eq!(es.entries[0].before, [Line::untyped("Lo dice Para: todos.")]);
+    assert!(es.entries[0].para.is_empty());
     assert_eq!(ReviewFile::parse(&text).entries, file.entries);
 }
 
 #[test]
 fn append_to_headerless_file_inserts_id_keeps_comments() {
-    let e = Entry { para: Some(ParaId(7)), why: "agreement".into(), ..entry("She say hello.", &["She says hello."]) };
+    let e = Entry { para: vec![ParaId(7)], why: "agreement".into(), ..entry("She say hello.", &["She says hello."]) };
     let out = append_block(HEADERLESS, &e, "abc123");
     let expected_head = "SCRIPT REVIEW v1\nScript: sample.fdx\nId: abc123\n\n# from the chat\n";
     assert!(out.starts_with(expected_head), "{out}");
@@ -273,7 +273,10 @@ fn save_progress_keeps_file_order() {
     let out = o.session.save_progress(&o.doc, 0);
     let file = ReviewFile::parse(&out);
     assert_eq!(file.id, Some(o.session.reviews[0].id.clone()));
-    let got: Vec<_> = file.entries.iter().map(|e| (e.before.as_str(), e.status, e.mine.as_deref())).collect();
+    let mines: Vec<Option<String>> = file.entries.iter().map(|e| e.mine.as_deref().map(Line::join)).collect();
+    let befores: Vec<String> = file.entries.iter().map(|e| Line::join(&e.before)).collect();
+    let got: Vec<_> =
+        file.entries.iter().enumerate().map(|(i, e)| (befores[i].as_str(), e.status, mines[i].as_deref())).collect();
     assert_eq!(
         got,
         [

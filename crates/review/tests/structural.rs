@@ -165,7 +165,7 @@ fn decided_line_removed_is_rewritten_with_mine_cut() {
             let e = progress_entry(o, p);
             assert_eq!(
                 (e.status, e.mine.as_deref()),
-                (FileStatus::Rewritten, Some("[cut]")),
+                (FileStatus::Rewritten, Some([].as_slice())),
                 "¶{p}: never an empty MINE"
             );
             assert_eq!(o.session.status_label(&o.doc, 0, item(o, p)), "line cut");
@@ -312,12 +312,7 @@ fn suggestion_on_an_added_line_survives_its_removal_and_reopening() {
             Ok((Selection::cursor(Pos::new(id, 0)), id))
         })
         .unwrap();
-    let entry = Entry {
-        before: "Cesar laughs.".into(),
-        para: Some(new),
-        options: vec!["César laughs.".into()],
-        ..Entry::default()
-    };
+    let entry = Entry { para: vec![new], ..Entry::single("Cesar laughs.", ["César laughs."]) };
     let caps = |_: &ElementKind| false;
     let added = o.session.append_entry(&o.doc, 0, entry, caps).unwrap();
     let i = added.item.unwrap();

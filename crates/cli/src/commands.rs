@@ -20,11 +20,11 @@ use scriptorium_core::outline::annotate;
 use scriptorium_core::text::looks_same;
 use scriptorium_core::{ElementKind, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
-use scriptorium_review::file::{FORMAT_HEADER, append_block, insert_id};
+use scriptorium_review::file::{Case, FORMAT_HEADER, append_block, insert_id, parse_typed_lines};
 use scriptorium_review::matching::{Para, match_entries};
 use scriptorium_review::sessionfile::{self, SessionFile};
-use scriptorium_review::{Decision, Entry, Review, Session, Status, Unplaced};
-use scriptorium_tools::{Ctx, Outcome, Target, item_numbered, item_numbers};
+use scriptorium_review::{Decision, Entry, Line, Review, Session, Shape, Status, Unplaced};
+use scriptorium_tools::{Ctx, Outcome, Spot, Target, block_entry, item_numbered, item_numbers, suggestion_rows};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -63,7 +63,9 @@ REVIEWING
   scriptorium decide <script.fdx> [<review>] <n> accept [<option>]
   scriptorium decide <script.fdx> [<review>] <n> keep | undecide
   scriptorium decide <script.fdx> [<review>] <n> rewrite <text>
-        decide suggestion n (option numbers start at 1); n can also be
+  scriptorium decide <script.fdx> [<review>] <n> --rewrite-block '<TYPE: text lines>'
+        decide suggestion n (option numbers start at 1; --rewrite-block
+        replaces a block's lines, '' or '[cut]' cuts them); n can also be
         e<entry>, the suggestion's stable place in the review file
         (`entry` in `tool ... list_suggestions`)
   scriptorium edit <script.fdx> <paragraph id> <text> [-r <review.txt>]...
@@ -72,8 +74,17 @@ REVIEWING
   scriptorium redo <script.fdx> [-r <review.txt>]...
   scriptorium suggest <review.txt> <script.fdx> (--para <id> | --before <text>)
                       --after <text> [--after <text>]... [--why <text>]
+  scriptorium suggest <review.txt> <script.fdx>
+                      (--para <id> | --paras <a>-<b> | --paras <a>,<b>,... | --insert-after <id>)
+                      --block '<TYPE: text>\n<TYPE: text>...' [--block ...]... [--why <text>]
         add a suggestion to a review file (created if missing); checks that
-        the line exists and that the change would be visible
+        the lines exist and that the change would be visible. --after gives
+        one line's new text; each --block is one option replacing every
+        target line (--paras a-b: from a to b in script order; a,b,c: exactly
+        those), --block '' or '[cut]' cuts them; with --insert-after each
+        --block is the lines to add after that line. At most 3 options and
+        40 lines a side. Lines that go together (a cue and its dialogue, an
+        exchange) belong in one suggestion
   scriptorium progress <script.fdx> [<review>] [-o <file>]
         the review file with every decision written in (STATUS/CHOSEN/MINE),
         to hand on or continue elsewhere; stdout unless -o
@@ -375,26 +386,12 @@ fn summary(o: &Opened) -> String {
     out
 }
 
-#[derive(Serialize)]
-struct SuggestionRow {
-    n: usize,
-    paragraph: u64,
-    kind: String,
-    scene: String,
-    speaker: String,
-    status: String,
-    /// Pending, but the line changed since the suggestion was written.
-    outdated: bool,
-    /// How the line was changed structurally since ("line removed", "line
-    /// cut", "line split", "line joined with the next", "line retyped");
-    /// absent if not.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    line: Option<&'static str>,
-    fuzzy: bool,
-    current: String,
-    before: String,
-    options: Vec<String>,
-    why: String,
+/// `TYPE: text` for each `{kind, text}` line of `lines`, indented by `pad`.
+fn typed_text(out: &mut String, lines: &Value, pad: &str) {
+    for l in lines.as_array().into_iter().flatten() {
+        let kind = l["kind"].as_str().unwrap_or_default().to_uppercase();
+        let _ = writeln!(out, "{pad}{kind}: {}", l["text"].as_str().unwrap_or_default());
+    }
 }
 
 fn suggestions(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
@@ -411,34 +408,7 @@ fn suggestions(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<S
         }
     }
     let (o, r) = Opened::open_one(script, file, pick, true, notes)?;
-    let ctx = annotate(o.doc.script());
-    let items = &o.session.reviews[r].items;
-    let numbers = item_numbers(&o.doc, items);
-    let mut rows: Vec<SuggestionRow> = items
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !pending_only || o.session.status(&o.doc, r, *i) == Status::Pending)
-        .map(|(i, it)| {
-            let ix = o.doc.index_of(it.para);
-            let (p, c) = (ix.map(|ix| &o.doc.paragraphs()[ix]), ix.map(|ix| &ctx[ix]));
-            SuggestionRow {
-                n: numbers[i],
-                paragraph: it.para.0,
-                kind: p.map(|p| p.kind.name().to_string()).unwrap_or_default(),
-                scene: c.map(|c| c.scene.clone()).unwrap_or_default(),
-                speaker: c.map(|c| c.speaker.clone()).unwrap_or_default(),
-                status: o.session.status_label(&o.doc, r, i),
-                outdated: o.session.is_outdated(&o.doc, r, i),
-                line: o.session.line_label(&o.doc, r, i),
-                fuzzy: it.fuzzy,
-                current: o.text(it.para),
-                before: it.before.clone(),
-                options: it.options.clone(),
-                why: it.why.clone(),
-            }
-        })
-        .collect();
-    rows.sort_by_key(|row| row.n);
+    let rows = suggestion_rows(&o.doc, &o.session, r, pending_only);
     if json {
         return Ok(serde_json::to_string_pretty(&rows).expect("rows serialize") + "\n");
     }
@@ -453,14 +423,46 @@ fn suggestions(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<S
             None => String::new(),
         };
         let flags = changed + if r.fuzzy { " (matched approximately)" } else { "" };
-        let _ = writeln!(out, "#{} ¶{} {}{flags}", r.n, r.paragraph, r.status);
-        if matches!(r.line, Some("line removed" | "line cut")) {
-            let _ = writeln!(out, "  was: {}", r.before);
+        let block = r.shape != "line";
+        let place = match r.paragraph_ids.as_slice() {
+            [a, .., b] if block => format!("¶{a}–¶{b}"),
+            _ => format!("¶{}", r.paragraph),
+        };
+        let all_cuts = r
+            .options
+            .as_array()
+            .is_some_and(|o| !o.is_empty() && o.iter().all(|o| o.as_array().is_some_and(Vec::is_empty)));
+        let shape = match (block, all_cuts) {
+            (false, _) => String::new(),
+            (true, true) => " cut".to_string(),
+            (true, false) => format!(" {}", r.shape),
+        };
+        let _ = writeln!(out, "#{} {place}{shape} {}{flags}", r.n, r.status);
+        if block {
+            if matches!(r.line, Some("line removed" | "line cut")) {
+                let _ = writeln!(out, "  was:");
+                typed_text(&mut out, &r.before, "    ");
+            } else {
+                let _ = writeln!(out, "  now:");
+                typed_text(&mut out, &r.current, "    ");
+            }
+            for (k, opt) in r.options.as_array().into_iter().flatten().enumerate() {
+                let _ = writeln!(out, "  {}:", k + 1);
+                if opt.as_array().is_some_and(Vec::is_empty) {
+                    let _ = writeln!(out, "    [cut]");
+                }
+                typed_text(&mut out, opt, "    ");
+            }
         } else {
-            let _ = writeln!(out, "  now: {}", r.current);
-        }
-        for (k, opt) in r.options.iter().enumerate() {
-            let _ = writeln!(out, "  {}: {opt}", k + 1);
+            let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+            if matches!(r.line, Some("line removed" | "line cut")) {
+                let _ = writeln!(out, "  was: {}", text(&r.before));
+            } else {
+                let _ = writeln!(out, "  now: {}", text(&r.current));
+            }
+            for (k, opt) in r.options.as_array().into_iter().flatten().enumerate() {
+                let _ = writeln!(out, "  {}: {}", k + 1, text(opt));
+            }
         }
         if !r.why.is_empty() {
             let _ = writeln!(out, "  why: {}", r.why);
@@ -502,6 +504,9 @@ pub enum Choice {
     Keep,
     /// Replace the line with this text.
     Rewrite(String),
+    /// Replace a block's lines with these (`[]` cuts them); untyped lines
+    /// take the kind of the line in their place.
+    RewriteBlock(Vec<Line>),
     /// Take the decision back.
     Undecide,
 }
@@ -522,7 +527,12 @@ fn decide_command(script: &str, args: &[&str], notes: &mut Vec<String>) -> Resul
         ["keep"] => Choice::Keep,
         ["undecide"] => Choice::Undecide,
         ["rewrite", text] => Choice::Rewrite(text.to_string()),
-        _ => return Err(format!("decide what? accept [<option>] | keep | undecide | rewrite <text>\n\n{USAGE}")),
+        ["--rewrite-block" | "rewrite-block", block] => Choice::RewriteBlock(block_lines(block)?),
+        _ => {
+            return Err(format!(
+                "decide what? accept [<option>] | keep | undecide | rewrite <text> | --rewrite-block <lines>\n\n{USAGE}"
+            ));
+        }
     };
     decide_in(script, file, pick, true, n, choice, notes)
 }
@@ -562,6 +572,11 @@ fn decide_in(
         }
     };
     let options = o.session.item(r, i).options.len();
+    if matches!(choice, Choice::Rewrite(_)) && o.session.item(r, i).block {
+        return Err("that suggestion is a block: plain text would collapse it into one line; rewrite it with \
+                    --rewrite-block '<TYPE: text lines>' (MCP: `lines`)"
+            .into());
+    }
     let d = match choice {
         Choice::Accept(None) => Decision::Accept(0),
         Choice::Accept(Some(k)) if (1..=options).contains(&k) => Decision::Accept(k - 1),
@@ -569,19 +584,43 @@ fn decide_in(
         Choice::Keep => Decision::KeepMine,
         Choice::Undecide => Decision::Undecided,
         Choice::Rewrite(text) => Decision::Rewrite(text),
+        Choice::RewriteBlock(lines) => {
+            if !o.session.item(r, i).block && lines.len() != 1 {
+                return Err("that suggestion is for one line: rewrite it with one line (or `rewrite <text>`)".into());
+            }
+            Decision::RewriteLines(lines)
+        }
     };
     let n = item_numbers(&o.doc, &o.session.reviews[r].items)[i];
-    o.session.check(&o.doc, r, i, &d).map_err(|e| format!("#{n}: {}", e.message(&rewrite_hint(n))))?;
+    let hint = rewrite_hint(n, o.session.item(r, i).block);
+    o.session.check(&o.doc, r, i, &d).map_err(|e| format!("#{n}: {}", e.message(&hint)))?;
     let sel = o.sel();
     o.session.decide(&mut o.doc, sel, r, i, d).map_err(|e| e.to_string())?;
     o.save()?;
     let item = o.session.item(r, i);
-    Ok(format!("#{n} {}: {}\n", o.session.status_label(&o.doc, r, i), o.text(item.para)))
+    let status = o.session.status_label(&o.doc, r, i);
+    if item.block {
+        let mut out = format!("#{n} {status}:\n");
+        let lines = o.session.mine(&o.doc, r, i);
+        if lines.is_empty() {
+            out.push_str("  [cut]\n");
+        }
+        for (id, l) in o.session.live_run(&o.doc, r, i).iter().zip(&lines) {
+            let kind = l.kind.as_ref().map(|k| k.name().to_uppercase()).unwrap_or_default();
+            let _ = writeln!(out, "  ¶{} {kind}: {}", id.0, l.text);
+        }
+        return Ok(out);
+    }
+    Ok(format!("#{n} {status}: {}\n", o.text(item.para)))
 }
 
 /// How the CLI tells someone to rewrite suggestion `n` (see [`scriptorium_review::Refusal::message`]).
-fn rewrite_hint(n: usize) -> String {
-    format!("use decide {n} rewrite <text>")
+fn rewrite_hint(n: usize, block: bool) -> String {
+    if block {
+        format!("use decide {n} --rewrite-block '<TYPE: text lines>'")
+    } else {
+        format!("use decide {n} rewrite <text>")
+    }
 }
 
 /// Replace paragraph `para`'s whole text, and save. `reviews` (paths from the
@@ -619,22 +658,63 @@ pub fn undo_redo(script: &str, redo: bool, reviews: &[&str], notes: &mut Vec<Str
     Ok(out)
 }
 
+/// `--block` text as lines: one `TYPE: text` per line (any case); `''` or
+/// `[cut]` is no lines (a cut).
+pub fn block_lines(block: &str) -> Result<Vec<Line>, String> {
+    if block.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    let lines = parse_typed_lines(block, Case::Any)?;
+    Ok(lines.into_iter().map(|(k, t)| Line::typed(k, t)).collect())
+}
+
+/// `--paras`: `a-b` or `a..b` (from the first to the last, in script
+/// order), or `a,b,c` (exactly these).
+fn paras_spot(spec: &str) -> Result<Spot, String> {
+    let num = |s: &str| s.trim().parse::<u64>().map_err(|_| format!("--paras: {s:?} isn't a paragraph id"));
+    if let Some((a, b)) = spec.split_once("..").or_else(|| spec.split_once('-')) {
+        return Ok(Spot::Range(num(a)?, num(b)?));
+    }
+    let ids: Vec<u64> = spec.split(',').map(num).collect::<Result<_, _>>()?;
+    Ok(Spot::List(ids))
+}
+
 fn suggest(review: &str, script: &str, rest: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     let (mut para, mut before, mut after, mut why) = (None, None, vec![], String::new());
+    let (mut paras, mut insert_after, mut blocks) = (None, None, vec![]);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().map(|v| v.to_string()).ok_or(format!("{a} needs a value"));
         match *a {
             "--para" => para = Some(val()?),
             "--before" => before = Some(val()?),
+            "--paras" => paras = Some(val()?),
+            "--insert-after" => insert_after = Some(val()?),
             "--after" => after.push(val()?),
+            "--block" => blocks.push(val()?),
             "--why" => why = val()?,
             other => return Err(format!("unexpected argument {other:?}")),
         }
     }
-    if after.is_empty() {
+    let targets = [para.is_some(), before.is_some(), paras.is_some(), insert_after.is_some()];
+    if targets.iter().filter(|t| **t).count() != 1 {
+        return Err("give exactly one of --para, --before, --paras or --insert-after".into());
+    }
+    let block = !blocks.is_empty() || paras.is_some() || insert_after.is_some();
+    if block && !after.is_empty() {
+        return Err("--after is for one line (--para or --before); give the lines with --block".into());
+    }
+    if block && before.is_some() {
+        return Err("--before names one line for --after; for --block give --para, --paras or --insert-after".into());
+    }
+    if block && blocks.is_empty() {
+        return Err("give at least one --block (each one option; '' or '[cut]' cuts the lines)".into());
+    }
+    if !block && after.is_empty() {
         return Err("give at least one --after".into());
     }
+    let options: Vec<Vec<Line>> = blocks.iter().map(|b| block_lines(b)).collect::<Result<_, _>>()?;
+    let id = |s: &str, flag: &str| s.parse::<u64>().map_err(|_| format!("{flag} must be a number, got {s:?}"));
     // Matched and numbered against the live document (the saved session), as
     // every other command sees the script; the session is only saved if the
     // review file is attached (to record its new text).
@@ -642,37 +722,49 @@ fn suggest(review: &str, script: &str, rest: &[&str], notes: &mut Vec<String>) -
     let mut o = Opened::open(script, &[], notes)?;
     let fdx = &o.fdx;
     let caps = |k: &ElementKind| fdx.is_caps(k.name());
-    let p = match (para, before) {
-        (Some(id), None) => {
-            let id = ParaId(id.parse::<u64>().map_err(|_| format!("--para must be a number, got {id:?}"))?);
-            o.doc.paragraph(id).ok_or(format!("no paragraph {} (see `scriptorium dump`)", id.0))?.clone()
-        }
-        (None, Some(b)) => {
-            let texts: Vec<String> = o.doc.paragraphs().iter().map(|p| p.text()).collect();
-            let paras: Vec<Para> = o
-                .doc
-                .paragraphs()
-                .iter()
-                .zip(&texts)
-                .map(|(p, t)| Para { id: p.id, text: t, editable: p.kind.is_editable(), caps: caps(&p.kind) })
-                .collect();
-            let probe = Entry { before: b.clone(), options: after.clone(), ..Entry::default() };
-            match match_entries(&paras, &[probe]).pop().flatten() {
-                Some(m) => o.doc.paragraphs()[m.index].clone(),
-                None => return Err(format!("no line in the script matches {b:?}")),
+    let entry = if block {
+        let spot = match (&para, &paras, &insert_after) {
+            (Some(p), _, _) => Spot::Para(id(p, "--para")?),
+            (_, Some(spec), _) => paras_spot(spec)?,
+            (_, _, Some(a)) => Spot::InsertAfter(id(a, "--insert-after")?),
+            _ => unreachable!("one target checked above"),
+        };
+        block_entry(&o.doc, &caps, &spot, options, &why)?
+    } else {
+        let p = match (para, before) {
+            (Some(p), None) => {
+                let id = ParaId(id(&p, "--para")?);
+                o.doc.paragraph(id).ok_or(format!("no paragraph {} (see `scriptorium dump`)", id.0))?.clone()
             }
+            (None, Some(b)) => {
+                let texts: Vec<String> = o.doc.paragraphs().iter().map(|p| p.text()).collect();
+                let paras: Vec<Para> = o
+                    .doc
+                    .paragraphs()
+                    .iter()
+                    .zip(&texts)
+                    .map(|(p, t)| Para { id: p.id, text: t, editable: p.kind.is_editable(), caps: caps(&p.kind) })
+                    .collect();
+                let probe = Entry::single(&b, &after);
+                match match_entries(&paras, &[probe]).pop().flatten() {
+                    Some(m) => o.doc.paragraphs()[m.index].clone(),
+                    None => return Err(format!("no line in the script matches {b:?}")),
+                }
+            }
+            _ => unreachable!("one target checked above"),
+        };
+        let text = p.text();
+        if !p.kind.is_editable() {
+            return Err(format!("paragraph {} ({}) isn't reviewable", p.id.0, p.kind.name()));
         }
-        _ => return Err("give exactly one of --para or --before".into()),
+        if after.iter().all(|a| looks_same(a, &text, caps(&p.kind))) {
+            return Err("that change wouldn't be visible in Final Draft".into());
+        }
+        Entry { para: vec![p.id], why, ..Entry::single(text.trim(), &after) }
     };
-    let text = p.text();
-    if !p.kind.is_editable() {
-        return Err(format!("paragraph {} ({}) isn't reviewable", p.id.0, p.kind.name()));
-    }
-    if after.iter().all(|a| looks_same(a, &text, caps(&p.kind))) {
-        return Err("that change wouldn't be visible in Final Draft".into());
-    }
+    let first = entry.para[0].0;
+    let ids: Vec<u64> = entry.para.iter().map(|p| p.0).collect();
     let path = Path::new(review);
-    let entry = Entry { before: text.trim().to_string(), para: Some(p.id), options: after, why, ..Entry::default() };
     let stored = path.canonicalize().ok().map(|at| sessionfile::stored_path(&o.dir, &at));
     let attached = stored.and_then(|st| o.session.reviews.iter().position(|r| r.path == st));
     // The attached review, or the file opened on its own (not attached here).
@@ -693,26 +785,38 @@ fn suggest(review: &str, script: &str, rest: &[&str], notes: &mut Vec<String>) -
         }
     };
     let session = lone.as_mut().unwrap_or(&mut o.session);
-    // Spliced onto the file (never reserialized), on exactly this paragraph.
+    // Spliced onto the file (never reserialized), on exactly these paragraphs.
     let many = session.append_entries(&o.doc, r, vec![entry], true, caps)?;
-    let result = many.results[0];
+    let result = many.results[0].clone();
     let Some(i) = result.item else {
         return Err(match result.unplaced {
             Some(Unplaced::Taken { .. }) => {
-                format!("not added: another suggestion in {review} already covers ¶{}", p.id.0)
+                format!("not added: another suggestion in {review} already covers ¶{first}")
             }
             Some(Unplaced::Invisible) => "that change wouldn't be visible in Final Draft".into(),
-            _ => format!("not added: ¶{} can't take a suggestion", p.id.0),
+            Some(Unplaced::Invalid(why)) => format!("not added: {why}"),
+            Some(Unplaced::Mismatch) if block => {
+                format!("not added: ¶{first}… changed meanwhile; read them again (`scriptorium dump`)")
+            }
+            _ => format!("not added: ¶{first} can't take a suggestion"),
         });
     };
     // Numbered as `suggestions` and `decide` will, by position in the script.
     let n = item_numbers(&o.doc, &session.reviews[r].items)[i];
+    let item = &session.reviews[r].items[i];
+    let place = match (block, item.shape(0), ids.as_slice()) {
+        (false, ..) => format!("¶{first}"),
+        (true, Shape::Add { after, .. }, _) => format!("e{}, after ¶{}", item.entry, after.0),
+        (true, _, [one]) => format!("e{}, ¶{one}", item.entry),
+        (true, _, [a, .., b]) => format!("e{}, ¶{a}–¶{b}", item.entry),
+        (true, _, []) => format!("e{}", item.entry),
+    };
     let is_lone = lone.is_some();
     o.write_review(path, &many.file_text).map_err(|e| format!("{review}: {e}"))?;
     if !is_lone {
         o.save()?;
     }
-    Ok(format!("added suggestion #{n} (¶{}) to {review}\n", p.id.0))
+    Ok(format!("added suggestion #{n} ({place}) to {review}\n"))
 }
 
 fn progress(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
@@ -802,7 +906,11 @@ pub fn apply(
                     Err(e) => {
                         let n = numbers[i];
                         let name = &o.session.reviews[r].name;
-                        let _ = writeln!(skipped, "skipped {name} #{n}: {}", e.message(&rewrite_hint(n)));
+                        let _ = writeln!(
+                            skipped,
+                            "skipped {name} #{n}: {}",
+                            e.message(&rewrite_hint(n, o.session.item(r, i).block))
+                        );
                     }
                 }
             }

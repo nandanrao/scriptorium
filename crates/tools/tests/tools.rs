@@ -3,7 +3,7 @@
 
 use scriptorium_core::{Document, ElementKind, ParaId, Selection};
 use scriptorium_fdx::FdxFile;
-use scriptorium_review::{Decision, Review, Session};
+use scriptorium_review::{Decision, Line, Review, Session};
 use scriptorium_tools::prompt::{SYSTEM, system, unknown_tools};
 use scriptorium_tools::{
     Append, Applied, Ctx, Failed, HostField, MAX_BATCH, Outcome, Proposal, Target, ToolError, add_before,
@@ -428,7 +428,7 @@ fn list_suggestions_rows() {
     assert_eq!(
         rows,
         json!([{
-            "n": 1, "entry": 0, "paragraph": 4, "kind": "Dialogue", "scene": "EXT. FARM HOUSE - NIGHT",
+            "n": 1, "entry": 0, "paragraph": 4, "paragraph_ids": [4], "shape": "line", "kind": "Dialogue", "scene": "EXT. FARM HOUSE - NIGHT",
             "speaker": "Cesar", "status": "pending", "outdated": false, "fuzzy": false,
             "current": "I am go to the town tomorrow.", "before": "I am go to the town tomorrow.",
             "options": ["I am going to town tomorrow."], "why": "verb form",
@@ -453,8 +453,11 @@ fn suggest_change_appends_to_the_default_review() {
     assert_eq!(a.target, f.own_target());
     assert!(!a.batch && a.failed.is_empty());
     let e = &a.proposals[0].entry;
-    assert_eq!((e.para, e.before.as_str(), e.why.as_str()), (Some(ParaId(1)), "Laura smiles.", "livelier"));
-    assert_eq!(e.options, ["Laura grins."]);
+    assert_eq!(
+        (e.para.as_slice(), e.before.as_slice(), e.why.as_str()),
+        ([ParaId(1)].as_slice(), [Line::untyped("Laura smiles.")].as_slice(), "livelier")
+    );
+    assert_eq!(e.options, [vec![Line::untyped("Laura grins.")]]);
 
     let applied = f.apply(0, a);
     // Numbered by position in the script: ¶1 comes before the existing
@@ -504,15 +507,18 @@ fn suggest_change_review_file_and_before() {
         json!({ "review_file": "new.review.txt", "before": "rain on the  window.", "options": ["Rain."] }),
     );
     assert_eq!(a.target, Target::File("new.review.txt".into()));
-    assert_eq!(a.proposals[0].entry.para, Some(ParaId(7)));
+    assert_eq!(a.proposals[0].entry.para, [ParaId(7)]);
     // A review_file that is attached is checked for duplicates.
     let err = f.err("suggest_change", json!({ "review_file": "a.review.txt", "paragraph_id": 4, "options": ["x"] }));
     assert!(err.starts_with("review a.review.txt already has a suggestion on ¶4 (#1, pending)"), "{err}");
     assert_eq!(
         f.err("suggest_change", json!({ "paragraph_id": 4, "before": "x", "options": ["y"] })),
-        "give exactly one of paragraph_id or before"
+        "give exactly one of paragraph_id, paragraph_ids, insert_after or before"
     );
-    assert_eq!(f.err("suggest_change", json!({ "options": ["y"] })), "give exactly one of paragraph_id or before");
+    assert_eq!(
+        f.err("suggest_change", json!({ "options": ["y"] })),
+        "give exactly one of paragraph_id, paragraph_ids or insert_after"
+    );
     assert!(
         f.err("suggest_change", json!({ "before": "Nothing like it", "options": ["y"] }))
             .starts_with("no line in the script matches")
@@ -536,7 +542,10 @@ fn suggest_change_refusals() {
     );
     assert!(err(json!({ "paragraph_id": 1, "options": ["Laura\nsmiles."] })).contains("newlines"));
     assert_eq!(err(json!({ "paragraph_id": 1, "options": ["  "] })), "options can't be empty");
-    assert_eq!(err(json!({ "paragraph_id": 1, "options": [] })), "give at least one option");
+    assert_eq!(
+        err(json!({ "paragraph_id": 1, "options": [] })),
+        "give at least one option (an option `[]` cuts the lines)"
+    );
     assert_eq!(err(json!({ "paragraph_id": 1, "options": ["a", "b", "c", "d"] })), "give at most 3 options, not 4");
     assert!(err(json!({ "paragraph_id": 1 })).contains("`options` must be a list"));
     let dup = err(json!({ "paragraph_id": 4, "options": ["Something else."] }));
@@ -549,7 +558,7 @@ fn suggest_change_refusals() {
     assert!(err(json!({ "paragraph_id": 1, "options": ["Laura\u{2029}smiles."] })).contains("newlines"));
     // One visible option among invisible ones is enough.
     let a = f.append("suggest_change", json!({ "paragraph_id": 2, "options": ["CESAR", "CARLOS"] }));
-    assert_eq!(a.proposals[0].entry.options, ["CESAR", "CARLOS"]);
+    assert_eq!(a.proposals[0].entry.options, [vec![Line::untyped("CESAR")], vec![Line::untyped("CARLOS")]]);
 }
 
 #[test]
@@ -581,7 +590,10 @@ fn suggest_changes_partial_failure() {
     assert_eq!(result["added"], 2);
     assert_eq!(
         result["suggestions"],
-        json!([{ "index": 0, "paragraph_id": 1, "n": 1, "entry": "e2" }, { "index": 2, "paragraph_id": 7, "n": 3, "entry": "e3" }])
+        json!([
+            { "index": 0, "paragraph_id": 1, "shape": "line", "n": 1, "entry": "e2" },
+            { "index": 2, "paragraph_id": 7, "shape": "line", "n": 3, "entry": "e3" },
+        ])
     );
     let failed = result["failed"].as_array().unwrap();
     assert_eq!(failed.len(), 5);
@@ -639,11 +651,11 @@ fn apply_refuses_empty_proposals() {
 #[test]
 fn add_before_relaxes_the_suggest_change_schema() {
     let mut spec = catalogue().into_iter().find(|s| s.name == "suggest_change").unwrap();
-    assert_eq!(spec.schema["required"], json!(["paragraph_id", "options"]), "the base schema requires paragraph_id");
+    assert_eq!(spec.schema["required"], json!(["options"]), "the tool checks there is exactly one target");
     add_before(&mut spec);
     assert_eq!(spec.schema["required"], json!(["options"]));
     assert_eq!(spec.schema["properties"]["before"]["type"], "string");
-    assert!(spec.description.ends_with("Give exactly one of paragraph_id or before."));
+    assert!(spec.description.ends_with("Or name one line by its text with before instead of paragraph_id."));
 }
 
 /// Two identical lines (¶2 and ¶4), an empty paragraph (¶5), and a scene
@@ -779,9 +791,9 @@ fn before_with_several_exact_matches_lists_them() {
     );
     // One exact match is used; otherwise the closest line, as review matching finds it.
     let a = f.append("suggest_change", json!({ "before": "Snow.", "options": ["Snow falls."] }));
-    assert_eq!(a.proposals[0].entry.para, Some(ParaId(8)));
+    assert_eq!(a.proposals[0].entry.para, [ParaId(8)]);
     let a = f.append("suggest_change", json!({ "before": "They leave the hall together", "options": ["They go."] }));
-    assert_eq!(a.proposals[0].entry.para, Some(ParaId(6)));
+    assert_eq!(a.proposals[0].entry.para, [ParaId(6)]);
     assert_eq!(f.err("suggest_change", json!({ "before": " ", "options": ["Go."] })), "`before` is empty");
 }
 
@@ -823,7 +835,7 @@ fn before_with_several_fuzzy_candidates_is_ambiguous_however_far_apart() {
     );
     // A single exact match still wins over fuzzy candidates.
     let a = f.append("suggest_change", json!({ "before": "They leave the hall together.", "options": ["x"] }));
-    assert_eq!((a.proposals[0].entry.para, a.proposals[0].fuzzy), (Some(ParaId(6)), false));
+    assert_eq!((a.proposals[0].entry.para.as_slice(), a.proposals[0].fuzzy), ([ParaId(6)].as_slice(), false));
 }
 
 #[test]
@@ -885,7 +897,7 @@ fn before_matches_case_in_capitals_and_refuses_close_fuzzy_matches() {
     let mut f = twins();
     // Character cues show in capitals, so letter case doesn't matter there.
     let a = f.append("suggest_change", json!({ "before": "laura", "options": ["LAURA B."] }));
-    assert_eq!((a.proposals[0].entry.para, a.proposals[0].fuzzy), (Some(ParaId(1)), false));
+    assert_eq!((a.proposals[0].entry.para.as_slice(), a.proposals[0].fuzzy), ([ParaId(1)].as_slice(), false));
     // Dialogue isn't in capitals: not exact, and the two identical lines are equally close.
     assert_eq!(
         f.err("suggest_change", json!({ "before": "we should go.", "options": ["Go."] })),
@@ -926,12 +938,8 @@ fn a_line_that_now_reads_as_an_option_is_not_written() {
 #[test]
 fn an_invisible_entry_that_was_written_is_reported_ok_so_the_host_saves_it() {
     let mut f = twins();
-    let entry = scriptorium_review::Entry {
-        before: "CESAR".into(),
-        para: Some(ParaId(3)),
-        options: vec!["cesar".into()],
-        ..Default::default()
-    };
+    let entry =
+        scriptorium_review::Entry { para: vec![ParaId(3)], ..scriptorium_review::Entry::single("CESAR", ["cesar"]) };
     let a = Append {
         target: Target::Own,
         proposals: vec![Proposal { index: 0, entry, fuzzy: false }],
@@ -1024,7 +1032,7 @@ fn add_host_fields_adds_script_everywhere_and_review_file_to_suggest_tools() {
         assert_eq!(s.schema["required"][0], "script", "{name}");
         assert!(!s.schema["required"].as_array().unwrap().iter().any(|r| r == "review_file"), "{name}");
     }
-    assert_eq!(get("suggest_change").schema["required"], json!(["script", "paragraph_id", "options"]));
+    assert_eq!(get("suggest_change").schema["required"], json!(["script", "options"]));
 }
 
 #[test]

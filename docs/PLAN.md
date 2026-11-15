@@ -27,11 +27,11 @@ Living notes on direction. Update this when a decision is made or reversed.
   (Claude Code / Cowork suggest via MCP; the writer decides in the app, which
   picks up outside changes live; a session lock keeps writers from
   overwriting each other). Mac release zips: the app and the plugin.
-- **v0.3.0 scope** (user, 2026-11-15): full script editing that saves to the
+- **v0.3.0** (2026-11-15; scope from the user): full script editing that saves to the
   .fdx (add, remove, split, join lines, change a line's type), then block
   suggestions (replace N lines with M; cuts and additions) applied through the
   same edit steps as typing. Plan: [plans/block-suggestions.md](plans/block-suggestions.md)
-  (under review). No revision marks, no locked scene numbers, `[cut]` marks a
+  (built and reviewed, 2026-11-15). No revision marks, no locked scene numbers, `[cut]` marks a
   removal; the script view keeps its dots, the card shows the change.
 - **Built-in agent** (2026-11-14), plan in
   [plans/built-in-agent.md](plans/built-in-agent.md): step 0 and the agent
@@ -315,8 +315,8 @@ Known gaps:
   changes and its decisions no longer show as decisions (the text changes stay).
 - Paragraph ids are positions in the `.fdx`; paragraphs can now be added and
   removed (ids are never reused), but open question 5 still stands.
-- v0.3.0 Phase A (full editing) is built; the release waits on the Final Draft
-  hand test (checklist in `plans/block-suggestions.md`) and Phase B.
+- v0.3.0 Phases A and B are built (2026-11-15); the release asks testers to
+  check written .fdx files in Final Draft (testing-on-mac.md §8).
 - No dark theme; review keys are single letters only while the card has focus.
 - Not tried yet: macOS, Windows, a real IME in the review flow.
 

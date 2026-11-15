@@ -1,6 +1,6 @@
 # Plan: full script editing, then block suggestions
 
-Status: Phase A (A1–A7) built and reviewed; Final Draft hand test pending; Phase B next. Revised after second review round (2026-11-15). Requested by the
+Status: Phase A and Phase B built and reviewed (2026-11-15); Final Draft hand test by testers. Revised after second review round (2026-11-15). Requested by the
 user: suggestions must be able to remove and add lines and change several
 paragraphs at once. That needs a script that can be fully edited and saved
 first, so the work is two phases. Follows v0.2.0.
@@ -386,16 +386,28 @@ WHY: The exchange restates scene 11.
 
 Grammar:
 - **Block mode** starts only when `BEFORE:`/`AFTER:`/`MINE:` has an empty
-  value and the next non-empty line is indented `TYPE: text`. `TYPE` is one
+  value and the next non-empty line is `TYPE: text` (indented, or at column
+  0: a column-0 block start is allowed). `TYPE` is one
   of SCENE HEADING, ACTION, CHARACTER, PARENTHETICAL, DIALOGUE, TRANSITION,
   SHOT, GENERAL, in capitals.
 - A line indented **deeper** than the typed line continues it. An untyped
   line at the typed lines' indent is its own paragraph: allowed in BEFORE
   (matched on text only; restored to the matched paragraph's own kind, C2),
-  refused in AFTER/MINE (warning).
-- Inside a block, a field line must start at column 0 to end the block
-  (`FIELD_RE` today allows indentation, `file.rs:36`; outside block mode that
-  tolerance stays, for pasted files).
+  refused in AFTER/MINE (the entry is a placeholder). In a block whose lines
+  are not indented past the field line (column 0, or a pasted file indented
+  throughout), an untyped line can't be told from a chat-wrapped one: there
+  it always continues the line above (safer: a joined line only fails to
+  match, a stray paragraph changes the run's length).
+- A block ends where the v1 reader ends a field: at any field line, `---`
+  or code fence, at any indent, so old and new builds split a file into the
+  same entries (indented pasted files included). A field indented deeper
+  than the line that opened the block still ends it, with a warning; it is
+  never block text. Chat prose after a closing fence is not part of the block.
+- Untyped lines: a one-line untyped AFTER only when BEFORE is one line; a
+  one-line untyped MINE whatever BEFORE's length; never in an AFTER/MINE of
+  several lines. `Entry::check` states what can be written and read back;
+  code building entries refuses what fails it (e.g. `insert_after`'s
+  `[anchor, new…]` must type the anchor with its paragraph's kind).
 - `AFTER: [cut]` is the empty option (a cut), only spelled explicitly.
 - `PARA:` lists every id of the run. Repeated `AFTER:` are alternatives.
 
@@ -411,10 +423,14 @@ entry with `invalid: Some(reason)` (no item, shown in the unplaced list), so
 old and new builds count entries the same. Unparseable blocks are written
 back verbatim.
 
-**Header.** A file with any block entry is written as `SCRIPT REVIEW v2`;
-v1 files stay v1. `append_entries` (`session.rs:672`, B3's file) rewrites the header to
-v2 when it appends a block entry; that change is owned by B3, not B1. Old builds reading a v2 file lose its
-blocks (accepted).
+A v1 line entry whose `PARA:` lists several ids is not a placeholder: as
+v1 did, the `PARA:` is ignored with a warning and the entry is reviewed.
+
+**Header.** A file with any valid block entry is written as `SCRIPT REVIEW
+v2`; v1 files stay v1, and placeholders alone don't make a file v2.
+`file::append_block` (B1) rewrites the header to v2 when it appends a block
+entry, so `append_entries` (B3) gets the upgrade by calling it. Old builds
+reading a v2 file lose its blocks (accepted).
 
 ## B2. `replace_run` (`crates/core/src/doc.rs`)
 
@@ -550,7 +566,7 @@ follows from B3.
 | B1 | `Line`/`Entry`, block grammar, placeholders, v2 reader/writer | `crates/review/src/file.rs` | – | strongest |
 | B1b | migrate `Entry` callers | tools, cli, mcp, app | B1 | Sonnet |
 | B2 | `replace_run`, `restore_run`, move `FUZZY_THRESHOLD` (first, before B3) | `crates/core/src/{doc,text}.rs`, `review::matching` (constant import only) | A3 | strongest |
-| B3 | matcher, meta values, decide, status, `can_apply`, `append_entries` v2 header | `crates/review/src/{matching,session}.rs` | B1, B2, A7 | strongest |
+| B3 | matcher, meta values, decide, status, `can_apply`, `append_entries` (v2 header via `append_block`) | `crates/review/src/{matching,session}.rs` | B1, B2, A7 | strongest |
 | B4 | merged into A6 | – | – | – |
 | B5 | tool validation/schema/prompt; CLI/MCP flags | tools (+ cli/mcp) | B3 | strongest + Sonnet |
 | B6 | card, dots | `crates/app/src/script_view.rs` | B3 | Sonnet + headless smoke |

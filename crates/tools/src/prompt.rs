@@ -23,13 +23,18 @@ How to work:
   overview, script_info is cheap.
 - Use read_script only for whole-script passes: it returns the script in long parts (each part's first line \
   says how to read the next), and the app may ask the writer before sending it. Read what the task needs.
-- Propose one line per suggestion, with one to three options for the whole line (best first) and a short \
-  reason. Change what the writer asked about and nothing else; keep their voice, dialect and formatting. For a \
-  pass over many lines, send them together with suggest_changes; it reports which were added and which failed.
-- Each conversation has its own review, holding one suggestion per line. If a proposal is refused as a \
+- Use the smallest unit the writer can judge on its own: one line when one line changes. Group lines that only \
+  make sense together (a cue and its dialogue, an exchange, a beat) into one suggestion with paragraph_ids, \
+  listing every line of the run; the writer takes it whole. Use insert_after to add lines; an option `[]` \
+  cuts the lines. Give one to three options (best first) and a short reason. \
+  Change what the writer asked about and nothing else; keep their voice, dialect and \
+  formatting. For a pass over many lines, send them together with suggest_changes; it reports which were added \
+  and which failed.
+- Each conversation has its own review, where a line is in at most one suggestion. If a proposal is refused as a \
   duplicate, or the writer mentions earlier suggestions, check list_suggestions.
 - When you've finished a pass, tell the writer briefly what you proposed and that it's waiting in their \
-  review. Don't repeat the proposed text in your reply; the writer sees it in the review. Answer questions about the script directly, quoting it when useful.
+  review. Don't repeat the proposed text in your reply; the writer sees it in the review. Answer questions \
+  about the script directly, quoting it when useful.
 - Character names in Character elements display in capitals; a change that only alters their letter case \
   is invisible and will be refused.
 - Write in the language the writer writes to you in.";
@@ -40,15 +45,25 @@ pub fn system(script_name: &str) -> String {
 }
 
 /// Tool names `prompt` mentions (snake_case words) that `tools` lacks, in the
-/// order they first appear. The prompt must name only tools the agent has; a
-/// test checks [`SYSTEM`] against the catalogue.
+/// order they first appear: snake_case words that are neither a tool's name
+/// nor an argument of one (`paragraph_ids`). The prompt must name only tools
+/// the agent has; a test checks [`SYSTEM`] against the catalogue.
 pub fn unknown_tools(prompt: &str, tools: &[ToolSpec]) -> Vec<String> {
     let mut out: Vec<String> = vec![];
     for w in prompt.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
         let snake = w.contains('_') && w.trim_matches('_') == w && !w.chars().any(|c| c.is_ascii_uppercase());
-        if snake && !tools.iter().any(|t| t.name == w) && !out.iter().any(|o| o == w) {
+        let param = |t: &ToolSpec| t.schema["properties"].get(w).is_some() || item_param(t, w);
+        if snake && !tools.iter().any(|t| t.name == w || param(t)) && !out.iter().any(|o| o == w) {
             out.push(w.to_string());
         }
     }
     out
+}
+
+/// Whether `w` is an argument of the objects in one of `t`'s list arguments
+/// (`suggest_changes`' `suggestions` items).
+fn item_param(t: &ToolSpec, w: &str) -> bool {
+    t.schema["properties"]
+        .as_object()
+        .is_some_and(|props| props.values().any(|p| p["items"]["properties"].get(w).is_some()))
 }

@@ -13,6 +13,8 @@ use crate::{Ctx, ToolError};
 
 /// What `read_scene` appends to a paragraph that can't be changed.
 pub const NOT_EDITABLE: &str = " [not editable]";
+/// Ends a line inside a dual dialogue block: text changes only.
+pub const DUAL_DIALOGUE: &str = " [dual dialogue]";
 
 pub(crate) fn script_info(ctx: &Ctx) -> String {
     let script = ctx.doc.script();
@@ -117,7 +119,7 @@ impl Scenes {
 type IsCaps<'a> = &'a dyn Fn(&ElementKind) -> bool;
 
 /// One paragraph as `read_scene` lays it out, or `None` for an empty one.
-fn line(p: &Paragraph, is_caps: IsCaps) -> Option<String> {
+fn line(p: &Paragraph, fixed: bool, is_caps: IsCaps) -> Option<String> {
     let text = p.text().replace(['\r', '\n', '\u{2028}', '\u{2029}'], " ");
     let text = text.trim();
     if text.is_empty() {
@@ -126,7 +128,8 @@ fn line(p: &Paragraph, is_caps: IsCaps) -> Option<String> {
     let text = if is_caps(&p.kind) { text.to_uppercase() } else { text.to_string() };
     let body = if p.kind == ElementKind::Dialogue { format!("  {text}") } else { text };
     let mark = if p.kind.is_editable() { "" } else { NOT_EDITABLE };
-    Some(format!("¶{} {body}{mark}", p.id.0))
+    let dual = if fixed { DUAL_DIALOGUE } else { "" };
+    Some(format!("¶{} {body}{mark}{dual}", p.id.0))
 }
 
 fn render(doc: &Document, scenes: &Scenes, k: usize, is_caps: IsCaps) -> String {
@@ -138,7 +141,7 @@ fn render(doc: &Document, scenes: &Scenes, k: usize, is_caps: IsCaps) -> String 
         None => format!("BEFORE SCENE 1 (¶{first}–¶{last})"),
     };
     let mut out = head;
-    for l in paras.iter().filter_map(|p| line(p, is_caps)) {
+    for l in paras.iter().filter_map(|p| line(p, doc.script().is_fixed(p.id), is_caps)) {
         out.push('\n');
         out.push_str(&l);
     }

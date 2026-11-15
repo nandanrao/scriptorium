@@ -4,7 +4,12 @@
 pub use scriptorium_agent::ToolSpec;
 use serde_json::{Value, json};
 
+use crate::block::MAX_LINES;
 use crate::read::{MIN_READ_BUDGET, READ_BUDGET};
+
+/// The element types a suggested line can have (any case is accepted).
+pub const KINDS: [&str; 8] =
+    ["Scene Heading", "Action", "Character", "Parenthetical", "Dialogue", "Transition", "Shot", "General"];
 
 /// Default and largest page for `list_paragraphs`: a feature film has a few
 /// thousand paragraphs, far more than is useful in one result.
@@ -16,12 +21,39 @@ pub const MAX_BATCH: usize = 200;
 pub const MAX_OPTIONS: usize = 3;
 
 pub fn catalogue() -> Vec<ToolSpec> {
+    let line = json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "enum": KINDS, "description": "The element type." },
+            "text": { "type": "string", "description": "The paragraph's text. No newlines." },
+        },
+        "required": ["kind", "text"],
+        "additionalProperties": false,
+    });
     let options = json!({
-        "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_OPTIONS,
-        "description": "One to three replacement texts for the whole line, best first. No newlines.",
+        "type": "array", "minItems": 1, "maxItems": MAX_OPTIONS,
+        "items": { "anyOf": [
+            { "type": "string" },
+            { "type": "array", "maxItems": MAX_LINES, "items": line },
+        ] },
+        "description": format!(
+            "One to three options, best first. With paragraph_id, each option can be a string: the line's new \
+             text, no newlines. Otherwise each option is a list of lines [{{kind, text}}] that replaces every \
+             target line (at most {MAX_LINES}); an option `[]` cuts the lines. With insert_after, each \
+             option is just the new lines."
+        ),
     });
     let why = json!({ "type": "string", "description": "A short reason the writer will see." });
-    let paragraph_id = json!({ "type": "integer", "description": "The line to change: the number after ¶ in read_scene, or an id from list_paragraphs." });
+    let paragraph_id = json!({ "type": "integer", "description": "One line to change: the number after ¶ in read_scene, or an id from list_paragraphs." });
+    let paragraph_ids = json!({
+        "type": "array", "items": { "type": "integer" }, "minItems": 1, "maxItems": MAX_LINES,
+        "description": "Lines that only make sense together, changed as one suggestion the writer takes whole: \
+                        every id of the lines, consecutive and in script order. read_scene leaves empty lines \
+                        out: ids between two listed ones that you didn't see are refused, and the error lists them \
+                        so you can include them.",
+    });
+    let insert_after = json!({ "type": "integer", "description": "Add lines after this one (it stays as it is); the options are the new lines." });
+    let target = json!({ "paragraph_id": paragraph_id, "paragraph_ids": paragraph_ids, "insert_after": insert_after, "options": options, "why": why });
     vec![
         spec(
             "script_info",
@@ -49,7 +81,7 @@ pub fn catalogue() -> Vec<ToolSpec> {
             "One scene as the script reads now, one paragraph per line: `¶<paragraph_id> <text>`. paragraph_id is \
              the number after ¶. Elements the script shows in capitals (usually scene headings and character cues) \
              are in capitals, dialogue is indented two spaces, empty lines are left out, and lines that can't be \
-             changed end with [not editable]. Give a scene number or heading text, or a paragraph_id to get the \
+             changed end with [not editable]; lines in a dual dialogue block end with [dual dialogue] and can take text changes but not be added, removed or retyped. Give a scene number or heading text, or a paragraph_id to get the \
              scene it is in.",
             json!({
                 "scene": { "type": ["integer", "string"], "description": "Scene number (1 is the first) or part of its heading (ignoring case). A string of digits is a scene number if there is such a scene, otherwise heading text." },
@@ -82,8 +114,9 @@ pub fn catalogue() -> Vec<ToolSpec> {
         ),
         spec(
             "list_suggestions",
-            "A review's suggestions as JSON, numbered from 1 (`n`): status, the line's current text, the options, \
-             and why. `entry` is the suggestion's stable position in the review file. `outdated` means the line \
+            "A review's suggestions as JSON, numbered from 1 (`n`): status, shape (line, block or insert), the \
+             lines it covers (paragraph_ids), their current text, the options, and why; a block's before, current \
+             and options are lists of {kind, text}. `entry` is the suggestion's stable position in the review file. `outdated` means the line \
              changed after the suggestion was written. Check before proposing, to avoid duplicates.",
             json!({
                 "review": { "type": "string", "description": "An attached review's name or file. Leave out for the default review." },
@@ -93,27 +126,29 @@ pub fn catalogue() -> Vec<ToolSpec> {
         ),
         spec(
             "suggest_change",
-            "Propose a change to one line. The writer accepts an option, keeps their line, or rewrites it. Checks \
-             that the line exists and can be changed, and that the change would be visible. One suggestion per line \
-             per review.",
-            json!({ "paragraph_id": paragraph_id, "options": options, "why": why }),
-            &["paragraph_id", "options"],
+            "Propose a change: to one line (paragraph_id), to lines that go together (paragraph_ids), or new lines \
+             (insert_after); give exactly one of these. The writer accepts an option, keeps their lines, or \
+             rewrites them. Checks that the lines exist, are consecutive and can be changed, and that the change \
+             would be visible. A line is in at most one suggestion per review.",
+            target.clone(),
+            &["options"],
         ),
         spec(
             "suggest_changes",
             &format!(
-                "Propose changes to several lines at once (up to {MAX_BATCH}), checked like suggest_change and \
-                 written together. Lines that fail are reported and the rest are added: the result is \
-                 {{\"added\": n, \"suggestions\": [{{\"index\", \"paragraph_id\", \"n\", \"entry\"}}], \
-                 \"failed\": [{{\"index\", \"paragraph_id\", \"error\"}}]}}."
+                "Propose many changes at once (up to {MAX_BATCH}), each like suggest_change (exactly one of \
+                 paragraph_id, paragraph_ids or insert_after), written together. Ones that fail are reported and \
+                 the rest are added: the result is {{\"added\": n, \"suggestions\": [{{\"index\", \
+                 \"paragraph_id\", \"paragraph_ids\" (blocks), \"shape\", \"n\", \"entry\"}}], \"failed\": \
+                 [{{\"index\", \"paragraph_id\", \"error\"}}]}}."
             ),
             json!({
                 "suggestions": {
                     "type": "array", "minItems": 1, "maxItems": MAX_BATCH,
                     "items": {
                         "type": "object",
-                        "properties": { "paragraph_id": paragraph_id, "options": options, "why": why },
-                        "required": ["paragraph_id", "options"],
+                        "properties": target,
+                        "required": ["options"],
                         "additionalProperties": false,
                     },
                 },
@@ -123,10 +158,9 @@ pub fn catalogue() -> Vec<ToolSpec> {
     ]
 }
 
-/// Add MCP's `before` to a `suggest_change` spec: the line can then be named
-/// by its text instead of `paragraph_id`, so neither is required (the tool
-/// checks that exactly one is given). The base schema requires
-/// `paragraph_id`, which is all the built-in agent uses.
+/// Add MCP's `before` to a `suggest_change` spec: one line can then be named
+/// by its text instead of `paragraph_id`. No target is required by the
+/// schema; the tool checks that exactly one is given.
 pub fn add_before(spec: &mut ToolSpec) {
     spec.schema["properties"]["before"] = json!({
         "type": "string",
@@ -136,7 +170,7 @@ pub fn add_before(spec: &mut ToolSpec) {
     if let Some(required) = spec.schema["required"].as_array_mut() {
         required.retain(|r| r != "paragraph_id");
     }
-    spec.description.push_str(" Give exactly one of paragraph_id or before.");
+    spec.description.push_str(" Or name one line by its text with before instead of paragraph_id.");
 }
 
 /// An argument a host adds to the base schemas for its own use; the tools

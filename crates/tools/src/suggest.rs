@@ -6,12 +6,13 @@ use std::collections::HashMap;
 use scriptorium_core::text::{looks_same, normalize, similarity};
 use scriptorium_core::{Document, ElementKind, ParaId};
 use scriptorium_review::matching::FUZZY_THRESHOLD;
-use scriptorium_review::{Entry, Session, Unplaced};
+use scriptorium_review::{Entry, Item, Line, Session, Shape, Unplaced};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::args::Args;
-use crate::catalogue::{MAX_BATCH, MAX_OPTIONS};
+use crate::block::{LINE_BREAKS, Opts, Spot, block_entry, opts, spot, still_reads};
+use crate::catalogue::MAX_BATCH;
 use crate::reviews::{find_review, item_numbers};
 use crate::{Append, Applied, Ctx, Failed, Outcome, Proposal, Target, ToolError};
 
@@ -27,24 +28,6 @@ fn target(ctx: &Ctx, a: &Args) -> Result<(Target, Option<(usize, bool)>), ToolEr
         None => (Target::Own, None),
     })
 }
-
-fn options(v: Option<&Value>) -> Result<Vec<String>, String> {
-    let list = v
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("`options` must be a list of one to {MAX_OPTIONS} strings"))?;
-    let options: Vec<String> = list
-        .iter()
-        .map(|o| o.as_str().map(str::to_string).ok_or_else(|| "`options` must be strings".to_string()))
-        .collect::<Result<_, _>>()?;
-    match options.len() {
-        0 => Err("give at least one option".into()),
-        n if n > MAX_OPTIONS => Err(format!("give at most {MAX_OPTIONS} options, not {n}")),
-        _ => Ok(options),
-    }
-}
-
-/// Characters that would break a line into two paragraphs.
-const LINE_BREAKS: [char; 4] = ['\n', '\r', '\u{2028}', '\u{2029}'];
 
 /// The checks that depend only on the line as it is now: it exists, can be
 /// changed, has text, and the options are single non-empty lines of which at
@@ -77,24 +60,37 @@ fn check_line(
 }
 
 /// A review holds one suggestion per line (the matcher can show only one), so
-/// a second one on a paragraph that already has one is refused, whatever its
-/// status. `explicit`: the review was named (MCP's `review_file`) rather than
-/// being the host's own.
-fn check_duplicate(session: &Session, doc: &Document, r: usize, id: u64, explicit: bool) -> Result<(), String> {
+/// a suggestion on a paragraph another suggestion of the review already
+/// covers (a line suggestion's line, a block's lines where it was made and
+/// where it is now) is refused, whatever its status. `explicit`: the review
+/// was named (MCP's `review_file`) rather than being the host's own.
+fn check_duplicate(session: &Session, doc: &Document, r: usize, ids: &[ParaId], explicit: bool) -> Result<(), String> {
     let review = &session.reviews[r];
-    let Some(i) = review.items.iter().position(|it| it.para == ParaId(id)) else { return Ok(()) };
-    let status = session.status_label(doc, r, i);
-    Err(format!(
-        "{} already has a suggestion on ¶{id} (#{}, {status}): one suggestion per line per review; the writer \
-         can ask for a new one in a new conversation",
-        whose(&review.name, explicit),
-        item_numbers(doc, &review.items)[i]
-    ))
+    for (i, it) in review.items.iter().enumerate() {
+        let covered: Vec<ParaId> =
+            std::iter::once(it.para).chain(it.paras.iter().copied()).chain(session.live_run(doc, r, i)).collect();
+        let Some(id) = ids.iter().find(|id| covered.contains(id)) else { continue };
+        let status = session.status_label(doc, r, i);
+        return Err(format!(
+            "{} already has a suggestion on ¶{} (#{}, {status}): one suggestion per line per review; the writer \
+             can ask for a new one in a new conversation",
+            whose(&review.name, explicit),
+            id.0,
+            item_numbers(doc, &review.items)[i]
+        ));
+    }
+    Ok(())
 }
 
 /// How errors name review `name`.
 fn whose(name: &str, explicit: bool) -> String {
     if explicit { format!("review {name}") } else { "this conversation's review".into() }
+}
+
+/// Why a block whose lines no longer read as they did isn't written.
+fn changed_run(ids: &[ParaId]) -> String {
+    let ids: Vec<u64> = ids.iter().map(|p| p.0).collect();
+    format!("{} changed since the suggestion was made: read them again and suggest on their current text", place(&ids))
 }
 
 /// Why a proposal whose line no longer reads as it did isn't written.
@@ -103,25 +99,26 @@ fn changed(id: u64) -> String {
 }
 
 /// Check one suggestion against the live document and the target review,
-/// and build its review-file entry (`para` and the live text as `before`).
-fn validate(
-    ctx: &Ctx,
-    review: Option<(usize, bool)>,
-    id: u64,
-    options: Vec<String>,
-    why: &str,
-) -> Result<Entry, String> {
-    let text = check_line(ctx.doc, ctx.is_caps, id, &options)?;
+/// and build its review-file entry (`para` and the live text as `before`):
+/// a line entry for `paragraph_id` with string options, else a block
+/// ([`block_entry`]).
+fn validate(ctx: &Ctx, review: Option<(usize, bool)>, spot: &Spot, options: Opts, why: &str) -> Result<Entry, String> {
+    let entry = match (spot, options) {
+        (Spot::Para(id), Opts::Strings(options)) => {
+            let text = check_line(ctx.doc, ctx.is_caps, *id, &options)?;
+            Entry { para: vec![ParaId(*id)], why: why.to_string(), ..Entry::single(text.trim(), options) }
+        }
+        (_, Opts::Strings(_)) => {
+            return Err("with paragraph_ids or insert_after, give each option as a list of lines \
+                        [{\"kind\": ..., \"text\": ...}]"
+                .into());
+        }
+        (spot, Opts::Lines(options)) => block_entry(ctx.doc, ctx.is_caps, spot, options, why)?,
+    };
     if let Some((r, explicit)) = review {
-        check_duplicate(ctx.session, ctx.doc, r, id, explicit)?;
+        check_duplicate(ctx.session, ctx.doc, r, &entry.para, explicit)?;
     }
-    Ok(Entry {
-        before: text.trim().to_string(),
-        para: Some(ParaId(id)),
-        options,
-        why: why.to_string(),
-        ..Entry::default()
-    })
+    Ok(entry)
 }
 
 /// MCP's `before`: the line with this text, and whether it was found only
@@ -189,21 +186,28 @@ fn find_by_text(ctx: &Ctx, review: Option<(usize, bool)>, before: &str) -> Resul
         return Err(ToolError::Invalid(format!("¶{id} isn't editable")));
     }
     if let Some((r, explicit)) = review {
-        check_duplicate(ctx.session, ctx.doc, r, id, explicit).map_err(ToolError::Invalid)?;
+        check_duplicate(ctx.session, ctx.doc, r, &[ParaId(id)], explicit).map_err(ToolError::Invalid)?;
     }
     Ok((id, fuzzy))
 }
 
 pub(crate) fn suggest_change(ctx: &Ctx, a: &Args) -> Result<Outcome, ToolError> {
     let (target, review) = target(ctx, a)?;
-    let (id, fuzzy) = match (a.opt_int("paragraph_id")?, a.opt_str("before")?) {
-        (Some(id), None) => (u64::try_from(id).map_err(|_| ToolError::Invalid(format!("no paragraph {id}")))?, false),
-        (None, Some(b)) => find_by_text(ctx, review, b)?,
-        _ => return Err(ToolError::Args("give exactly one of paragraph_id or before".into())),
-    };
-    let options = options(a.get("options")).map_err(ToolError::Args)?;
+    let options = opts(a.get("options")).map_err(ToolError::Args)?;
     let why = a.opt_str("why")?.unwrap_or("");
-    let entry = validate(ctx, review, id, options, why).map_err(ToolError::Invalid)?;
+    let (spot, fuzzy) = match a.opt_str("before")? {
+        Some(b) => {
+            if ["paragraph_id", "paragraph_ids", "insert_after"].iter().any(|k| a.get(k).is_some()) {
+                return Err(ToolError::Args(
+                    "give exactly one of paragraph_id, paragraph_ids, insert_after or before".into(),
+                ));
+            }
+            let (id, fuzzy) = find_by_text(ctx, review, b)?;
+            (Spot::Para(id), fuzzy)
+        }
+        None => (spot(|k| a.get(k)).map_err(ToolError::Args)?, false),
+    };
+    let entry = validate(ctx, review, &spot, options, why).map_err(ToolError::Invalid)?;
     Ok(Outcome::Append(Append {
         target,
         proposals: vec![Proposal { index: 0, entry, fuzzy }],
@@ -217,10 +221,38 @@ pub(crate) fn suggest_change(ctx: &Ctx, a: &Args) -> Result<Outcome, ToolError> 
 struct Added {
     index: usize,
     paragraph_id: u64,
+    /// A block's lines (an addition: its anchor).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paragraph_ids: Option<Vec<u64>>,
+    /// `line`, `block` or `insert` ([`shape_name`]).
+    shape: &'static str,
     /// Its number in `list_suggestions`.
     n: usize,
     /// Its stable reference, `e<entry>`.
     entry: String,
+    /// `¶412` or `¶412–¶415`, for the sentence result.
+    #[serde(skip)]
+    place: String,
+}
+
+/// What a suggestion does, as listings and results name it: `line` (one
+/// line's text), `insert` (every option adds lines after its line, see
+/// [`Shape::Add`]), else `block` (a run replaced, or cut).
+pub(crate) fn shape_name(item: &Item) -> &'static str {
+    if !item.block {
+        return "line";
+    }
+    let adds = (0..item.option_lines.len()).all(|k| matches!(item.shape(k), Shape::Add { .. }));
+    if adds && !item.option_lines.is_empty() { "insert" } else { "block" }
+}
+
+/// `¶412`, or `¶412–¶415` for a run.
+fn place(ids: &[u64]) -> String {
+    match ids {
+        [] => String::new(),
+        [one] => format!("¶{one}"),
+        [first, .., last] => format!("¶{first}–¶{last}"),
+    }
 }
 
 fn batch_result(added: &[Added], failed: &[Failed]) -> String {
@@ -243,26 +275,32 @@ pub(crate) fn suggest_changes(ctx: &Ctx, a: &Args) -> Result<Outcome, ToolError>
     // Paragraph → the batch item already suggesting on it.
     let mut seen: HashMap<u64, usize> = HashMap::new();
     for (index, item) in list.iter().enumerate() {
-        let id = item.get("paragraph_id").and_then(Value::as_u64);
+        let get = |k: &str| item.get(k).filter(|v| !v.is_null());
+        let first = spot(get).ok().map(|s| s.first());
         let checked = (|| {
-            let id = id.ok_or("`paragraph_id` must be a paragraph number")?;
-            let options = options(item.get("options"))?;
-            let why = match item.get("why") {
-                None | Some(Value::Null) => "",
+            if !item.is_object() {
+                return Err("each suggestion must be an object".to_string());
+            }
+            let spot = spot(get)?;
+            let options = opts(get("options"))?;
+            let why = match get("why") {
+                None => "",
                 Some(w) => w.as_str().ok_or("`why` must be a string")?,
             };
-            let entry = validate(ctx, review, id, options, why)?;
-            if let Some(k) = seen.get(&id) {
-                return Err(in_batch(id, *k));
+            let entry = validate(ctx, review, &spot, options, why)?;
+            if let Some((id, k)) = entry.para.iter().find_map(|p| seen.get(&p.0).map(|k| (p.0, *k))) {
+                return Err(in_batch(id, k));
             }
             Ok::<_, String>(entry)
         })();
         match checked {
             Ok(entry) => {
-                seen.insert(entry.para.expect("validate sets para").0, index);
+                for p in &entry.para {
+                    seen.insert(p.0, index);
+                }
                 proposals.push(Proposal { index, entry, fuzzy: false });
             }
-            Err(error) => failed.push(Failed { index, paragraph_id: id, error }),
+            Err(error) => failed.push(Failed { index, paragraph_id: first, error }),
         }
     }
     if proposals.is_empty() {
@@ -328,27 +366,47 @@ pub fn apply(
     let (mut entries, mut kept) = (vec![], vec![]);
     let mut seen: HashMap<u64, usize> = HashMap::new();
     for (k, Proposal { index, entry, fuzzy }) in append.proposals.into_iter().enumerate() {
-        let id = entry.para.map(|p| p.0);
+        let id = entry.para.first().map(|p| p.0);
+        let before = Line::join(&entry.before);
         let checked = (|| {
             let id = id.ok_or("the suggestion names no paragraph")?;
-            let live = check_line(doc, is_caps, id, &entry.options)?;
-            // The review's PARA pass would also take a line that now reads as
-            // one of the options (a decided entry); a new suggestion is only
-            // for the line as it was read.
-            if normalize(&live) != normalize(&entry.before) {
-                return Err(changed(id));
+            if entry.is_line() {
+                let options: Vec<String> = entry.options.iter().map(|o| Line::join(o)).collect();
+                let live = check_line(doc, is_caps, id, &options)?;
+                // The review's PARA pass would also take a line that now reads as
+                // one of the options (a decided entry); a new suggestion is only
+                // for the line as it was read.
+                if normalize(&live) != normalize(&before) {
+                    return Err(changed(id));
+                }
+            } else {
+                // The live run must still read as BEFORE (the PARA pass would
+                // also take a run that reads as an option); then every other
+                // check again, on the run as it is now.
+                if !still_reads(doc, &entry) {
+                    return Err(changed_run(&entry.para));
+                }
+                let spot = Spot::List(entry.para.iter().map(|p| p.0).collect());
+                block_entry(doc, is_caps, &spot, entry.options.clone(), &entry.why)?;
             }
-            check_duplicate(session, doc, r, id, explicit)?;
-            if let Some(&j) = seen.get(&id) {
+            check_duplicate(session, doc, r, &entry.para, explicit)?;
+            if let Some((id, j)) = entry.para.iter().find_map(|p| seen.get(&p.0).map(|j| (p.0, *j))) {
                 return Err(in_batch(id, j));
             }
             Ok::<_, String>(id)
         })();
         match checked {
             Ok(id) => {
-                seen.insert(id, index);
+                for p in &entry.para {
+                    seen.insert(p.0, index);
+                }
                 slot[k] = Some(entries.len());
-                kept.push((index, id, fuzzy.then(|| entry.before.clone())));
+                kept.push((
+                    index,
+                    id,
+                    entry.para.iter().map(|p| p.0).collect::<Vec<_>>(),
+                    fuzzy.then(|| before.clone()),
+                ));
                 entries.push(entry);
             }
             Err(error) => failed.push(Failed { index, paragraph_id: id, error }),
@@ -365,13 +423,23 @@ pub fn apply(
         let by_position = item_numbers(doc, &session.reviews[r].items);
         for (k, s) in slot.iter().enumerate() {
             let Some(s) = *s else { continue };
-            let (index, id, ref text) = kept[s];
-            let res = done.results[s];
+            let (index, id, ref ids, ref text) = kept[s];
+            let res = &done.results[s];
             written[k] = res.entry;
-            match (res.unplaced, res.item, res.entry) {
+            match (res.unplaced.clone(), res.item, res.entry) {
                 (None, Some(i), Some(e)) => {
                     numbers[k] = Some(by_position[i]);
-                    added.push(Added { index, paragraph_id: id, n: by_position[i], entry: format!("e{e}") });
+                    let item = &session.reviews[r].items[i];
+                    let shape = shape_name(item);
+                    added.push(Added {
+                        index,
+                        paragraph_id: id,
+                        paragraph_ids: item.block.then(|| ids.clone()),
+                        shape,
+                        n: by_position[i],
+                        entry: format!("e{e}"),
+                        place: if shape == "insert" { format!("after ¶{id}") } else { place(ids) },
+                    });
                     matched = matched.or(text.clone());
                 }
                 (why, _, entry) => {
@@ -388,7 +456,7 @@ pub fn apply(
     let message = if append.batch {
         batch_result(&added, &failed)
     } else if let Some(a) = added.first() {
-        let mut m = format!("added suggestion #{} ({}, ¶{}) to {name}", a.n, a.entry, a.paragraph_id);
+        let mut m = format!("added suggestion #{} ({}, {}) to {name}", a.n, a.entry, a.place);
         if let Some(text) = matched {
             m.push_str(&format!("; `before` matched ¶{} approximately, which reads {text:?}", a.paragraph_id));
         }
@@ -423,6 +491,11 @@ fn unplaced_error(
         Some(Unplaced::Missing) => format!("no paragraph {id}"),
         Some(Unplaced::NotEditable) => format!("paragraph {id} isn't editable"),
         Some(Unplaced::Mismatch) => changed(id),
+        Some(Unplaced::Ambiguous) => format!("the lines at ¶{id} fit several places; give their paragraph ids"),
+        Some(Unplaced::Restructured) => format!("the lines at ¶{id} were split, removed or moved apart"),
+        Some(Unplaced::Invalid(why)) => format!("the suggestion can't be written to a review file: {why}"),
+        // Only set when a review is opened, never by appending.
+        Some(Unplaced::RemovedBy { .. }) => format!("the lines at ¶{id} were cut by another review"),
         // Visibility was checked just before against the same line, so this
         // means review matching disagrees with that check.
         Some(Unplaced::Invisible) | None => {

@@ -25,8 +25,9 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 /// rules that matter in every session. How to run a pass is in the plugin's
 /// skill; each tool's details are in its description.
 const INSTRUCTIONS: &str = "\
-Scriptorium reviews screenplays (Final Draft .fdx): read the script, propose line changes into a review file, \
-and the writer decides each one in the Scriptorium app, which shares a saved session with these tools.
+Scriptorium reviews screenplays (Final Draft .fdx): read the script, propose changes (to a line, to lines that go \
+together, new lines, or cutting lines) into a review file, and the writer decides each one in the Scriptorium app, which shares a \
+saved session with these tools.
 Propose, don't edit: use suggest_changes or suggest_change; decide or edit (decide_suggestion, edit_paragraph) \
 only when the writer asks you to.
 When the writer asks for feedback rather than changes, answer in chat instead of proposing.
