@@ -131,6 +131,55 @@ AGENT TOOLS
   scriptorium tool [<script.fdx>] --list [--json]
         the tools with a one-line description each; --json prints their
         full specs (name, description, JSON schema of the arguments)
+CHAT (the built-in agent; the same threads and accounts as the app's panel)
+  scriptorium chat <script.fdx> [--thread <id> | --new] [--account <id>] [--model <model>]
+                   [--yes] [--allow-whole-script] [--record <cassette>] [--json] <message>
+  scriptorium chat <script.fdx> --thread <id> --retry [same options]
+        send a message on a new thread (the default) or thread <id>; --retry
+        sends the thread again as it is (after an error, Ctrl+C or a round
+        limit). The reply streams to stdout; tool rows, notes and a closing
+        `thread <id> (<title>) · <tokens> · <cost>` line go to stderr. The
+        agent only suggests: its suggestions go to the thread's own review
+        (`<title>.review.txt`, attached to the script). The first send about a
+        script to a provider shows what gets sent and needs --yes (or \"y\" on a
+        terminal); reading a long script whole needs --allow-whole-script (or
+        \"y\"). Ctrl+C stops (the thread is saved at every step); twice quits.
+        --json prints {thread, title, created, account, model, review_path,
+        added, text, usage}. A run that stops, fails or is declined exits 1.
+        --record writes each request and reply to a cassette (no headers, so
+        no keys), but cassettes DO contain snippets of the script's text, tool
+        results and error bodies: keep them private like the script.
+        With SCRIPTORIUM_REPLAY=<cassette> nothing is sent: replies come from
+        the cassette, and exchanges left over fail the run.
+  scriptorium threads <script.fdx> [--json]
+        the script's threads (<script>.threads/), newest first
+  scriptorium threads <script.fdx> show <id> [--json]
+        the transcript, the thread's review file and its suggestion counts
+  scriptorium threads <script.fdx> set-model <id> <account> <model> [--json]
+  scriptorium threads <script.fdx> delete <id> [--json]
+        (the review file, its decisions and the lock file stay)
+  Changing or running a thread another program is running waits 2 s, then
+  is refused (\"this thread is running in another program\").
+
+ACCOUNTS
+  Accounts live in $XDG_CONFIG_HOME/scriptorium/accounts.json (macOS:
+  Application Support); keys in the OS keyring, else from
+  SCRIPTORIUM_<ACCOUNT>_KEY or SCRIPTORIUM_<PROVIDER>_KEY (a set variable
+  wins; SCRIPTORIUM_KEYRING=off never touches the keyring). Keys are read
+  from stdin, never from arguments, and never printed.
+  scriptorium accounts [list] [--json]
+  scriptorium accounts add [<id>] --provider anthropic|openai|openrouter|custom
+                    [--base-url <url> --protocol anthropic|openai_chat] [--name <name>]
+                    [--model <model>] [--effort low|medium|high|xhigh|max]
+                    [--max-tokens <n>] [--default] [--key-stdin] [--json]
+  scriptorium accounts remove <id> [--json]      (also deletes its keyring entry)
+  scriptorium accounts default <id> [--json]
+  scriptorium accounts key set <id>              (the key on stdin)
+  scriptorium accounts key delete <id>
+  scriptorium accounts key status <id> [--json]
+  scriptorium accounts check <id> [--json]
+        list the account's models: a cheap request (no tokens, no script
+        text) that tells whether the key and address work
 ";
 
 /// Review commands, dispatched by [`run`].
@@ -146,6 +195,7 @@ pub fn run(args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
         ["roundtrip", path] => load(path).and_then(|f| roundtrip(&f)),
         [cmd, rest @ ..] if crate::structure::COMMANDS.contains(cmd) => crate::structure::command(cmd, rest, notes),
         [cmd, rest @ ..] if REVIEW_COMMANDS.contains(cmd) => review_command(cmd, rest, notes),
+        [cmd, rest @ ..] if crate::chat::COMMANDS.contains(cmd) => crate::chat::command(cmd, rest, notes),
         ["-h" | "--help" | "help"] => Ok(USAGE.to_string()),
         _ => Err(format!("unrecognized arguments\n\n{USAGE}")),
     }
