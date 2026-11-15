@@ -39,9 +39,16 @@ Apache-2.0 and may be copied with attribution; Zed's `editor`, `ui`, `text`,
 
 ## Rules
 
-1. **Library crates are pure.** No file or network I/O, no threads, no clocks,
-   no UI. Take and return values (strings, structs). The CLI and the app do I/O.
-   This keeps every library crate compiling to `wasm32-unknown-unknown`.
+1. **Functional core, imperative shell.** Logic is pure: no file or network
+   I/O, no threads, no clocks, no UI; it takes and returns values (strings,
+   structs). I/O lives in a thin shell around it. The split is by module, not
+   by crate: a crate may contain its own shell (e.g. `providers` keeps keys,
+   settings and HTTP in `shell` modules over a pure core) as long as the core
+   modules never call into the shell and can be tested without it. Crates that
+   are pure throughout (`core`, `fdx`, `review`, `agent`, `tools`) keep
+   compiling to `wasm32-unknown-unknown`; a crate with a shell puts it behind
+   a default cargo feature so its core still does. (Clarified by the user,
+   2026-11-14.)
 2. **Never reserialize a user's file.** Exporters splice changes into the
    original bytes. A save with no edits must be byte-identical; every format
    crate has a test for that.
@@ -55,6 +62,32 @@ Apache-2.0 and may be copied with attribution; Zed's `editor`, `ui`, `text`,
    app and the CLI go through the same library calls and the same session file
    (`<script>.scriptorium.json`, which also lists the review files attached to
    the script); never give the app a code path the CLI lacks.
+
+## How agent sessions work here (required)
+
+The user asked for this on 2026-11-14; it applies to every coding-agent
+session on this repo.
+
+- **The main session orchestrates; subagents build.** All building (writing
+  code, tests, fixtures, docs for a feature) is done by subagents, so the main
+  session's context stays clean for decisions and integration.
+- **Many small agents, not one big one.** Give each builder one narrow,
+  well-bounded piece (one crate, one module, one test suite) with a written
+  brief: the goal, the files it may touch, the decisions already made, and the
+  checks it must pass. Run independent pieces in parallel.
+- **Every piece of work is reviewed by several agents.** Before work is
+  accepted, at least two reviewer agents that did not build it read it
+  independently, in fresh contexts: one for correctness (bugs, edge cases,
+  tests that would miss them), one for design (does it fit this file's rules,
+  the plan in `docs/`, and the decisions already made; is there a simpler
+  shape). Give reviewers the code and the brief, not the builder's
+  conclusions. Design decisions get the same treatment before they are built:
+  have reviewers critique the plan, not just the code.
+- **The orchestrator decides.** It weighs the reviews, sends fixes back to a
+  builder (or a new one), and only then integrates, runs the checks below
+  and commits. Disagreements that change the product go to the user.
+- Concurrent sessions: tell other sessions working in the repo which paths
+  you're touching, and commit with pathspecs (`git commit -- <paths>`).
 
 ## Checks (run before you finish)
 
