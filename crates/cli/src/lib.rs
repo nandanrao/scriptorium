@@ -6,14 +6,16 @@
 //! (`core`, `fdx`, `review`, `tools`), and does nothing else.
 //!
 //! - [`opened`]: a script opened with its saved session and review files.
-//! - [`fsio`]: atomic writes; every file this crate writes goes through
+//! - [`fsio`] (the `scriptorium-fsio` crate): atomic writes; every file this crate writes goes through
 //!   [`fsio::write_atomic`]. Every command that writes holds the script's
 //!   [`fsio::SessionLock`] from opening the session to saving it.
 //! - [`structure`]: insert, remove, split, join and retype, as typed functions.
 //! - [`commands`]: each command, returning the text it prints.
 
 pub mod commands;
-pub mod fsio;
+/// Moved to the `scriptorium-fsio` crate; re-exported so `scriptorium_cli::fsio`
+/// paths keep working. New code depends on `scriptorium-fsio` directly.
+pub use scriptorium_fsio as fsio;
 pub mod opened;
 pub mod structure;
 

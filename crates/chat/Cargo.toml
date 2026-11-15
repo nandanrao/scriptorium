@@ -8,11 +8,11 @@ rust-version.workspace = true
 
 [features]
 default = ["shell"]
-shell = ["dep:scriptorium-cli"]
+shell = ["dep:scriptorium-fsio"]
 
 [dependencies]
 scriptorium-agent.workspace = true
-scriptorium-cli = { workspace = true, optional = true }
+scriptorium-fsio = { workspace = true, optional = true }
 serde_json.workspace = true
 
 [lints]

@@ -15,17 +15,13 @@ name = "scriptorium"
 path = "src/main.rs"
 
 [dependencies]
-fs4.workspace = true
 scriptorium-core.workspace = true
 scriptorium-fdx.workspace = true
+scriptorium-fsio.workspace = true
 scriptorium-review.workspace = true
 scriptorium-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-# ENOLCK differs by OS (37 on Linux, 77 on macOS): take it from libc.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [lints]
 workspace = true

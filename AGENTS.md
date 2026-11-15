@@ -22,6 +22,7 @@ crates/
   core/   scriptorium-core   document model, outline (scenes/speakers), text, diff
   fdx/    scriptorium-fdx    Final Draft import + byte-preserving export
   review/ scriptorium-review review files, matching suggestions to lines, decisions, saved sessions
+  fsio/   scriptorium-fsio   atomic writes and the session lock, shared by cli, chat and app
   cli/    scriptorium-cli    `scriptorium` binary: headless access to everything
   app/    scriptorium-app    GPUI desktop app: script view, reviews, editing inside paragraphs
 ```
@@ -65,7 +66,7 @@ GPL-3.0 — read them for ideas, never copy code from them.
    app and the CLI go through the same library calls and the same session file
    (`<script>.scriptorium.json`, which also lists the review files attached to
    the script); never give the app a code path the CLI lacks. Anything that
-   writes the session or a review file holds `scriptorium_cli::SessionLock`
+   writes the session or a review file holds `scriptorium_fsio::SessionLock`
    (`<script>.scriptorium.lock`) from reading the files to writing them.
 
 ## How agent sessions work here (required)

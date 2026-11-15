@@ -257,7 +257,7 @@ reusing the same `TextViewState`s. On `Input::Failed` the buffer is cleared
 **Thread list** (header title, a popover): the script's threads, newest
 first: title, model, last change, its review's suggestion count. Delete asks;
 the review file, its decisions and the thread's `<id>.lock` stay (lock files
-are never deleted, `fsio.rs:80`; the list skips `*.lock`). Unreadable or
+are never deleted, `crates/fsio/src/lib.rs`; the list skips `*.lock`). Unreadable or
 newer-version files list greyed with the reason. A thread is created on its
 first send. The list is read when it opens; there is no polling.
 

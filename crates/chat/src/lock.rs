@@ -27,8 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use scriptorium_cli::SessionLock;
-use scriptorium_cli::fsio::{LockError, NO_LOCKS};
+use scriptorium_fsio::{LockError, NO_LOCKS, SessionLock};
 
 use crate::clock::IdSource;
 use crate::store::{StoreError, ThreadStore};

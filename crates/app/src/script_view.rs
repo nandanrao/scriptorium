@@ -521,7 +521,7 @@ impl ScriptView {
             let p = p.canonicalize().unwrap_or_else(|_| p.clone());
             // Held from reading the file through pinning its id, so a
             // concurrent CLI/MCP append isn't overwritten.
-            let lock = self.lock_session(scriptorium_cli::fsio::LOCK_WAIT);
+            let lock = self.lock_session(scriptorium_fsio::LOCK_WAIT);
             let source = match read_review(&p, &self.dir) {
                 Ok(s) => s,
                 Err(e) => {
@@ -557,7 +557,7 @@ impl ScriptView {
                         "{} is busy in another program; its Id: wasn't written (it is attached).",
                         file_name(&p)
                     ));
-                } else if let Err(e) = scriptorium_cli::write_atomic(&p, text.as_bytes()) {
+                } else if let Err(e) = scriptorium_fsio::write_atomic(&p, text.as_bytes()) {
                     notes.push(format!("Couldn't write the review's Id: into {}: {e}", p.display()));
                 }
             }
@@ -606,7 +606,7 @@ impl ScriptView {
         self.autosave = None;
         // Worth waiting a moment for another program to finish writing; if
         // it doesn't, the work is set aside below.
-        self.save_session_within(scriptorium_cli::fsio::LOCK_WAIT, cx);
+        self.save_session_within(scriptorium_fsio::LOCK_WAIT, cx);
         if self.doc(cx).log().len() <= self.synced {
             return None;
         }
@@ -621,7 +621,7 @@ impl ScriptView {
     fn set_aside(&mut self, doc: &Document, why: &str, loud: bool) -> String {
         let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log()).to_json();
         let path = disk::set_aside_path(&self.dir, &file_name(&self.script_path));
-        let msg = match scriptorium_cli::write_atomic(&path, json.as_bytes()) {
+        let msg = match scriptorium_fsio::write_atomic(&path, json.as_bytes()) {
             Ok(()) => format!("Your unsaved work {why}; it was kept in {}.", file_name(&path)),
             Err(e) => format!("Your unsaved work {why}, and keeping it in {} failed too: {e}", path.display()),
         };
@@ -1051,7 +1051,7 @@ impl ScriptView {
             return true;
         }
         // Held from looking at the files through writing them, so no other
-        // program writes in between (see `scriptorium_cli::SessionLock`).
+        // program writes in between (see `scriptorium_fsio::SessionLock`).
         let Some(_lock) = self.lock_session(wait) else { return false };
         match self.disk_plan().1 {
             Plan::Save => self.write_session(cx),
@@ -1066,7 +1066,7 @@ impl ScriptView {
         let doc = self.doc(cx);
         let len = doc.log().len();
         let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log()).to_json();
-        match scriptorium_cli::write_atomic(&self.session_path, json.as_bytes()) {
+        match scriptorium_fsio::write_atomic(&self.session_path, json.as_bytes()) {
             Ok(()) => {
                 self.seen_session = Seen::wrote(&json);
                 self.synced = len;
@@ -1083,11 +1083,11 @@ impl ScriptView {
     /// program holds it. A lock that can't be taken for another reason (the
     /// folder is read-only, the file system has no locks) is logged and the
     /// app goes on unlocked, as it did before there was a lock.
-    fn lock_session(&self, wait: Duration) -> Option<Option<scriptorium_cli::SessionLock>> {
-        let at = scriptorium_cli::SessionLock::path_for(&self.script_path);
-        match scriptorium_cli::SessionLock::acquire(&at, wait) {
+    fn lock_session(&self, wait: Duration) -> Option<Option<scriptorium_fsio::SessionLock>> {
+        let at = scriptorium_fsio::SessionLock::path_for(&self.script_path);
+        match scriptorium_fsio::SessionLock::acquire(&at, wait) {
             Ok(lock) => Some(Some(lock)),
-            Err(scriptorium_cli::fsio::LockError::Busy) => None,
+            Err(scriptorium_fsio::LockError::Busy) => None,
             Err(e) => {
                 crate::log::warn(&format!("couldn't lock the session ({e}); going on without the lock"));
                 Some(None)
@@ -1357,7 +1357,7 @@ impl ScriptView {
         let out = output_path(&self.script_path);
         let script = self.doc(cx).script().clone();
         let said = match self.fdx.write_script(&script) {
-            Ok(raw) => match scriptorium_cli::write_atomic(&out, raw.as_bytes()) {
+            Ok(raw) => match scriptorium_fsio::write_atomic(&out, raw.as_bytes()) {
                 Ok(()) => {
                     self.applied = Some(Rc::new(script));
                     format!("Wrote {}. The original is untouched.", file_name(&out))

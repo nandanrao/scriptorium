@@ -4432,9 +4432,9 @@ dependencies = [
  "gpui-pre-platform",
  "scriptorium-agent",
  "scriptorium-chat",
- "scriptorium-cli",
  "scriptorium-core",
  "scriptorium-fdx",
+ "scriptorium-fsio",
  "scriptorium-review",
  "scriptorium-tools",
  "serde_json",
@@ -4446,7 +4446,7 @@ name = "scriptorium-chat"
 version = "0.3.0"
 dependencies = [
  "scriptorium-agent",
- "scriptorium-cli",
+ "scriptorium-fsio",
  "serde_json",
 ]
 
@@ -4454,10 +4454,9 @@ dependencies = [
 name = "scriptorium-cli"
 version = "0.3.0"
 dependencies = [
- "fs4",
- "libc",
  "scriptorium-core",
  "scriptorium-fdx",
+ "scriptorium-fsio",
  "scriptorium-review",
  "scriptorium-tools",
  "serde",
@@ -4480,6 +4479,14 @@ version = "0.3.0"
 dependencies = [
  "regex",
  "scriptorium-core",
+]
+
+[[package]]
+name = "scriptorium-fsio"
+version = "0.3.0"
+dependencies = [
+ "fs4",
+ "libc",
 ]
 
 [[package]]

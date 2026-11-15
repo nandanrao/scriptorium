@@ -46,7 +46,7 @@ pub fn first_time(name: &str) -> bool {
     }
     out.push_str(name);
     out.push('\n');
-    if scriptorium_cli::write_atomic(&path, out.as_bytes()).is_err() {
+    if scriptorium_fsio::write_atomic(&path, out.as_bytes()).is_err() {
         crate::log::warn(&format!("couldn't remember a seen notice in {}", path.display()));
     }
     true

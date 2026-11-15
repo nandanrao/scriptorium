@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use scriptorium_agent::file::ThreadFile;
-use scriptorium_cli::write_atomic;
+use scriptorium_fsio::write_atomic;
 
 use crate::clock::IdSource;
 use crate::lock::ThreadLock;

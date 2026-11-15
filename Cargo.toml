@@ -15,6 +15,7 @@ scriptorium-review = { path = "crates/review" }
 scriptorium-agent = { path = "crates/agent" }
 scriptorium-tools = { path = "crates/tools" }
 scriptorium-cli = { path = "crates/cli" }
+scriptorium-fsio = { path = "crates/fsio" }
 scriptorium-providers = { path = "crates/providers" }
 scriptorium-chat = { path = "crates/chat" }
 fs4 = "1"

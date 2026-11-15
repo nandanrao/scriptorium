@@ -1,0 +1,17 @@
+[package]
+name = "scriptorium-fsio"
+description = "Scriptorium's shared file shell: atomic writes and the session lock, used by the CLI, the chat store and the app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fs4.workspace = true
+
+# ENOLCK differs by OS (37 on Linux, 77 on macOS): take it from libc.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true
