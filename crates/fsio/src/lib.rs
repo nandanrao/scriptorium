@@ -125,7 +125,21 @@ fn is_no_locks(e: &io::Error) -> bool {
 /// holding one: it waits for the first.
 #[derive(Debug)]
 pub struct SessionLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for SessionLock {
+    /// Unlocks before the file closes. The OS lock belongs to the open file
+    /// description, and a child process spawned from any thread holds a copy
+    /// of it until the child execs (or forever, if it never does); closing
+    /// only our descriptor would leave the lock held by that copy, and the
+    /// next attempt (even from this process) would read as another program.
+    /// Unlocking releases it for every copy.
+    fn drop(&mut self) {
+        // Through the trait, as with `try_lock`. An error leaves the close to
+        // release it, which is all that could be done anyway.
+        let _ = fs4::FileExt::unlock(&self.file);
+    }
 }
 
 impl SessionLock {
@@ -159,7 +173,7 @@ impl SessionLock {
             // Through the trait: newer toolchains have an inherent
             // `File::try_lock`, and rust-version (1.88) doesn't.
             match fs4::FileExt::try_lock(&file) {
-                Ok(()) => return Ok(Self { _file: file }),
+                Ok(()) => return Ok(Self { file }),
                 Err(fs4::TryLockError::WouldBlock) if Instant::now() < until => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -198,6 +212,22 @@ mod tests {
         drop(held);
         waiter.join().unwrap().unwrap();
         assert!(at.exists(), "the lock file stays");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dropping_releases_the_lock_even_while_a_copy_of_the_file_is_open() {
+        // A child spawned while the lock is held keeps a copy of the open
+        // file until it execs; `try_clone` makes the same kind of copy.
+        let dir = std::env::temp_dir().join(format!("scriptorium-lock-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("film.scriptorium.lock");
+        let held = SessionLock::acquire(&at, Duration::ZERO).unwrap();
+        let copy = held.file.try_clone().unwrap();
+        drop(held);
+        SessionLock::acquire(&at, Duration::ZERO).expect("released despite the copy");
+        drop(copy);
         let _ = fs::remove_dir_all(&dir);
     }
 
