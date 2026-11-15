@@ -11,6 +11,7 @@ mod log;
 mod menus;
 mod script_view;
 mod settings;
+mod spike_u0;
 mod theme;
 mod workspace;
 
@@ -154,10 +155,22 @@ fn main() {
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             log::warn(&format!("could not load Courier Prime: {e}"));
         }
+        // gpui-base first: it registers its `Input`, `Select`, `Sheet`... bindings,
+        // and ours, added after, win where both match at the same depth.
+        gpui_base::init(cx);
         cx.bind_keys(bindings());
+        let spike = std::env::var_os("SCRIPTORIUM_U0").is_some();
+        if spike {
+            cx.bind_keys(spike_u0::bindings());
+        }
         // With no window to handle it (all closed), Quit still quits.
         cx.on_action(|_: &SaveAndQuit, cx| cx.quit());
         cx.set_menus(menus::app_menus());
+        if spike {
+            spike_u0::open(cx);
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+            return;
+        }
         let bounds = Bounds::centered(None, size(px(1500.), px(1000.)), cx);
         let window = cx
             .open_window(
