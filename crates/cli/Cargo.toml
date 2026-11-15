@@ -14,19 +14,29 @@ path = "src/lib.rs"
 name = "scriptorium"
 path = "src/main.rs"
 
+[features]
+default = ["chat"]
+# `chat`, `threads` and `accounts`: the built-in agent, with providers, the
+# OS keyring, HTTP and Ctrl+C handling. The MCP server builds without it.
+chat = ["dep:ctrlc", "dep:scriptorium-agent", "dep:scriptorium-chat", "dep:scriptorium-providers"]
+
 [dependencies]
 # Ctrl+C stops a `chat` run through its cancel token.
-ctrlc.workspace = true
-scriptorium-agent.workspace = true
-scriptorium-chat.workspace = true
+ctrlc = { workspace = true, optional = true }
+scriptorium-agent = { workspace = true, optional = true }
+scriptorium-chat = { workspace = true, optional = true }
 scriptorium-core.workspace = true
 scriptorium-fdx.workspace = true
 scriptorium-fsio = { workspace = true, features = ["opened"] }
-scriptorium-providers.workspace = true
+scriptorium-providers = { workspace = true, optional = true }
 scriptorium-review.workspace = true
 scriptorium-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[[test]]
+name = "chat"
+required-features = ["chat"]
 
 [lints]
 workspace = true

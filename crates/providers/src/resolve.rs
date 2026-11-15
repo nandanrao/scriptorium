@@ -51,6 +51,9 @@ pub fn resolve(account: &Account, model: Option<&str>) -> Result<Resolved, Provi
         .filter(|m| !m.trim().is_empty())
         .or(account.model.as_deref())
         .filter(|m| !m.trim().is_empty())
+        // A named provider's account without a model uses the provider's
+        // default; a custom endpoint has none to fall back on.
+        .or(account.provider.default_model())
         .ok_or_else(|| ProvidersError::NoModel { account: account.id.clone() })?
         .to_string();
     let protocol = account.provider.protocol();
@@ -271,7 +274,15 @@ mod tests {
     fn errors() {
         let mut a = Account::new("o", "OpenAI", Provider::Openai);
         a.model = None;
-        assert_eq!(resolve(&a, None), Err(ProvidersError::NoModel { account: "o".into() }));
+        // A named provider falls back to its default model; a custom one can't.
+        assert_eq!(resolve(&a, None).unwrap().model, Provider::Openai.default_model().unwrap());
+        let mut c = Account::new(
+            "c",
+            "Local",
+            Provider::Custom { protocol: Protocol::OpenaiChat, base_url: "http://localhost:1/v1".into() },
+        );
+        c.model = None;
+        assert_eq!(resolve(&c, None), Err(ProvidersError::NoModel { account: "c".into() }));
         a.model = Some("gpt-9".into());
         let r = resolve(&a, None).unwrap();
         for key in [None, Some(""), Some("  ")] {
