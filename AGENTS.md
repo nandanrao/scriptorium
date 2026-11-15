@@ -86,6 +86,10 @@ session on this repo.
   shape). Give reviewers the code and the brief, not the builder's
   conclusions. Design decisions get the same treatment before they are built:
   have reviewers critique the plan, not just the code.
+- **Pick the model for the job.** Mechanical work (bulk renames, API-migration
+  fixes, following a precise fix list, boilerplate, test scaffolding) goes to
+  a cheaper, faster model such as Sonnet. Design, tricky correctness work and
+  reviews use the strongest model. (Asked by the user, 2026-11-14.)
 - **The orchestrator decides.** It weighs the reviews, sends fixes back to a
   builder (or a new one), and only then integrates, runs the checks below
   and commits. Disagreements that change the product go to the user.

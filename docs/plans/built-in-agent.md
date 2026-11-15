@@ -154,6 +154,13 @@ The user is fine with GPL but wants Zed code only where it helps. Findings:
   global theme (no panics), splitting very large files, GPUI tracking. The user
   wants a shared GPUI component library in the ecosystem and wants Scriptorium
   to help maintain it. (Superseded below: "build our own".)
+- **Decision (user, 2026-11-14): follow gpui-kit's GPUI.** Scriptorium moves
+  from its Zed git pin to `gpui-pre` (weekly unpatched snapshots of Zed's GPUI
+  that gpui-kit publishes and pins exactly; ~1 week behind Zed main) and
+  upgrades in step with gpui-kit. Zed plans official weekly GPUI releases on
+  crates.io; expect gpui-kit and us to converge on those. Our fork of gpui-kit
+  then only carries our contributions, not a GPUI upgrade. The cost of the
+  switch is being measured on branch `spike/gpui-pre`.
 - ~~**Chat panel: build our own**~~ (thread list, messages, tool rows, model
   picker, composer from our `editor.rs`). Zed's `agent_ui`/`acp_thread`/`editor`
   drag in most of Zed (Project, Workspace, LSP). `gpui-component` (Apache) has
