@@ -26,7 +26,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features =
 # The chat panel's view model (agent_panel/view_model.rs): threads and stream
 # events in, rows out, with the shared chat core's tool-row labels.
 scriptorium-agent.workspace = true
-scriptorium-chat = { path = "../chat" }
+scriptorium-chat.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 

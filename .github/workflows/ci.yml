@@ -53,6 +53,8 @@ jobs:
         run: cargo test --workspace
       - name: wasm check (library crates stay pure)
         run: cargo check -p scriptorium-review -p scriptorium-core -p scriptorium-fdx --target wasm32-unknown-unknown
+      - name: chat core without its shell
+        run: cargo check -p scriptorium-chat --no-default-features
 
   macos:
     name: macOS (release build, test)

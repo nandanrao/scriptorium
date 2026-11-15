@@ -218,11 +218,16 @@ pub fn bytes_text(bytes: usize) -> String {
 
 /// A token count as "850", "18.2k" or "1.3M".
 pub fn tokens_short(n: u64) -> String {
-    match n {
-        0..1000 => n.to_string(),
-        1000..1_000_000 => format!("{:.1}k", n as f64 / 1000.0),
-        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    if n < 1000 {
+        return n.to_string();
     }
+    // In tenths, rounded half up; a count that rounds to 1000.0k reads 1.0M.
+    let k = n.saturating_add(50) / 100;
+    if k < 10_000 {
+        return format!("{}.{}k", k / 10, k % 10);
+    }
+    let m = n.saturating_add(50_000) / 100_000;
+    format!("{}.{}M", m / 10, m % 10)
 }
 
 /// A cost in US dollars: "$0.24", or "<$0.01" for a fraction of a cent.
@@ -390,6 +395,13 @@ mod tests {
         assert_eq!(tokens_short(850), "850");
         assert_eq!(tokens_short(18_200), "18.2k");
         assert_eq!(tokens_short(1_300_000), "1.3M");
+        assert_eq!(tokens_short(999), "999");
+        assert_eq!(tokens_short(1000), "1.0k");
+        assert_eq!(tokens_short(999_949), "999.9k");
+        assert_eq!(tokens_short(999_950), "1.0M");
+        assert_eq!(tokens_short(1_049_999), "1.0M");
+        assert_eq!(tokens_short(1_050_000), "1.1M");
+        assert_eq!(tokens_short(u64::MAX), "18446744073709.5M");
         assert_eq!(cost_text(0.24), "$0.24");
         assert_eq!(cost_text(0.001), "<$0.01");
         assert_eq!(cost_text(0.0), "$0.00");
