@@ -746,7 +746,7 @@ fn list_accounts(json: bool, notes: &mut Vec<String>) -> Result<String, String> 
         let mark = if default.as_deref() == Some(a.id.as_str()) { "*" } else { " " };
         let key = if a.provider.needs_key() { key_text(&keys.status(a)) } else { "no key needed".into() };
         let _ = writeln!(out, "{mark} {}  {} · {}", a.id, a.provider.name(), a.model.as_deref().unwrap_or("no model"));
-        let _ = writeln!(out, "    key {key}");
+        let _ = writeln!(out, "    key: {key}");
     }
     Ok(out)
 }
@@ -813,7 +813,7 @@ fn add_account(id: Option<&str>, a: &Args, notes: &mut Vec<String>) -> Result<St
     if a.has("--json") {
         return Ok(pretty(&json!({"added": id, "default": file.default_account().map(|d| d.id == id)})));
     }
-    Ok(format!("added account {id} ({}); key {key_note}\n", account.provider.name()))
+    Ok(format!("added account {id} ({}); key: {key_note}\n", account.provider.name()))
 }
 
 fn remove_account(id: &str, json: bool, notes: &mut Vec<String>) -> Result<String, String> {

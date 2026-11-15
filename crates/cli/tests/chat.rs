@@ -343,8 +343,26 @@ fn accounts_add_list_remove() {
     assert_eq!(list[1]["default"], true);
     assert_eq!(list[1]["key"]["status"], "not_needed");
     let text = f.run(&["accounts", "list"], None).expect_ok().stdout();
-    assert!(text.contains("* local") && text.contains("key from SCRIPTORIUM_ANTHROPIC_KEY"), "{text}");
+    assert!(text.contains("* local") && text.contains("key: from SCRIPTORIUM_ANTHROPIC_KEY"), "{text}");
     assert!(!text.contains("sk-test"), "keys are never printed: {text}");
+
+    // Plain http to another machine works, with the providers' warning.
+    let run = f.run(
+        &[
+            "accounts",
+            "add",
+            "lan",
+            "--provider",
+            "custom",
+            "--base-url",
+            "http://example.com/v1",
+            "--protocol",
+            "anthropic",
+        ],
+        None,
+    );
+    assert!(run.expect_ok().stderr().contains("is plain http to another machine"));
+    f.run(&["accounts", "remove", "lan"], None).expect_ok();
 
     f.run(&["accounts", "default", "anthropic"], None).expect_ok();
     f.run(&["accounts", "remove", "local"], None).expect_ok();
