@@ -24,13 +24,25 @@ pub const RESULT_LINES: usize = 40;
 /// Identity of a row across repaints.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
-    /// Block `block` of message `message`. While a reply streams, `message`
-    /// is the index it will get in the thread (`thread.messages.len()`) and
-    /// `block` counts blocks in arrival order, so the pushed turn lands on
-    /// the same keys as its streaming rows.
+    /// The writer's message `message`.
+    User(usize),
+    /// The `block`th text or reasoning block of message `message`, counting
+    /// only those two kinds. While a reply streams, `message` is the index it
+    /// will get in the thread (`thread.messages.len()`) and `block` counts
+    /// streamed text and reasoning parts in arrival order, so the pushed turn
+    /// lands on the same keys as its streaming rows even when it holds blocks
+    /// that never streamed (a redacted reasoning block sends no event).
     Block { message: usize, block: usize },
+    /// Redacted reasoning: block `block` (raw index) of message `message`.
+    /// It never streams, so it has keys of its own.
+    Redacted { message: usize, block: usize },
+    /// A notice: block `block` (raw index) of message `message`.
+    Notice { message: usize, block: usize },
     /// A tool row, by call id.
     Tool(String),
+    /// A tool call that came without an id: the `n`th call of message
+    /// `message` (streamed or pushed), so such calls don't share one key.
+    ToolAt { message: usize, n: usize },
     /// A line after the messages (error, waiting, stopping).
     Tail(&'static str),
 }
@@ -294,18 +306,22 @@ pub fn rows(thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
                 .collect::<Vec<_>>()
                 .join("\n\n");
             if !text.trim().is_empty() {
-                out.push(Row { key: Key::Block { message: mi, block: 0 }, kind: Kind::User { text } });
+                out.push(Row { key: Key::User(mi), kind: Kind::User { text } });
             }
         }
+        let mut keys = Keys::new(mi);
         for (bi, b) in m.blocks.iter().enumerate() {
-            let key = Key::Block { message: mi, block: bi };
             match (m.role, b) {
-                (Role::Assistant, Block::Text { text }) if !text.trim().is_empty() => {
-                    out.push(Row { key, kind: Kind::Text { text: text.clone(), streaming: false } });
+                (Role::Assistant, Block::Text { text }) => {
+                    // Counted even when blank: it streamed as a part.
+                    let key = keys.block();
+                    if !text.trim().is_empty() {
+                        out.push(Row { key, kind: Kind::Text { text: text.clone(), streaming: false } });
+                    }
                 }
                 (Role::Assistant, Block::Thinking { text, .. }) => {
                     out.push(Row {
-                        key,
+                        key: keys.block(),
                         kind: Kind::Reasoning { text: text.clone(), hidden: false, streaming: false },
                     });
                 }
@@ -313,7 +329,7 @@ pub fn rows(thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
                     if value.get("type").and_then(Value::as_str) == Some("redacted_thinking") =>
                 {
                     out.push(Row {
-                        key,
+                        key: Key::Redacted { message: mi, block: bi },
                         kind: Kind::Reasoning { text: String::new(), hidden: true, streaming: false },
                     });
                 }
@@ -323,20 +339,27 @@ pub fn rows(thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
                         None if cx.active && !stream.stopped => running(&c.name, &c.input, &c.id),
                         None => not_run(&c.name, &c.id),
                     };
-                    out.push(Row { key: Key::Tool(c.id.clone()), kind: Kind::Tool(row) });
+                    out.push(Row { key: keys.tool(&c.id), kind: Kind::Tool(row) });
                 }
-                (_, Block::Notice { text }) => out.push(Row { key, kind: Kind::Notice { text: text.clone() } }),
+                (_, Block::Notice { text }) => out.push(Row {
+                    key: Key::Notice { message: mi, block: bi },
+                    kind: Kind::Notice { text: text.clone() },
+                }),
                 _ => {}
             }
         }
     }
-    let message = thread.messages.len();
-    for (block, p) in stream.parts.iter().enumerate() {
-        let key = Key::Block { message, block };
+    let mut keys = Keys::new(thread.messages.len());
+    for p in &stream.parts {
         match p {
-            Part::Text { text, .. } => out.push(Row { key, kind: Kind::Text { text: text.clone(), streaming: true } }),
+            Part::Text { text, .. } => {
+                out.push(Row { key: keys.block(), kind: Kind::Text { text: text.clone(), streaming: true } });
+            }
             Part::Thinking { text, .. } => {
-                out.push(Row { key, kind: Kind::Reasoning { text: text.clone(), hidden: false, streaming: true } });
+                out.push(Row {
+                    key: keys.block(),
+                    kind: Kind::Reasoning { text: text.clone(), hidden: false, streaming: true },
+                });
             }
             Part::Tool { id, name, bytes } => {
                 let row = if stream.stopped {
@@ -352,7 +375,7 @@ pub fn rows(thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
                         result: None,
                     }
                 };
-                out.push(Row { key: Key::Tool(id.clone()), kind: Kind::Tool(row) });
+                out.push(Row { key: keys.tool(id), kind: Kind::Tool(row) });
             }
         }
     }
@@ -366,6 +389,32 @@ pub fn rows(thread: &Thread, stream: &Stream, cx: Context) -> Vec<Row> {
         out.push(Row { key: Key::Tail("stopping"), kind: Kind::Notice { text: "Stopping…".into() } });
     }
     out
+}
+
+/// Hands out the keys of one message's rows, the same way for a streaming
+/// reply and for the pushed turn (see [`Key::Block`] and [`Key::ToolAt`]).
+struct Keys {
+    message: usize,
+    blocks: usize,
+    tools: usize,
+}
+
+impl Keys {
+    fn new(message: usize) -> Self {
+        Keys { message, blocks: 0, tools: 0 }
+    }
+
+    /// The next text or reasoning block.
+    fn block(&mut self) -> Key {
+        self.blocks += 1;
+        Key::Block { message: self.message, block: self.blocks - 1 }
+    }
+
+    /// The next tool call: by id, or by position when it has none.
+    fn tool(&mut self, id: &str) -> Key {
+        self.tools += 1;
+        if id.is_empty() { Key::ToolAt { message: self.message, n: self.tools - 1 } } else { Key::Tool(id.into()) }
+    }
 }
 
 fn finished(name: &str, input: &Value, id: &str, content: &str, is_error: bool, cx: Context) -> ToolRow {
@@ -511,6 +560,71 @@ mod tests {
         );
         s.clear();
         let pushed: Vec<Key> = build(&t, &s, false).into_iter().skip(1).map(|r| r.key).collect();
+        assert_eq!(streaming, pushed);
+    }
+
+    #[test]
+    fn a_redacted_block_mid_reply_keeps_the_other_keys() {
+        let mut t = Thread::default();
+        assert!(t.push_user("q"));
+        let mut s = Stream::new();
+        // Anthropic streams no event for the redacted block (index 1).
+        s.event(Event::Thinking { index: 0, text: "why".into() });
+        s.event(ev_text(2, "answer"));
+        s.event(Event::ToolCallStarted { id: "c1".into(), name: "read_scene".into() });
+        s.event(ev_text(4, "more"));
+        let streaming: Vec<Key> = build(&t, &s, true).into_iter().skip(1).map(|r| r.key).collect();
+        let redacted = Block::Native {
+            protocol: scriptorium_agent::Protocol::Anthropic,
+            value: json!({"type": "redacted_thinking"}),
+        };
+        t.push_turn(
+            asst(
+                vec![
+                    Block::Thinking { text: "why".into(), signature: None },
+                    redacted,
+                    Block::Text { text: "answer".into() },
+                    Block::ToolCall(call("c1", "read_scene", json!({"scene": 1}))),
+                    Block::Text { text: "more".into() },
+                ],
+                Usage::default(),
+                StopReason::ToolUse,
+            ),
+            origin(),
+        );
+        s.clear();
+        let pushed: Vec<Key> = build(&t, &s, true).into_iter().skip(1).map(|r| r.key).collect();
+        assert_eq!(
+            pushed,
+            [
+                Key::Block { message: 1, block: 0 },
+                Key::Redacted { message: 1, block: 1 },
+                Key::Block { message: 1, block: 1 },
+                Key::Tool("c1".into()),
+                Key::Block { message: 1, block: 2 },
+            ]
+        );
+        let without_redacted: Vec<Key> = pushed.into_iter().filter(|k| !matches!(k, Key::Redacted { .. })).collect();
+        assert_eq!(streaming, without_redacted);
+    }
+
+    #[test]
+    fn calls_without_ids_get_keys_of_their_own() {
+        let mut t = Thread::default();
+        assert!(t.push_user("q"));
+        let mut s = Stream::new();
+        s.event(Event::ToolCallStarted { id: String::new(), name: "read_scene".into() });
+        s.event(Event::ToolCallStarted { id: String::new(), name: "script_info".into() });
+        let streaming: Vec<Key> = build(&t, &s, true).into_iter().skip(1).map(|r| r.key).collect();
+        assert_eq!(streaming, [Key::ToolAt { message: 1, n: 0 }, Key::ToolAt { message: 1, n: 1 }]);
+        // push_turn gives id-less calls ids; a message that has none anyway
+        // (pushed some other way) still keys each call apart.
+        t.messages.push(Message::assistant(vec![
+            Block::ToolCall(call("", "read_scene", json!({"scene": 1}))),
+            Block::ToolCall(call("", "script_info", json!({}))),
+        ]));
+        s.clear();
+        let pushed: Vec<Key> = build(&t, &s, true).into_iter().skip(1).map(|r| r.key).collect();
         assert_eq!(streaming, pushed);
     }
 
