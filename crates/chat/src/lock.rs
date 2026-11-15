@@ -82,24 +82,27 @@ pub struct OwnRuns {
 /// [`OwnRuns`]. Dropping it ends both.
 #[derive(Debug)]
 pub struct Run {
-    // Field order: the lock is released before the run leaves the set, so
-    // nothing in this process can see the thread "free" while still locked.
-    lock: ThreadLock,
+    /// Always `Some` until dropped: `Drop` takes it to release the lock
+    /// before the run leaves the set, so nothing in this process can see
+    /// the thread "free" while it is still locked.
+    lock: Option<ThreadLock>,
     key: PathBuf,
     running: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl Run {
     pub fn lock(&self) -> &ThreadLock {
-        &self.lock
+        self.lock.as_ref().expect("a run holds its lock until dropped")
     }
     pub fn id(&self) -> &str {
-        self.lock.id()
+        self.lock().id()
     }
 }
 
 impl Drop for Run {
     fn drop(&mut self) {
+        // Fields drop after this body, so release the lock here first.
+        drop(self.lock.take());
         self.running.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.key);
     }
 }
@@ -116,7 +119,7 @@ impl OwnRuns {
     pub fn start(&self, store: &ThreadStore, id: &str, wait: Duration) -> Result<Run, StoreError> {
         let key = self.reserve(store, id)?;
         match store.lock(id, wait) {
-            Ok(lock) => Ok(Run { lock, key, running: self.running.clone() }),
+            Ok(lock) => Ok(Run { lock: Some(lock), key, running: self.running.clone() }),
             Err(e) => {
                 self.set().remove(&key);
                 Err(e)
@@ -129,17 +132,22 @@ impl OwnRuns {
         let lock = store.create(ids)?;
         let key = key(&store.lock_path(lock.id())?);
         self.set().insert(key.clone());
-        Ok(Run { lock, key, running: self.running.clone() })
+        Ok(Run { lock: Some(lock), key, running: self.running.clone() })
     }
 
     /// Whether thread `id` could be run now: [`StoreError::RunningHere`]
     /// for this process's own runs (never probed: the probe would fail
     /// against this process's own lock), else [`ThreadStore::probe`].
+    ///
+    /// The key is reserved in the set for the length of the probe, so a
+    /// [`Self::start`] racing it gets [`StoreError::RunningHere`] (this
+    /// process is busy with the thread) rather than taking the probe's OS
+    /// lock for another program's run.
     pub fn probe(&self, store: &ThreadStore, id: &str) -> Result<(), StoreError> {
-        if self.is_running(store, id) {
-            return Err(StoreError::RunningHere);
-        }
-        store.probe(id)
+        let key = self.reserve(store, id)?;
+        let result = store.probe(id);
+        self.set().remove(&key);
+        result
     }
 
     fn reserve(&self, store: &ThreadStore, id: &str) -> Result<PathBuf, StoreError> {
@@ -250,6 +258,36 @@ mod tests {
         let new = runs.create(&store, &mut SequentialIds::default()).unwrap();
         assert_eq!(new.id(), "t0002");
         assert!(runs.is_running(&store, "t0002"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_probe_racing_a_start_never_reads_as_another_program() {
+        // Catches both races: a probe holding the OS lock unreserved (the
+        // start sees Busy), and a finished start leaving the set before its
+        // lock is released (the probe sees Busy). Each window is a few
+        // syscalls wide, so it takes many rounds to hit.
+        let (dir, store) = one_thread("race");
+        let runs = OwnRuns::default();
+        for _ in 0..2000 {
+            let barrier = std::sync::Barrier::new(2);
+            let (probed, started) = std::thread::scope(|s| {
+                let p = s.spawn(|| {
+                    barrier.wait();
+                    runs.probe(&store, "t0001")
+                });
+                let st = s.spawn(|| {
+                    barrier.wait();
+                    runs.start(&store, "t0001", Duration::ZERO).map(drop)
+                });
+                (p.join().unwrap(), st.join().unwrap())
+            });
+            // Whichever wins, the loser hears "running here", never Busy.
+            for r in [&probed, &started] {
+                assert!(matches!(r, Ok(()) | Err(StoreError::RunningHere)), "{r:?}");
+            }
+            assert!(!runs.is_running(&store, "t0001"));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
