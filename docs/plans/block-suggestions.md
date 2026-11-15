@@ -1,6 +1,6 @@
 # Plan: full script editing, then block suggestions
 
-Status: A1–A5 built and reviewed; A6, A7 and Phase B next. Revised after second review round (2026-11-15). Requested by the
+Status: Phase A (A1–A7) built and reviewed; Final Draft hand test pending; Phase B next. Revised after second review round (2026-11-15). Requested by the
 user: suggestions must be able to remove and add lines and change several
 paragraphs at once. That needs a script that can be fully edited and saved
 first, so the work is two phases. Follows v0.2.0.
@@ -29,9 +29,11 @@ first, so the work is two phases. Follows v0.2.0.
   came from a log scan. Each is fixed below.
 
 Second round (2026-11-15):
-- **Sync moves into Phase A** (A6) as a minimal guard: on a fresh-id clash
-  the host keeps its work unsaved, writes a set-aside file and asks the
-  writer to reload. Renumbering (B4) only if the guard proves insufficient.
+- **Sync moves into Phase A** (A6). Planned as a minimal guard (on a
+  fresh-id clash, keep the host's work unsaved, write a set-aside file, ask
+  the writer to reload) with renumbering (B4) as a fallback; built as
+  renumbering instead (2026-11-15), so B4 is merged into A6 and there is no
+  guard or set-aside flow for clashes.
 - **Refuse up front** (A3): wrapper members are marked "no structural
   edits" by `to_script`; editor, `Edit`, CLI and tool validation refuse at
   edit time; the writer's refusal stays only as a backstop.
@@ -300,35 +302,58 @@ printing the affected paragraphs with ids; `--json` prints
 refuse as in A3. MCP tools for these only when a writer asks (as with
 `edit_paragraph`); none now.
 
-## A6. Sync guard (D1) (`crates/review/src/sessionfile/sync.rs`, `with_unsaved`)
+## A6. Sync renumbering (D1, C3; was B4) (`crates/review/src/sessionfile/sync.rs`, `with_unsaved`; app reload)
 
-Today a host `InsertPara` whose id the reloaded document already has fails
-`applies` (`sync.rs:207`) and is reported lost; but if the other program
-made and then removed that id, it applies and the two programs disagree on
-what the id means. Guard: if the host's unsaved events introduce an id
-`≥ synced.next_id()` and `reloaded.next_id() > synced.next_id()`, don't
-merge. The host keeps its document and unsaved events as they are, writes
-them to a set-aside file next to the session file
-(`<session>.aside-<timestamp>.json`, same format), and shows "Another
-program added lines while you had unsaved changes. Your version is kept
-here and saved aside; reload to continue with theirs." Reload replaces the
-host's document; the set-aside file stays for recovery. The CLI holds no
-unsaved work (it runs under the lock), so this is app-only. Renumbering
-(B4) only if this proves too disruptive.
+Built as renumbering rather than the planned guard + set-aside file. When
+the other program added ids since the host last synced
+(`reloaded.next_id() > synced.next_id()`), every id the host gave out since
+(`≥ synced.next_id()`; never ids brought back by undo or
+`insert_para_with_id`) moves up by the same amount, onto ids the reloaded
+document has never used (`Renumber`). The map applies to every unsaved
+event: ops, selections, decision meta values (the grammar lives in
+`crates/review/src/meta.rs`: `@` lists, `=>` ids, `after:`, `start`) and
+`SetMeta` `from`; edits are checked and `net_changes` compares through it.
+A paragraph added is placed by its neighbour ids in the reloaded document,
+not the stored index: between the same two neighbours if both are still
+there and adjacent, by the surviving one if only one is (an end of the
+document, or the other program removed the other), else lost. The app
+remaps the cursor and anything held by id, and says what another program
+changed (including lines it removed). The CLI holds no unsaved work (it
+runs under the lock), so this is app-only.
 
-Tests: app inserts while the CLI inserts → clash, set-aside written,
-nothing merged; app text-only edits while the CLI inserts → merged as
-today; app inserts while the CLI only edits text → merged.
+Tests: app splits while the CLI appends (same fresh id) → both kept, the
+app's line renumbered; inserts placed by neighbours after renumbering;
+neighbours moved apart → lost, not misplaced; one neighbour removed → placed
+by the other; both gone → lost; undo/redo and merges of renumbered lines;
+decision values on new lines renumbered.
 
 ## A7. Existing line suggestions under structural edits (D3) (`crates/review`)
 
-- Pending, paragraph gone → unplaced, status "line removed"; accept
-  refused (`can_apply`).
-- Accepted, paragraph gone → the B3 status rule, pulled forward for N = 1:
-  Rewritten, MINE = `[cut]`.
-- Split → the item stays on the head (the original id); the card says "the
-  line has changed" (Rewritten if it was decided, Mismatch-style notice if
-  pending).
+- Pending, paragraph gone → the item keeps its number and place, status
+  "line removed"; every decision refused (`can_apply`).
+- Decided, paragraph gone → the B3 status rule, pulled forward for N = 1:
+  `Status::Rewritten`, shown as "line cut" on every surface
+  (`Session::status_label` / `line_label`); progress writes
+  `STATUS: rewritten` + `MINE: [cut]`, which reopening never writes in as text.
+- Split → the item stays on the head (the original id). It counts as a split
+  only if the cut was strictly inside the line's text *as it was then* (the
+  pass tracks each paragraph's length through its splices), so Enter at the
+  end of a line shortened by a decision or by hand is not a split. A split
+  joined back (or undone) is no change.
+- Joined (the next line joined onto it) → the item stays; a join undone or
+  split off again is no change. The joined-away line is "line removed" /
+  "line cut".
+- Retyped → outdated if pending; nothing refused; retyped back is no change.
+- **Refusal rule** (split or joined): accepting is refused, and so is keeping
+  the original over a decision (both would write a whole-line text into part
+  of the line); keep-current, rewrite and undecide (text left as is) are
+  allowed. `Session::check` returns a `Refusal`; each host phrases the way
+  out: the app "press E to rewrite this line", the CLI "use decide <n>
+  rewrite <text>", tools the neutral "rewrite it instead". `apply
+  --accept-all` leaves such suggestions and lists each one skipped and why.
+- Line changes for every paragraph come from one pass over the ops the log
+  applied (`Document::for_each_applied_op`, undo/redo included), cached on the
+  `Session` until the document changes.
 
 Tests for each, plus join and retype of a suggested line.
 
@@ -477,17 +502,9 @@ Tests: accepted block reopens placed (before ids gone); its after ids block
 another entry; keep mine after hand edits restores the BEFORE lines; cross-
 review accept refused; fuzzy tie → Ambiguous, clear winner → placed.
 
-## B4. Sync renumbering (C3; only if A6 proves insufficient)
+## B4. Sync renumbering — merged into A6
 
-`applies` already checks Insert/RemovePara by neighbour ids but replays the
-stored index; recompute indices from the neighbour ids in the reloaded
-document. Fresh = ids the host introduced that are `≥` the synced
-document's `next_id` (never ids brought back by undo or `restore_run`).
-Fresh ids that clash are renumbered to the target's fresh ids; the map is
-applied to every later unsaved event: ops, selections, decision meta values
-(`@` lists, `after:`, `=>`) and `SetMeta` `from`. `applies` and
-`net_changes` compare through the map. The shell remaps the cursor and
-review items.
+Built as part of A6 (see there).
 
 ## B5. Tools, CLI, MCP (`crates/tools`, `crates/cli`, `crates/mcp`)
 
@@ -528,19 +545,18 @@ follows from B3.
 | A2 | writer: id-diff, remove/insert/retype, templates, eol | `crates/fdx` | A1, A3 | strongest |
 | A4 | editor: drop `structural`, clipboard, Cmd/Ctrl+Enter notice; `paste_fragment` and the paste classifier (these live in `crates/core`, as `paste_fragment` needs `Edit`'s private `delete_range`; the editor calls them) | `crates/app/src/editor.rs` | A3 | Sonnet + headless smoke; strongest reviewer |
 | A5 | CLI `insert/remove/split/join/retype`, `--json` | `crates/cli` | A2, A3 | Sonnet |
-| A6 | sync guard, set-aside file | `sessionfile/sync.rs` | A3 | strongest |
+| A6 | sync renumbering (B4 merged in), app reload | `sessionfile/sync.rs`, `review/src/meta.rs`, `crates/app/src/{script_view,disk}.rs` | A3 | strongest |
 | A7 | line suggestions under structural edits | `crates/review` | A3 | strongest |
 | B1 | `Line`/`Entry`, block grammar, placeholders, v2 reader/writer | `crates/review/src/file.rs` | – | strongest |
 | B1b | migrate `Entry` callers | tools, cli, mcp, app | B1 | Sonnet |
 | B2 | `replace_run`, `restore_run`, move `FUZZY_THRESHOLD` (first, before B3) | `crates/core/src/{doc,text}.rs`, `review::matching` (constant import only) | A3 | strongest |
 | B3 | matcher, meta values, decide, status, `can_apply`, `append_entries` v2 header | `crates/review/src/{matching,session}.rs` | B1, B2, A7 | strongest |
-| B4 | renumbering (only if needed) | `sessionfile/sync.rs` | B3, A6 | strongest |
+| B4 | merged into A6 | – | – | – |
 | B5 | tool validation/schema/prompt; CLI/MCP flags | tools (+ cli/mcp) | B3 | strongest + Sonnet |
 | B6 | card, dots | `crates/app/src/script_view.rs` | B3 | Sonnet + headless smoke |
 
 Order: A1 ‖ A3 → A2 ‖ A4 ‖ A6 ‖ A7 → A5 → **Final Draft hand test gates
-the release**; then B1 ‖ B2 (B2 moves `FUZZY_THRESHOLD` before B3 starts) → B1b, B3 → B5 ‖ B6 (B4 only if A6 falls
-short). Two reviewers per piece (correctness, design), fresh contexts.
+the release**; then B1 ‖ B2 (B2 moves `FUZZY_THRESHOLD` before B3 starts) → B1b, B3 → B5 ‖ B6 (B4 is part of A6). Two reviewers per piece (correctness, design), fresh contexts.
 
 # Final Draft hand test (D8; gate for the Phase A release)
 
@@ -578,5 +594,5 @@ screenshot of each result.
 ## Open questions
 
 None from the user. For the next review: the classifier's Character rule
-(A3), the set-aside flow's wording and whether it is disruptive enough to
-need B4 (A6), the 0.05 fuzzy margin (B3).
+(A3), the 0.05 fuzzy margin (B3). (Whether A6 needed renumbering is
+settled: it is built as renumbering.)

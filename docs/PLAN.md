@@ -87,12 +87,8 @@ installed — GPUI fell back to another renderer and still drew fine):
     that have a scene summary (`<SceneProperties><Summary>`) when edited.
   - The legacy .fdx reader (reader 1, kept to check old sessions' line ids)
     is removed in v0.5.0.
-  - Until A6/A7 land: structural edits in the app while the CLI or Claude adds
-    lines at the same moment can clash (a new paragraph number may be taken by
-    both; the app keeps its work in a set-aside file). A suggestion whose line
-    was removed isn't yet shown as "line removed", and split/joined lines get no
-    "line changed" notice. Dual dialogue lines can't be split, joined or removed
-    yet.
+  - Dual dialogue lines can't be split, joined or removed (their text can be
+    edited).
   - Not yet tried: a real IME (fcitx5/ibus), macOS, Windows, spellcheck.
 
 ## Roadmap: AI features (draft, 2026-11-14)
@@ -317,8 +313,10 @@ Known gaps:
   clash). Two CLI runs at once still race: last writer wins.
 - If a review file changes (edited, or progress written into it), its id
   changes and its decisions no longer show as decisions (the text changes stay).
-- Paragraph ids are positions in the `.fdx`, which is fine while paragraphs
-  can't be added or removed. Open question 5 still stands.
+- Paragraph ids are positions in the `.fdx`; paragraphs can now be added and
+  removed (ids are never reused), but open question 5 still stands.
+- v0.3.0 Phase A (full editing) is built; the release waits on the Final Draft
+  hand test (checklist in `plans/block-suggestions.md`) and Phase B.
 - No dark theme; review keys are single letters only while the card has focus.
 - Not tried yet: macOS, Windows, a real IME in the review flow.
 

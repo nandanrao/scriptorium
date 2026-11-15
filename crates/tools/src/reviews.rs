@@ -1,22 +1,15 @@
 //! Listing attached reviews and their suggestions.
 
-use scriptorium_core::Document;
+use std::collections::HashMap;
+
 use scriptorium_core::outline::annotate;
+use scriptorium_core::{Document, ParaId};
 use scriptorium_review::{Item, Session, Status};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::args::Args;
 use crate::{Ctx, ToolError};
-
-pub(crate) fn status_name(s: Status) -> String {
-    match s {
-        Status::Pending => "pending".into(),
-        Status::Accepted(k) => format!("accepted {}", k + 1),
-        Status::Rejected => "kept".into(),
-        Status::Rewritten => "rewritten".into(),
-    }
-}
 
 pub(crate) fn list_reviews(ctx: &Ctx, summary: bool) -> String {
     let rows: Vec<Value> = ctx
@@ -31,6 +24,7 @@ pub(crate) fn list_reviews(ctx: &Ctx, summary: bool) -> String {
                 "default": ctx.default_review == Some(r),
                 "total": p.total, "pending": p.pending, "accepted": p.accepted,
                 "kept": p.rejected, "rewritten": p.rewritten,
+                "removed": p.removed,
             });
             if summary {
                 let unmatched: Vec<Value> =
@@ -68,14 +62,42 @@ pub fn find_review(session: &Session, path: &str) -> Option<usize> {
 }
 
 /// Each item's number (1-based) as listings show it and `decide` takes it:
-/// by the paragraph's position in `doc` as it is now (its matched position
-/// if the paragraph is gone), so `#n` is 1 + the number of items before it in
-/// the script. Items keep their order in `items` (hosts rely on stable item
-/// indices; [`Session::append_entries`] adds new ones at the end), so the
-/// number is computed, not the vector position.
+/// by the paragraph's position in `doc` as it is now, so `#n` is 1 + the
+/// number of items before it in the script. Items keep their order in
+/// `items` (hosts rely on stable item indices; [`Session::append_entries`]
+/// adds new ones at the end), so the number is computed, not the vector
+/// position.
+///
+/// An item whose paragraph is gone (removed or joined away) keeps a number,
+/// so removing a line shifts no `#n`: it goes right after the surviving item
+/// that came before it when matched (by matched position, [`Item::index`]),
+/// which is where it was numbered before the line went, and where a reopened
+/// session places it.
+///
+/// One lookup map and two sorts: fast enough to call per refresh on a long
+/// script (hosts that render often should still keep the result).
 pub fn item_numbers(doc: &Document, items: &[Item]) -> Vec<usize> {
+    let position: HashMap<ParaId, usize> = doc.paragraphs().iter().enumerate().map(|(i, p)| (p.id, i)).collect();
+    let live: Vec<Option<usize>> = items.iter().map(|it| position.get(&it.para).copied()).collect();
+    // Sweep in matched order; a gone item takes the live position of the
+    // last live item before it (its anchor).
+    let mut matched: Vec<usize> = (0..items.len()).collect();
+    matched.sort_unstable_by_key(|&i| (items[i].index, i));
+    let mut anchor = vec![None; items.len()];
+    let mut last_live = None;
+    for &i in &matched {
+        match live[i] {
+            Some(pos) => last_live = Some(pos),
+            None => anchor[i] = last_live,
+        }
+    }
+    // (live position of the anchor, 0 for a live item / 1 + matched position for a gone one, i)
+    let key = |i: usize| match live[i] {
+        Some(pos) => (Some(pos), 0, i),
+        None => (anchor[i], 1 + items[i].index, i),
+    };
     let mut order: Vec<usize> = (0..items.len()).collect();
-    order.sort_by_key(|&i| (doc.index_of(items[i].para).unwrap_or(items[i].index), i));
+    order.sort_unstable_by_key(|&i| key(i));
     let mut numbers = vec![0; items.len()];
     for (k, &i) in order.iter().enumerate() {
         numbers[i] = k + 1;
@@ -151,6 +173,11 @@ struct SuggestionRow {
     status: String,
     /// Pending, but the line changed since the suggestion was written.
     outdated: bool,
+    /// How the line was changed structurally since ("line removed", "line
+    /// cut", "line split", "line joined with the next", "line retyped");
+    /// absent if not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<&'static str>,
     fuzzy: bool,
     current: String,
     before: String,
@@ -180,8 +207,9 @@ pub(crate) fn list_suggestions(ctx: &Ctx, a: &Args) -> Result<String, ToolError>
                 kind: p.map(|p| p.kind.name().to_string()).unwrap_or_default(),
                 scene: c.map(|c| c.scene.clone()).unwrap_or_default(),
                 speaker: c.map(|c| c.speaker.clone()).unwrap_or_default(),
-                status: status_name(session.status(doc, r, i)),
+                status: session.status_label(doc, r, i),
                 outdated: session.is_outdated(doc, r, i),
+                line: session.line_label(doc, r, i),
                 fuzzy: it.fuzzy,
                 current: p.map(|p| p.text()).unwrap_or_default(),
                 before: it.before.clone(),

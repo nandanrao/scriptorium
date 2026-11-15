@@ -285,6 +285,9 @@ fn list_reviews(script: &str, notes: &mut Vec<String>) -> Result<String, String>
             p.rewritten,
             p.pending
         );
+        if p.removed > 0 {
+            let _ = writeln!(out, "  {} on lines removed since (can't be decided)", p.removed);
+        }
     }
     Ok(out)
 }
@@ -337,15 +340,6 @@ pub fn remove_reviews(script: &str, files: &[&str]) -> Result<String, String> {
     Ok(out)
 }
 
-fn status_name(s: Status) -> String {
-    match s {
-        Status::Pending => "pending".into(),
-        Status::Accepted(k) => format!("accepted {}", k + 1),
-        Status::Rejected => "kept".into(),
-        Status::Rewritten => "rewritten".into(),
-    }
-}
-
 fn summary(o: &Opened) -> String {
     let mut out = String::new();
     for (r, review) in o.session.reviews.iter().enumerate() {
@@ -358,6 +352,9 @@ fn summary(o: &Opened) -> String {
             "  decided       {} accepted, {} kept, {} rewritten, {} pending",
             p.accepted, p.rejected, p.rewritten, p.pending
         );
+        if p.removed > 0 {
+            let _ = writeln!(out, "  line removed  {} (their lines were removed since; can't be decided)", p.removed);
+        }
         if !review.invisible.is_empty() {
             let _ = writeln!(
                 out,
@@ -388,6 +385,11 @@ struct SuggestionRow {
     status: String,
     /// Pending, but the line changed since the suggestion was written.
     outdated: bool,
+    /// How the line was changed structurally since ("line removed", "line
+    /// cut", "line split", "line joined with the next", "line retyped");
+    /// absent if not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<&'static str>,
     fuzzy: bool,
     current: String,
     before: String,
@@ -417,15 +419,17 @@ fn suggestions(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<S
         .enumerate()
         .filter(|(i, _)| !pending_only || o.session.status(&o.doc, r, *i) == Status::Pending)
         .map(|(i, it)| {
-            let ix = o.doc.index_of(it.para).unwrap_or(it.index);
+            let ix = o.doc.index_of(it.para);
+            let (p, c) = (ix.map(|ix| &o.doc.paragraphs()[ix]), ix.map(|ix| &ctx[ix]));
             SuggestionRow {
                 n: numbers[i],
                 paragraph: it.para.0,
-                kind: o.doc.paragraphs()[ix].kind.name().to_string(),
-                scene: ctx[ix].scene.clone(),
-                speaker: ctx[ix].speaker.clone(),
-                status: status_name(o.session.status(&o.doc, r, i)),
+                kind: p.map(|p| p.kind.name().to_string()).unwrap_or_default(),
+                scene: c.map(|c| c.scene.clone()).unwrap_or_default(),
+                speaker: c.map(|c| c.speaker.clone()).unwrap_or_default(),
+                status: o.session.status_label(&o.doc, r, i),
                 outdated: o.session.is_outdated(&o.doc, r, i),
+                line: o.session.line_label(&o.doc, r, i),
                 fuzzy: it.fuzzy,
                 current: o.text(it.para),
                 before: it.before.clone(),
@@ -440,13 +444,21 @@ fn suggestions(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<S
     }
     let mut out = String::new();
     for r in rows {
-        let flags = [(r.outdated, " (line changed since)"), (r.fuzzy, " (matched approximately)")]
-            .iter()
-            .filter(|(on, _)| *on)
-            .map(|(_, t)| *t)
-            .collect::<String>();
+        // A removed line says so in its status; any other structural change
+        // is named in the "line changed" flag.
+        let changed = match r.line {
+            Some(l) if r.status != l => format!(" (line changed since: {l})"),
+            Some(_) => String::new(),
+            None if r.outdated => " (line changed since)".into(),
+            None => String::new(),
+        };
+        let flags = changed + if r.fuzzy { " (matched approximately)" } else { "" };
         let _ = writeln!(out, "#{} ¶{} {}{flags}", r.n, r.paragraph, r.status);
-        let _ = writeln!(out, "  now: {}", r.current);
+        if matches!(r.line, Some("line removed" | "line cut")) {
+            let _ = writeln!(out, "  was: {}", r.before);
+        } else {
+            let _ = writeln!(out, "  now: {}", r.current);
+        }
         for (k, opt) in r.options.iter().enumerate() {
             let _ = writeln!(out, "  {}: {opt}", k + 1);
         }
@@ -558,12 +570,18 @@ fn decide_in(
         Choice::Undecide => Decision::Undecided,
         Choice::Rewrite(text) => Decision::Rewrite(text),
     };
+    let n = item_numbers(&o.doc, &o.session.reviews[r].items)[i];
+    o.session.check(&o.doc, r, i, &d).map_err(|e| format!("#{n}: {}", e.message(&rewrite_hint(n))))?;
     let sel = o.sel();
     o.session.decide(&mut o.doc, sel, r, i, d).map_err(|e| e.to_string())?;
     o.save()?;
     let item = o.session.item(r, i);
-    let n = item_numbers(&o.doc, &o.session.reviews[r].items)[i];
-    Ok(format!("#{n} {}: {}\n", status_name(o.session.status(&o.doc, r, i)), o.text(item.para)))
+    Ok(format!("#{n} {}: {}\n", o.session.status_label(&o.doc, r, i), o.text(item.para)))
+}
+
+/// How the CLI tells someone to rewrite suggestion `n` (see [`scriptorium_review::Refusal::message`]).
+fn rewrite_hint(n: usize) -> String {
+    format!("use decide {n} rewrite <text>")
 }
 
 /// Replace paragraph `para`'s whole text, and save. `reviews` (paths from the
@@ -763,12 +781,29 @@ pub fn apply(
     if !o.given.is_empty() {
         o.save()?;
     }
+    let mut skipped = String::new();
     if accept_all {
         let sel = o.sel();
         for r in 0..o.session.reviews.len() {
-            for i in 0..o.session.reviews[r].items.len() {
-                if o.session.status(&o.doc, r, i) == Status::Pending {
-                    o.session.decide(&mut o.doc, sel, r, i, Decision::Accept(0)).map_err(|e| e.to_string())?;
+            let numbers = item_numbers(&o.doc, &o.session.reviews[r].items);
+            let mut order: Vec<usize> = (0..numbers.len()).collect();
+            order.sort_by_key(|&i| numbers[i]);
+            for i in order {
+                // A gone, split or joined line can't take a whole-line option:
+                // left as it is, and said.
+                let pending = matches!(o.session.status(&o.doc, r, i), Status::Pending | Status::Removed);
+                if !pending {
+                    continue;
+                }
+                match o.session.check(&o.doc, r, i, &Decision::Accept(0)) {
+                    Ok(()) => {
+                        o.session.decide(&mut o.doc, sel, r, i, Decision::Accept(0)).map_err(|e| e.to_string())?;
+                    }
+                    Err(e) => {
+                        let n = numbers[i];
+                        let name = &o.session.reviews[r].name;
+                        let _ = writeln!(skipped, "skipped {name} #{n}: {}", e.message(&rewrite_hint(n)));
+                    }
                 }
             }
         }
@@ -782,7 +817,7 @@ pub fn apply(
     let original = o.fdx.to_script();
     let changed = changed_paragraphs(&original.paragraphs, o.doc.paragraphs());
     write_atomic(&out, raw.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
-    Ok(format!("wrote {} ({changed} paragraphs changed)\n", out.display()))
+    Ok(format!("{skipped}wrote {} ({changed} paragraphs changed)\n", out.display()))
 }
 
 /// Paragraphs that differ between the original and the edited script, by id:

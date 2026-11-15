@@ -36,6 +36,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
@@ -198,8 +199,12 @@ impl std::error::Error for DocError {}
 pub const FIXED_MESSAGE: &str =
     "Dual dialogue lines can't be added, removed or split here; edit their text, or change them in Final Draft.";
 
+/// Source of [`Document::origin`] values.
+static NEXT_ORIGIN: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Debug, Clone)]
 pub struct Document {
+    origin: u64,
     initial: Script,
     initial_meta: BTreeMap<String, String>,
     script: Script,
@@ -229,6 +234,7 @@ impl Document {
         }
         let next_id = script.paragraphs.iter().map(|p| p.id.0 + 1).max().unwrap_or(0).max(script.id_floor);
         Self {
+            origin: NEXT_ORIGIN.fetch_add(1, Ordering::Relaxed),
             initial: script.clone(),
             initial_meta: meta.clone(),
             script,
@@ -284,6 +290,14 @@ impl Document {
 
     pub fn script(&self) -> &Script {
         &self.script
+    }
+
+    /// Identifies where this document's history started: unique to each
+    /// [`Document::new`], [`Document::with_meta`] and [`Document::rebase`]
+    /// (so also each replay), shared by clones. Lets a cache tell a rebased
+    /// document from its predecessor when other counts happen to match.
+    pub fn origin(&self) -> u64 {
+        self.origin
     }
 
     /// The id the next new paragraph gets. Every id below it has been used
@@ -646,6 +660,47 @@ impl Document {
         out
     }
 
+    /// Calls `f` with every op applied since the starting point, in order:
+    /// each logged edit's ops, and for an undo (redo) the inverses (the ops)
+    /// of the group it undid (redid), as [`Document::undo`] applies them.
+    /// Replays only the undo history, not the text, so it is cheap.
+    pub fn for_each_applied_op(&self, mut f: impl FnMut(&Op)) {
+        let (mut undo, mut redo): (Vec<Vec<&Transaction>>, Vec<Vec<&Transaction>>) = (vec![], vec![]);
+        let mut after_edit = false;
+        for e in &self.log {
+            match e {
+                Event::Edit(t) => {
+                    t.ops.iter().for_each(&mut f);
+                    let coalesce = coalesces(after_edit, undo.last().and_then(|g| g.last().copied()), t);
+                    redo.clear();
+                    match undo.last_mut() {
+                        Some(g) if coalesce => g.push(t),
+                        _ => undo.push(vec![t]),
+                    }
+                }
+                Event::Undo => {
+                    if let Some(g) = undo.pop() {
+                        g.iter().rev().flat_map(|t| t.ops.iter().rev()).for_each(|op| f(&op.inverse()));
+                        redo.push(g);
+                    }
+                }
+                Event::Redo => {
+                    if let Some(g) = redo.pop() {
+                        g.iter().flat_map(|t| &t.ops).for_each(&mut f);
+                        undo.push(g);
+                    }
+                }
+                Event::MergeUndo { depth } => {
+                    if undo.len() > depth + 1 {
+                        let merged: Vec<&Transaction> = undo.drain(depth..).flatten().collect();
+                        undo.push(merged);
+                    }
+                }
+            }
+            after_edit = matches!(e, Event::Edit(_));
+        }
+    }
+
     /// Undo the last undo group; returns the selection from before it.
     pub fn undo(&mut self) -> Option<Selection> {
         let group = self.undo.pop()?;
@@ -719,13 +774,8 @@ impl Document {
     }
 
     fn record_edit(&mut self, t: Transaction) {
-        let coalesce = matches!(self.log.last(), Some(Event::Edit(_)))
-            && t.group != Group::Other
-            && self.undo.last().and_then(|g| g.last()).is_some_and(|prev| {
-                prev.group == t.group
-                    && prev.after == t.before
-                    && !(t.group == Group::Typing && starts_word(&t) && !ends_with_space(prev))
-            });
+        let coalesce =
+            coalesces(matches!(self.log.last(), Some(Event::Edit(_))), self.undo.last().and_then(|g| g.last()), &t);
         self.log.push(Event::Edit(t.clone()));
         self.redo.clear();
         match self.undo.last_mut() {
@@ -1074,6 +1124,18 @@ fn inserted_text(t: &Transaction) -> String {
             _ => None,
         })
         .collect()
+}
+
+/// Whether edit `t`, logged right after an edit (`after_edit`) or not,
+/// joins the undo group whose last transaction is `prev`.
+fn coalesces(after_edit: bool, prev: Option<&Transaction>, t: &Transaction) -> bool {
+    after_edit
+        && t.group != Group::Other
+        && prev.is_some_and(|prev| {
+            prev.group == t.group
+                && prev.after == t.before
+                && !(t.group == Group::Typing && starts_word(t) && !ends_with_space(prev))
+        })
 }
 
 fn starts_word(t: &Transaction) -> bool {

@@ -12,20 +12,46 @@
 //!
 //! Values are `accepted:<k>@<para>`, `rejected@<para>`, `rewritten@<para>`:
 //! the paragraph the decision was made on (built and read only through
-//! [`MetaValue`]). A value whose paragraph isn't the item's is ignored
+//! [`crate::meta`]). A value whose paragraph isn't the item's is ignored
 //! (pending), so deleting a block mid-file by hand orphans the decisions that
 //! shift onto other entries instead of moving them there. Values without `@`
 //! (written before this, and in the rebuilt starting point of a version 1
 //! session, whose saved events expect them) are read as they are.
+//!
+//! **Structural edits** to a suggested line (see [`LineChange`]): the item
+//! always stays on its paragraph id, so its number and decision survive.
+//! - The line is gone (removed, or joined into the line above): a pending
+//!   suggestion shows as [`Status::Removed`] ("line removed") and a decided one
+//!   as [`Status::Rewritten`] (its text was cut); neither can be decided
+//!   ([`Session::can_apply`]). Reopening a saved session keeps them
+//!   (see [`crate::matching::match_live`]).
+//! - The line was split (the item stays on the head, which keeps the id) or
+//!   had the next line joined onto it: its text is now only part of (or more
+//!   than) one paragraph, so writing a whole-line text into it would
+//!   duplicate (or drop) the rest. Accepting is refused ([`Refusal::LineChanged`],
+//!   which each host phrases with its own way to rewrite), as is keeping the
+//!   original over a decision; keeping the current text, rewriting and going
+//!   back to undecided (which leaves the text as it is) are allowed. A
+//!   pending one shows as outdated. A split counts only if it cut the line's
+//!   text as it was then (Enter at the end of a shortened line is not a
+//!   split), and a split undone by joining the same two lines back (or the
+//!   reverse) is no change.
+//!
+//! Hosts name these the same way everywhere ([`Session::status_label`],
+//! [`Session::line_label`]): "line removed" (pending, gone), "line cut"
+//! (decided, then gone; `STATUS: rewritten` and `MINE: [cut]` in the file).
+//! - The line was retyped: nothing is refused; a pending one shows as outdated.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
-use scriptorium_core::doc::DocError;
+use scriptorium_core::doc::{DocError, Event, Op};
 use scriptorium_core::text::{normalize, similarity};
 use scriptorium_core::{Document, ElementKind, ParaId, Script, Selection};
 
 use crate::file::{Entry, FileStatus, ReviewFile, append_block, insert_id};
 use crate::matching::{FUZZY_THRESHOLD, Match, Para, match_live, match_para};
+use crate::meta::{MetaValue, Stored};
 
 /// What the writer decides about a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +73,183 @@ pub enum Status {
     Accepted(usize),
     Rejected,
     Rewritten,
+    /// Pending, but its line is gone (removed, or joined into the line
+    /// above): it can't be decided any more. "line removed".
+    Removed,
+}
+
+/// How a suggestion's line has been changed structurally since the
+/// suggestion was written (see the module docs for what each allows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineChange {
+    /// The paragraph no longer exists: removed, or joined into the line above.
+    Removed,
+    /// The paragraph was split in the middle; the item stays on the head.
+    Split,
+    /// The next line was joined onto the paragraph.
+    Joined,
+    /// The paragraph's element type changed.
+    Retyped,
+}
+
+impl LineChange {
+    /// How listings and the card name it. A line removed after it was
+    /// decided is "line cut" instead (see [`Session::line_label`]).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Removed => "line removed",
+            Self::Split => "line split",
+            Self::Joined => "line joined with the next",
+            Self::Retyped => "line retyped",
+        }
+    }
+}
+
+/// Why a decision can't be made now ([`Session::check`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// `Accept(k)` with no option `k` (0-based); there are `count`.
+    NoOption { k: usize, count: usize },
+    /// The line is gone ([`LineChange::Removed`]): nothing can be decided.
+    LineRemoved { para: ParaId },
+    /// The line was split or joined: accepting (or keeping the original over
+    /// a decision) would write a whole-line text into part of the line.
+    LineChanged { para: ParaId, how: LineChange },
+}
+
+impl Refusal {
+    /// The message, ending with `rewrite`: how this host rewrites a line
+    /// (the app: "press E to rewrite this line"; the CLI: "use decide <n>
+    /// rewrite <text>"). Only [`Refusal::LineChanged`] uses it.
+    pub fn message(&self, rewrite: &str) -> String {
+        match *self {
+            Self::NoOption { k, count } => format!("no option {} (1 to {count})", k + 1),
+            Self::LineRemoved { para } => format!(
+                "line removed: ¶{} was removed (or joined into the line above) since the suggestion was written, so \
+                 it can't be decided",
+                para.0
+            ),
+            Self::LineChanged { para, how } => {
+                let how = if how == LineChange::Split { "split" } else { "joined with the next line" };
+                format!(
+                    "line changed: ¶{} was {how} since the suggestion was written, so its text no longer fits the \
+                     line; {rewrite}",
+                    para.0
+                )
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    /// The neutral wording (tools and other hosts without a key for it).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message("rewrite it instead"))
+    }
+}
+
+/// [`LineChange`]s of every paragraph a document has had, worked out in one
+/// pass over its log ([`line_changes`]).
+#[derive(Debug, Default)]
+struct LineChanges {
+    changed: HashMap<ParaId, LineChange>,
+    live: HashSet<ParaId>,
+}
+
+impl LineChanges {
+    fn of(&self, para: ParaId) -> Option<LineChange> {
+        self.changed.get(&para).copied().or_else(|| (!self.live.contains(&para)).then_some(LineChange::Removed))
+    }
+}
+
+/// What a document is when its line changes were last worked out: the log's
+/// length (it only grows), plus the document's origin (a rebase starts a new one, however alike
+/// the counts) and a little more besides.
+type CacheKey = (u64, usize, u64, usize);
+
+fn cache_key(doc: &Document) -> CacheKey {
+    (doc.origin(), doc.log().len(), doc.next_id(), doc.paragraphs().len())
+}
+
+/// [`Session`]'s cache of [`LineChanges`]. Clones start empty.
+#[derive(Debug, Default)]
+struct LineCache(Mutex<Option<(CacheKey, Arc<LineChanges>)>>);
+
+impl Clone for LineCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// What has happened to one paragraph's line, while scanning the log.
+#[derive(Default)]
+struct Track {
+    /// Paragraphs split off it (cutting its text) and not joined back.
+    tails: Vec<ParaId>,
+    /// Paragraphs joined onto it and not split off again.
+    joined: Vec<ParaId>,
+    /// Its kind before its first retype.
+    first_kind: Option<ElementKind>,
+}
+
+/// Every paragraph's [`LineChange`] in `doc`, from the ops applied since
+/// its starting point (undo and redo included): one pass, tracking each
+/// paragraph's length to tell a split inside the text from Enter at its end.
+fn line_changes(doc: &Document) -> LineChanges {
+    use scriptorium_core::spans;
+    let mut len: HashMap<ParaId, usize> =
+        doc.initial().paragraphs.iter().map(|p| (p.id, spans::len(&p.spans))).collect();
+    let mut tracks: HashMap<ParaId, Track> = HashMap::new();
+    doc.for_each_applied_op(|op| match op {
+        Op::Splice { para, removed, inserted, .. } => {
+            let l = len.entry(*para).or_default();
+            *l = (*l + spans::len(inserted)).saturating_sub(spans::len(removed));
+        }
+        Op::Split { para, at, new_para, .. } => {
+            let l = len.get(para).copied().unwrap_or_default();
+            let t = tracks.entry(*para).or_default();
+            if let Some(j) = t.joined.iter().position(|p| p == new_para) {
+                t.joined.swap_remove(j); // a join undone
+            } else if *at > 0 && *at < l {
+                t.tails.push(*new_para);
+            }
+            len.insert(*para, (*at).min(l));
+            len.insert(*new_para, l.saturating_sub(*at));
+        }
+        Op::Merge { para, next, .. } => {
+            let t = tracks.entry(*para).or_default();
+            if let Some(j) = t.tails.iter().position(|p| p == next) {
+                t.tails.swap_remove(j); // a split joined back: no change
+            } else {
+                t.joined.push(*next);
+            }
+            let n = len.get(next).copied().unwrap_or_default();
+            *len.entry(*para).or_default() += n;
+        }
+        Op::SetKind { para, from, .. } => {
+            tracks.entry(*para).or_default().first_kind.get_or_insert_with(|| from.clone());
+        }
+        Op::InsertPara { para, .. } => {
+            len.insert(para.id, spans::len(&para.spans));
+        }
+        Op::RemovePara { .. } | Op::SetMeta { .. } => {}
+    });
+    let live: HashMap<ParaId, &ElementKind> = doc.paragraphs().iter().map(|p| (p.id, &p.kind)).collect();
+    let mut changed = HashMap::new();
+    for (id, t) in &tracks {
+        let Some(kind) = live.get(id) else { continue };
+        let change = if t.tails.iter().any(|p| live.contains_key(p)) {
+            LineChange::Split
+        } else if t.joined.iter().any(|p| !live.contains_key(p)) {
+            LineChange::Joined
+        } else if t.first_kind.as_ref().is_some_and(|k| k != *kind) {
+            LineChange::Retyped
+        } else {
+            continue;
+        };
+        changed.insert(*id, change);
+    }
+    LineChanges { changed, live: live.into_keys().collect() }
 }
 
 /// A suggestion matched to a paragraph.
@@ -140,62 +343,6 @@ fn paras<'a>(
         .collect()
 }
 
-/// What a decision value records, without the paragraph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stored {
-    /// `accepted:<k>`: option `k` of the item.
-    Accepted(usize),
-    /// `rejected`: kept as it was.
-    Rejected,
-    /// `rewritten`, or anything else that isn't one of the above.
-    Rewritten,
-}
-
-/// A decision as stored in document metadata under [`Session::key`]: the one
-/// place decision values are built and parsed. `<decision>@<para>`, or
-/// `<decision>` alone (`para: None`) in values written before paragraphs were
-/// recorded, which apply to whatever paragraph the item is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MetaValue {
-    decision: Stored,
-    para: Option<ParaId>,
-}
-
-impl MetaValue {
-    /// `None` for a value whose paragraph part isn't a paragraph id.
-    fn parse(value: &str) -> Option<Self> {
-        let (d, para) = match value.split_once('@') {
-            None => (value, None),
-            Some((d, p)) => (d, Some(ParaId(p.parse::<u64>().ok()?))),
-        };
-        let decision = match d {
-            "rejected" => Stored::Rejected,
-            d => match d.strip_prefix("accepted:").and_then(|k| k.parse::<usize>().ok()) {
-                Some(k) => Stored::Accepted(k),
-                None => Stored::Rewritten,
-            },
-        };
-        Some(Self { decision, para })
-    }
-
-    /// The decision in `value` if it was made on `para` (or doesn't say).
-    fn on(value: &str, para: ParaId) -> Option<Stored> {
-        Self::parse(value).filter(|v| v.para.is_none_or(|p| p == para)).map(|v| v.decision)
-    }
-
-    fn to_value(self) -> String {
-        let d = match self.decision {
-            Stored::Accepted(k) => format!("accepted:{k}"),
-            Stored::Rejected => "rejected".to_string(),
-            Stored::Rewritten => "rewritten".to_string(),
-        };
-        match self.para {
-            Some(p) => format!("{d}@{}", p.0),
-            None => d,
-        }
-    }
-}
-
 /// Why `e` (matched by [`Session::append_entries`]) found no paragraph.
 /// `claimed`: paragraphs taken by the review's items or earlier entries of the
 /// batch, with the entry that took each and the item it became.
@@ -232,6 +379,64 @@ fn unplaced(e: &Entry, para_only: bool, live: &[Para], claimed: &HashMap<ParaId,
     }
 }
 
+/// Every paragraph `doc` has had since its starting point, in script order:
+/// its starting paragraphs, with each line added since placed where it was
+/// added (and kept there after it's removed). Replays the log one event at a
+/// time.
+fn history_order(doc: &Document) -> Vec<ParaId> {
+    let ids = |d: &Document| d.paragraphs().iter().map(|p| p.id).collect::<Vec<_>>();
+    let mut order = ids(&Document::with_meta(doc.initial().clone(), doc.initial_meta().clone()));
+    let mut sim = Document::with_meta(doc.initial().clone(), doc.initial_meta().clone());
+    // Puts `new` just before `next` in `order` (or after `prev`, or last).
+    let place = |order: &mut Vec<ParaId>, new: ParaId, next: Option<ParaId>, prev: Option<ParaId>| {
+        if order.contains(&new) {
+            return;
+        }
+        let at = next
+            .and_then(|n| order.iter().position(|&p| p == n))
+            .or_else(|| prev.and_then(|p| order.iter().position(|&q| q == p).map(|i| i + 1)))
+            .unwrap_or(order.len());
+        order.insert(at, new);
+    };
+    for ev in doc.log() {
+        if let Event::Edit(t) = ev {
+            let mut live = ids(&sim);
+            for op in &t.ops {
+                match op {
+                    Op::InsertPara { index, para } => {
+                        let (next, prev) =
+                            (live.get(*index).copied(), index.checked_sub(1).and_then(|i| live.get(i).copied()));
+                        place(&mut order, para.id, next, prev);
+                        live.insert((*index).min(live.len()), para.id);
+                    }
+                    Op::RemovePara { para, .. } => live.retain(|&p| p != para.id),
+                    Op::Split { para, new_para, .. } => {
+                        let i = live.iter().position(|p| p == para).map_or(live.len(), |i| i + 1);
+                        place(&mut order, *new_para, live.get(i).copied(), Some(*para));
+                        live.insert(i, *new_para);
+                    }
+                    Op::Merge { next, .. } => live.retain(|p| p != next),
+                    _ => {}
+                }
+            }
+        }
+        match sim.replay_onto(std::slice::from_ref(ev)) {
+            Ok(d) => sim = d,
+            Err(_) => break,
+        }
+    }
+    order
+}
+
+/// Where paragraph `id`, which `doc` has had (in `order`, see
+/// [`history_order`]) but no longer has, would be now: the live position of
+/// the next line after it in `order` that still exists, else the end.
+/// `None` if `doc` never had it.
+fn gone_position(order: &[ParaId], doc: &Document, id: ParaId) -> Option<usize> {
+    let at = order.iter().position(|&p| p == id)?;
+    Some(order[at + 1..].iter().find_map(|&p| doc.index_of(p)).unwrap_or(doc.paragraphs().len()))
+}
+
 impl Review {
     /// The review id a file's text gives: its `Id:` header, else the first 12
     /// hex digits of [`crate::sessionfile::hash`] of the text.
@@ -260,7 +465,7 @@ impl Review {
     ) -> Self {
         let texts: Vec<String> = script.paragraphs.iter().map(|p| p.text()).collect();
         let paras = paras(&script.paragraphs, &texts, &is_caps);
-        Self::build(name.into(), text, &paras, &paras, &|_, _| false, script_name)
+        Self::build(name.into(), text, &paras, &paras, &|_, _| false, &|_| None, script_name)
     }
 
     /// [`Self::open`] for a script that may have been edited since it was
@@ -284,7 +489,10 @@ impl Review {
         let has_meta = |entry: usize, para: ParaId| {
             live.meta(&format!("review/{id}/{entry}")).and_then(|v| MetaValue::on(v, para)).is_some()
         };
-        Self::build(name.into(), text, &original_paras, &live_paras, &has_meta, script_name)
+        // Worked out only if an entry is on a gone line.
+        let history = std::cell::OnceCell::new();
+        let gone_at = |p: ParaId| gone_position(history.get_or_init(|| history_order(live)), live, p);
+        Self::build(name.into(), text, &original_paras, &live_paras, &has_meta, &gone_at, script_name)
     }
 
     fn build(
@@ -293,6 +501,7 @@ impl Review {
         original: &[Para],
         live: &[Para],
         has_meta: &dyn Fn(usize, ParaId) -> bool,
+        gone_at: &dyn Fn(ParaId) -> Option<usize>,
         script_name: &str,
     ) -> Self {
         let file = ReviewFile::parse(text);
@@ -306,10 +515,15 @@ impl Review {
                 file.script
             ));
         }
-        let matches = match_live(original, live, &file.entries, &HashSet::new(), has_meta);
+        let matches = match_live(original, live, &file.entries, &HashSet::new(), has_meta, gone_at);
 
         let (mut items, mut unmatched, mut invisible, mut restore) = (vec![], vec![], vec![], vec![]);
+        // Gone lines sort before the surviving line at their position.
+        let mut gone: HashSet<usize> = HashSet::new();
         for (entry, (e, m)) in file.entries.iter().zip(matches).enumerate() {
+            if m.as_ref().is_some_and(|m| m.gone) {
+                gone.insert(entry);
+            }
             let item = match place(entry, e, m) {
                 Placed::Unmatched => {
                     unmatched.push(Unmatched { entry, before: e.before.clone() });
@@ -324,6 +538,8 @@ impl Review {
             // Only decisions that can apply: an accepted option that would
             // change nothing visible (filtered out of the item) is dropped.
             let decision = match (e.status, &e.mine) {
+                // A cut line (Phase B's marker): never written in as text.
+                (FileStatus::Rewritten, Some(mine)) if mine.trim() == "[cut]" => None,
                 (FileStatus::Rewritten, Some(mine)) => Some(Decision::Rewrite(mine.clone())),
                 (FileStatus::Rejected, _) => Some(Decision::KeepMine),
                 (FileStatus::Accepted, _) => {
@@ -336,7 +552,7 @@ impl Review {
             }
             items.push(item);
         }
-        items.sort_by_key(|it| it.index);
+        items.sort_by_key(|it| (it.index, !gone.contains(&it.entry)));
         let id = Self::id_from(&file, text);
         Self {
             id,
@@ -422,11 +638,15 @@ pub struct Progress {
     pub accepted: usize,
     pub rejected: usize,
     pub rewritten: usize,
+    /// Pending suggestions whose line is gone ([`Status::Removed`]): neither
+    /// pending nor decided, since they can't be decided.
+    pub removed: usize,
 }
 
 impl Progress {
+    /// How many are decided (accepted, kept or rewritten).
     pub fn done(&self) -> usize {
-        self.total - self.pending
+        self.total - self.pending - self.removed
     }
 }
 
@@ -495,6 +715,8 @@ pub struct AppendedMany {
 #[derive(Debug, Clone, Default)]
 pub struct Session {
     pub reviews: Vec<Review>,
+    /// Line changes of the document last asked about (see [`cache_key`]).
+    lines: LineCache,
 }
 
 impl Session {
@@ -509,7 +731,7 @@ impl Session {
                 r.id = format!("{base}-{n}");
             }
         }
-        Self { reviews }
+        Self { reviews, lines: LineCache::default() }
     }
 
     pub fn item(&self, r: usize, i: usize) -> &Item {
@@ -517,7 +739,7 @@ impl Session {
     }
 
     /// The document metadata key holding the decision on item `i` of review
-    /// `r`. Its values are built and read only through [`MetaValue`].
+    /// `r`. Its values are built and read only through [`crate::meta`].
     pub fn key(&self, r: usize, i: usize) -> String {
         format!("review/{}/{}", self.reviews[r].id, self.item(r, i).entry)
     }
@@ -696,7 +918,7 @@ impl Session {
         let matches = if para_only {
             match_para(&live, &live, &read, &mut used.clone(), |_, _| false)
         } else {
-            match_live(&live, &live, &read, &used, |_, _| false)
+            match_live(&live, &live, &read, &used, |_, _| false, |_| None)
         };
 
         let mut file_text = review.text.clone();
@@ -748,12 +970,18 @@ impl Session {
     }
 
     /// Where item `i` of review `r` stands: its decision value under
-    /// [`Self::key`] (see [`MetaValue`]), checked against the paragraph's
-    /// current text (an accepted line edited since shows as rewritten).
+    /// [`Self::key`] (see [`crate::meta`]), checked against the paragraph's
+    /// current text (an accepted line edited since shows as rewritten). A
+    /// gone line is [`Status::Removed`] if pending, else
+    /// [`Status::Rewritten`].
     pub fn status(&self, doc: &Document, r: usize, i: usize) -> Status {
         let item = self.item(r, i);
+        let gone = doc.paragraph(item.para).is_none();
         match doc.meta(&self.key(r, i)).and_then(|v| MetaValue::on(v, item.para)) {
+            None if gone => Status::Removed,
             None => Status::Pending,
+            // Decided, then the line was cut: the B3 rule for one line.
+            Some(_) if gone => Status::Rewritten,
             Some(Stored::Rejected) => Status::Rejected,
             Some(Stored::Accepted(k)) if item.options.get(k).is_some_and(|o| *o == Self::text(doc, item.para)) => {
                 Status::Accepted(k)
@@ -763,10 +991,101 @@ impl Session {
     }
 
     /// Pending, but the paragraph has changed since the suggestion was written
-    /// (by hand, or by another review).
+    /// (by hand, or by another review), or was split, joined or retyped.
     pub fn is_outdated(&self, doc: &Document, r: usize, i: usize) -> bool {
         let item = self.item(r, i);
-        self.status(doc, r, i) == Status::Pending && Self::text(doc, item.para) != item.before
+        self.status(doc, r, i) == Status::Pending
+            && (Self::text(doc, item.para) != item.before || self.line_change(doc, r, i).is_some())
+    }
+
+    /// How item `i`'s line has changed structurally, if it has (see
+    /// [`LineChange`]), read from the document's paragraphs and the ops its
+    /// log applied (undo and redo included):
+    /// - [`LineChange::Removed`]: the paragraph doesn't exist.
+    /// - [`LineChange::Split`]: the paragraph was split at a point strictly
+    ///   inside its text as it was then (not at its end, which is Enter after
+    ///   the line), the tail still exists and wasn't joined back.
+    /// - [`LineChange::Joined`]: another line was joined onto it, wasn't split
+    ///   off again, and doesn't exist on its own.
+    /// - [`LineChange::Retyped`]: its type differs from its type before the
+    ///   first retype. A retype made before the suggestion was written (in
+    ///   the same session) counts too; the log doesn't say when the
+    ///   suggestion was written.
+    ///
+    /// The log runs from the session's starting point, which is saved, so the
+    /// answer survives reopening. Worked out for every paragraph in one pass
+    /// and cached until the document changes.
+    pub fn line_change(&self, doc: &Document, r: usize, i: usize) -> Option<LineChange> {
+        self.line_changes(doc).of(self.item(r, i).para)
+    }
+
+    fn line_changes(&self, doc: &Document) -> Arc<LineChanges> {
+        let key = cache_key(doc);
+        let mut cache = self.lines.0.lock().unwrap_or_else(|e| e.into_inner());
+        match &*cache {
+            Some((k, changes)) if *k == key => changes.clone(),
+            _ => {
+                let changes = Arc::new(line_changes(doc));
+                *cache = Some((key, changes.clone()));
+                changes
+            }
+        }
+    }
+
+    /// The status as every host names it: "pending", "accepted <n>", "kept",
+    /// "rewritten", "line cut" (decided, then the line went) or "line
+    /// removed" (pending, the line went).
+    pub fn status_label(&self, doc: &Document, r: usize, i: usize) -> String {
+        match self.status(doc, r, i) {
+            Status::Pending => "pending".into(),
+            Status::Accepted(k) => format!("accepted {}", k + 1),
+            Status::Rejected => "kept".into(),
+            Status::Rewritten if self.line_change(doc, r, i) == Some(LineChange::Removed) => "line cut".into(),
+            Status::Rewritten => "rewritten".into(),
+            Status::Removed => "line removed".into(),
+        }
+    }
+
+    /// [`LineChange::describe`] of item `i`'s line change, with a decided
+    /// line that is gone named "line cut".
+    pub fn line_label(&self, doc: &Document, r: usize, i: usize) -> Option<&'static str> {
+        let change = self.line_change(doc, r, i)?;
+        Some(if change == LineChange::Removed && self.status(doc, r, i) != Status::Removed {
+            "line cut"
+        } else {
+            change.describe()
+        })
+    }
+
+    /// Whether `decision` can be made on item `i` of review `r` now, and if
+    /// not, why: nothing on a gone line; no accepting on a split or joined
+    /// line, nor keeping the original over a decision there (either would
+    /// write a whole-line text into part of the line). [`Self::decide`]
+    /// refuses the same. Hosts phrase it with [`Refusal::message`].
+    pub fn check(&self, doc: &Document, r: usize, i: usize, decision: &Decision) -> Result<(), Refusal> {
+        let item = self.item(r, i);
+        let para = item.para;
+        if let Decision::Accept(k) = decision
+            && *k >= item.options.len()
+        {
+            return Err(Refusal::NoOption { k: *k, count: item.options.len() });
+        }
+        let how = match self.line_change(doc, r, i) {
+            Some(LineChange::Removed) => return Err(Refusal::LineRemoved { para }),
+            Some(how @ (LineChange::Split | LineChange::Joined)) => how,
+            _ => return Ok(()),
+        };
+        let decided = self.status(doc, r, i) != Status::Pending;
+        match decision {
+            Decision::Accept(_) => Err(Refusal::LineChanged { para, how }),
+            Decision::KeepMine if decided => Err(Refusal::LineChanged { para, how }),
+            _ => Ok(()),
+        }
+    }
+
+    /// [`Self::check`] with the neutral wording.
+    pub fn can_apply(&self, doc: &Document, r: usize, i: usize, decision: &Decision) -> Result<(), String> {
+        self.check(doc, r, i, decision).map_err(|e| e.to_string())
     }
 
     /// Record a decision: change the paragraph's text and the decision as one
@@ -793,11 +1112,22 @@ impl Session {
         legacy: bool,
     ) -> Result<Selection, DocError> {
         let item = self.item(r, i);
+        match self.check(doc, r, i, &decision) {
+            Ok(()) => {}
+            Err(Refusal::LineRemoved { para }) => return Err(DocError::MissingParagraph(para)),
+            Err(Refusal::LineChanged { .. }) => {
+                return Err(DocError::Mismatch("the line was split or joined since the suggestion was written"));
+            }
+            Err(Refusal::NoOption { .. }) => return Err(DocError::Mismatch("no such option")),
+        }
         let key = self.key(r, i);
         let current = Self::text(doc, item.para);
-        let untouched = self.status(doc, r, i) == Status::Pending;
+        // On a split or joined line, undoing a decision leaves the text as
+        // it is: the original would duplicate (or drop) the rest of the line.
+        let structural = matches!(self.line_change(doc, r, i), Some(LineChange::Split | LineChange::Joined));
+        let untouched = structural || self.status(doc, r, i) == Status::Pending;
         let para = (!legacy).then_some(item.para);
-        let value = |decision| Some(MetaValue { decision, para }.to_value());
+        let value = |decision| Some(MetaValue::line(decision, para).to_value());
         let (text, value) = match decision {
             Decision::Accept(k) => (item.options[k].clone(), value(Stored::Accepted(k))),
             Decision::KeepMine => (if untouched { current } else { item.before.clone() }, value(Stored::Rejected)),
@@ -823,7 +1153,7 @@ impl Session {
             None if text == item.before => Stored::Rejected,
             None => Stored::Rewritten,
         };
-        let value = MetaValue { decision, para: Some(item.para) }.to_value();
+        let value = MetaValue::line(decision, Some(item.para)).to_value();
         let key = self.key(r, i);
         doc.replace_text(sel, item.para, &text, &[(&key, Some(&value))])
     }
@@ -836,6 +1166,7 @@ impl Session {
                 Status::Accepted(_) => p.accepted += 1,
                 Status::Rejected => p.rejected += 1,
                 Status::Rewritten => p.rewritten += 1,
+                Status::Removed => p.removed += 1,
             }
         }
         p
@@ -867,7 +1198,8 @@ impl Session {
                 if let Some(&i) = item_of.get(&e) {
                     let item = &review.items[i];
                     match self.status(doc, r, i) {
-                        Status::Pending => {}
+                        // Can't be decided: kept as a pending suggestion.
+                        Status::Pending | Status::Removed => {}
                         Status::Accepted(k) => {
                             entry.status = FileStatus::Accepted;
                             entry.chosen = Some(item.option_src[k]);
@@ -875,7 +1207,9 @@ impl Session {
                         Status::Rejected => entry.status = FileStatus::Rejected,
                         Status::Rewritten => {
                             entry.status = FileStatus::Rewritten;
-                            entry.mine = Some(Self::text(doc, item.para));
+                            // A gone line has no text of its own: `[cut]`
+                            // (which reopening never writes in), never empty.
+                            entry.mine = Some(doc.paragraph(item.para).map_or_else(|| "[cut]".into(), |p| p.text()));
                         }
                     }
                 } else if review.unmatched.iter().any(|u| u.entry == e) {
@@ -887,30 +1221,5 @@ impl Session {
             .collect();
         ReviewFile { script: review.file.script.clone(), id: Some(review.id.clone()), entries, warnings: vec![] }
             .serialize()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn meta_values_round_trip_and_read_legacy_values() {
-        for (v, decision, para) in [
-            ("accepted:2@7", Stored::Accepted(2), Some(ParaId(7))),
-            ("rejected@0", Stored::Rejected, Some(ParaId(0))),
-            ("rewritten@31", Stored::Rewritten, Some(ParaId(31))),
-            ("accepted:1", Stored::Accepted(1), None),
-            ("rejected", Stored::Rejected, None),
-        ] {
-            let m = MetaValue::parse(v).unwrap();
-            assert_eq!(m, MetaValue { decision, para });
-            assert_eq!(m.to_value(), v);
-        }
-        assert_eq!(MetaValue::parse("accepted:x").unwrap().decision, Stored::Rewritten);
-        assert_eq!(MetaValue::parse("rejected@nope"), None);
-        assert_eq!(MetaValue::on("rejected@3", ParaId(3)), Some(Stored::Rejected));
-        assert_eq!(MetaValue::on("rejected@3", ParaId(4)), None);
-        assert_eq!(MetaValue::on("rejected", ParaId(4)), Some(Stored::Rejected));
     }
 }

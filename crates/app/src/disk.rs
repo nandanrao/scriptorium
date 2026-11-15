@@ -48,8 +48,11 @@ pub struct Summary {
     pub undecided: Vec<(String, usize)>,
     /// Lines changed by the other program outside its decisions.
     pub edited: usize,
-    /// The app's unsaved changes: how many were kept, and the text of those
-    /// that couldn't be applied (also written to the log).
+    /// Lines the other program removed outside its decisions.
+    pub removed: usize,
+    /// The app's unsaved changes: how many were kept, and what each one that
+    /// couldn't be applied was, ready to show (a quoted excerpt of its text,
+    /// or e.g. "a new empty line"; the full text is in the log).
     pub kept: usize,
     pub lost: Vec<String>,
     pub notes: Vec<String>,
@@ -81,6 +84,7 @@ impl Summary {
             add_all(&mut self.undecided, vec![u]);
         }
         self.edited += other.edited;
+        self.removed += other.removed;
         self.kept += other.kept;
         self.lost.extend(other.lost);
         add_all(&mut self.notes, other.notes);
@@ -110,6 +114,9 @@ impl Summary {
         if self.edited > 0 {
             parts.push(format!("{} line{} edited outside the app", self.edited, plural(self.edited)));
         }
+        if self.removed > 0 {
+            parts.push(format!("{} line{} removed outside the app", self.removed, plural(self.removed)));
+        }
         parts.extend(self.detached.iter().map(|n| format!("{n} detached from outside the app")));
         if let Some(first) = self.lost.first() {
             let n = self.lost.len();
@@ -117,10 +124,7 @@ impl Summary {
                 0 => String::new(),
                 k => format!("{k} change{} kept, ", plural(k)),
             };
-            parts.push(format!(
-                "reloaded: {kept}{n} couldn't apply (\u{201c}{}\u{201d}) \u{2014} text saved in log",
-                excerpt(first, 30)
-            ));
+            parts.push(format!("reloaded: {kept}{n} couldn't apply ({first}) \u{2014} text saved in log"));
         }
         parts.extend(self.notes.iter().cloned());
         (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
@@ -131,7 +135,7 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-fn excerpt(s: &str, max: usize) -> String {
+pub fn excerpt(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
@@ -175,6 +179,8 @@ pub fn summarize(old: &Session, before: &Document, new: &Session, after: &Docume
         .iter()
         .filter(|p| !decided_paras.contains(&p.id) && was.get(&p.id).is_none_or(|w| *w != *p))
         .count();
+    let now: std::collections::HashSet<_> = after.paragraphs().iter().map(|p| p.id).collect();
+    s.removed = before.paragraphs().iter().filter(|p| !decided_paras.contains(&p.id) && !now.contains(&p.id)).count();
     s
 }
 
@@ -262,7 +268,7 @@ mod tests {
             a.render().unwrap(),
             "2 new suggestions in dialogue-pass (from outside the app) · Undone outside the app: #3"
         );
-        let lost = Summary { kept: 1, lost: vec!["I am going to town tomorrow.".into()], ..Summary::default() };
+        let lost = Summary { kept: 1, lost: vec!["“I am going to town tomorrow.”".into()], ..Summary::default() };
         assert_eq!(
             lost.render().unwrap(),
             "reloaded: 1 change kept, 1 couldn't apply (“I am going to town tomorrow.”) — text saved in log"
@@ -306,6 +312,21 @@ mod tests {
             s.render().unwrap(),
             "1 new suggestion in dialogue-pass (from outside the app) · Decided outside the app: #3 · 1 line edited outside the app"
         );
+    }
+
+    #[test]
+    fn a_line_removed_outside_the_app_is_counted() {
+        let before = Document::new(script());
+        let s = session(REVIEW, &before);
+        let mut after = before.clone();
+        let sel = Selection::cursor(after.start());
+        after.edit(sel, scriptorium_core::doc::Group::Other, |e| Ok((sel, e.remove_para(ParaId(0))?))).unwrap();
+        let summary = summarize(&s, &before, &s, &after);
+        assert_eq!((summary.removed, summary.edited), (1, 0));
+        assert_eq!(summary.render().unwrap(), "1 line removed outside the app");
+        let mut merged = summary.clone();
+        merged.merge(summary);
+        assert_eq!(merged.render().unwrap(), "2 lines removed outside the app");
     }
 
     #[test]

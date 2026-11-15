@@ -47,6 +47,11 @@ pub struct Match {
     pub options: Vec<String>,
     /// `options[i]` came from the entry's option `option_src[i]`.
     pub option_src: Vec<usize>,
+    /// The paragraph no longer exists live (removed, or joined into the line
+    /// above, since the script was read): the entry is still placed on it,
+    /// so its decision and its number survive, but it can't be decided.
+    /// [`Match::index`] is then where the line would be (see [`match_live`]).
+    pub gone: bool,
 }
 
 /// One result per entry, in order: `None` if the entry's paragraph wasn't found.
@@ -114,7 +119,23 @@ fn make_match(index: usize, p: &Para, before: String, fuzzy: bool, score: f64, e
             option_src.push(k);
         }
     }
-    Match { index, para: p.id, fuzzy, score, before, options, option_src }
+    Match { index, para: p.id, fuzzy, score, before, options, option_src, gone: false }
+}
+
+/// Where a paragraph gone from `live` would be: `gone_at(id)` if it knows,
+/// else the live position of the next paragraph after it in `original` that
+/// still exists, else the live length.
+fn gone_index(
+    original: &[Para],
+    live_at: &HashMap<ParaId, usize>,
+    live_len: usize,
+    gone_at: &dyn Fn(ParaId) -> Option<usize>,
+    id: ParaId,
+) -> usize {
+    gone_at(id).unwrap_or_else(|| {
+        let from = original.iter().position(|p| p.id == id).map_or(original.len(), |i| i + 1);
+        original[from..].iter().find_map(|p| live_at.get(&p.id).copied()).unwrap_or(live_len)
+    })
 }
 
 /// Match `entries` against a script that may have been edited since it was
@@ -139,15 +160,28 @@ fn make_match(index: usize, p: &Para, before: String, fuzzy: bool, score: f64, e
 /// `BEFORE` equals; for a decided entry that equals neither, the `BEFORE`
 /// text itself (with the live paragraph's edge whitespace), never the
 /// post-decision text.
+///
+/// **Gone lines.** An entry whose paragraph has since been removed (or
+/// joined away) keeps it, as a [`Match::gone`] match, so a reopened session
+/// shows the same suggestions under the same numbers as before it was saved:
+/// in the `PARA:` pass when the id isn't live but is in `original` with a
+/// text that fits (or the entry was decided on it), or isn't in `original`
+/// but `gone_at(id)` knows it (a line added since the script was read, then
+/// removed); in the `BEFORE` pass when the original paragraph matched isn't
+/// live. `gone_at(id)` is where a paragraph that existed but isn't live would
+/// be now (a live position: that of the next surviving line), `None` if it
+/// never existed; [`Match::index`] of a gone match is that (for an original
+/// paragraph it doesn't know: the next surviving line of `original`).
 pub fn match_live(
     original: &[Para],
     live: &[Para],
     entries: &[Entry],
     used: &HashSet<ParaId>,
     has_meta: impl Fn(usize, ParaId) -> bool,
+    gone_at: impl Fn(ParaId) -> Option<usize>,
 ) -> Vec<Option<Match>> {
     let mut used = used.clone();
-    let mut out = match_para(original, live, entries, &mut used, has_meta);
+    let mut out = match_para_gone(original, live, entries, &mut used, has_meta, Some(&gone_at));
     let rest: Vec<usize> = (0..entries.len()).filter(|&n| out[n].is_none()).collect();
     if rest.is_empty() {
         return out;
@@ -157,11 +191,10 @@ pub fn match_live(
         original.iter().map(|p| Para { editable: p.editable && !used.contains(&p.id), ..p.clone() }).collect();
     let rest_entries: Vec<Entry> = rest.iter().map(|&n| entries[n].clone()).collect();
     for (n, m) in rest.into_iter().zip(match_entries(&paras, &rest_entries)) {
-        if let Some(m) = m
-            && let Some(&li) = live_at.get(&m.para)
-        {
-            out[n] = Some(Match { index: li, ..m });
-        }
+        out[n] = m.map(|m| match live_at.get(&m.para) {
+            Some(&li) => Match { index: li, ..m },
+            None => Match { index: gone_index(original, &live_at, live.len(), &gone_at, m.para), gone: true, ..m },
+        });
     }
     out
 }
@@ -177,15 +210,52 @@ pub fn match_para(
     used: &mut HashSet<ParaId>,
     has_meta: impl Fn(usize, ParaId) -> bool,
 ) -> Vec<Option<Match>> {
+    match_para_gone(original, live, entries, used, has_meta, None)
+}
+
+/// [`match_para`], also placing entries on gone lines (see [`match_live`])
+/// when `gone_at` is given.
+fn match_para_gone(
+    original: &[Para],
+    live: &[Para],
+    entries: &[Entry],
+    used: &mut HashSet<ParaId>,
+    has_meta: impl Fn(usize, ParaId) -> bool,
+    gone_at: Option<&dyn Fn(ParaId) -> Option<usize>>,
+) -> Vec<Option<Match>> {
     let live_at: HashMap<ParaId, usize> = live.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
     let original_at: HashMap<ParaId, usize> = original.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
     let mut out: Vec<Option<Match>> = vec![None; entries.len()];
     for (n, e) in entries.iter().enumerate() {
         let Some(id) = e.para else { continue };
         let key = normalize(&e.before);
-        let Some(&li) = live_at.get(&id) else { continue };
+        if key.is_empty() || used.contains(&id) {
+            continue;
+        }
+        let Some(&li) = live_at.get(&id) else {
+            let Some(gone_at) = gone_at else { continue };
+            let m = match original_at.get(&id).map(|&i| &original[i]) {
+                Some(op) if op.editable && (normalize(op.text) == key || has_meta(n, id)) => {
+                    let before = if normalize(op.text) == key {
+                        op.text.to_string()
+                    } else {
+                        keep_edge_whitespace(op.text, &e.before)
+                    };
+                    make_match(0, op, before, false, 1.0, e)
+                }
+                Some(_) => continue,
+                None if gone_at(id).is_some() => {
+                    let p = Para { id, text: &e.before, editable: true, caps: false };
+                    make_match(0, &p, e.before.clone(), false, 1.0, e)
+                }
+                None => continue,
+            };
+            used.insert(id);
+            out[n] = Some(Match { index: gone_index(original, &live_at, live.len(), gone_at, id), gone: true, ..m });
+            continue;
+        };
         let lp = &live[li];
-        if key.is_empty() || used.contains(&id) || !lp.editable {
+        if !lp.editable {
             continue;
         }
         let orig = original_at.get(&id).map(|&i| original[i].text);

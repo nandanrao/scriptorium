@@ -28,7 +28,7 @@ use scriptorium_core::outline::{ParaContext, annotate};
 use scriptorium_core::{Document, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::sessionfile::{self, Change, Disk, Resumed, Seen, SessionFile};
-use scriptorium_review::{Decision, Review, Session, Status};
+use scriptorium_review::{Decision, LineChange, Review, Session, Status};
 use scriptorium_tools::item_numbers;
 
 use crate::disk::{self, Plan};
@@ -308,6 +308,9 @@ pub struct ScriptView {
     rows: Vec<Rc<Vec<Row>>>,
     scene_rows: Rc<Vec<Row>>,
     row_of_item: Vec<Vec<usize>>,
+    /// Each review's item numbers (`scriptorium_tools::item_numbers`), as of
+    /// the last refresh, so rendering a card doesn't work them out again.
+    numbers: Vec<Vec<usize>>,
     item_by_para: Vec<HashMap<ParaId, usize>>,
     queue_scroll: UniformListScrollHandle,
     /// The status bar's message (cleared by the next key the writer presses).
@@ -384,6 +387,7 @@ impl ScriptView {
             rows: vec![],
             scene_rows: Rc::default(),
             row_of_item: vec![],
+            numbers: vec![],
             item_by_para: vec![],
             queue_scroll: UniformListScrollHandle::new(),
             notice: notices.join("  ").into(),
@@ -438,6 +442,15 @@ impl ScriptView {
         self.row_of_item = row_of_item;
         self.item_by_para = item_by_para;
         self.cur.resize(self.session.reviews.len(), None);
+    }
+
+    /// Item `i`'s number in review `r`, from the last refresh (worked out
+    /// afresh if the reviews changed since).
+    fn number(&self, doc: &Document, r: usize, i: usize) -> usize {
+        match self.numbers.get(r).and_then(|n| n.get(i)) {
+            Some(&n) if self.numbers[r].len() == self.session.reviews[r].items.len() => n,
+            _ => item_numbers(doc, &self.session.reviews[r].items)[i],
+        }
     }
 
     pub fn script_path(&self) -> &Path {
@@ -673,6 +686,8 @@ impl ScriptView {
         if structure_key(self.doc(cx).script()) != self.structure {
             self.rebuild_outline(cx);
         }
+        let doc = self.doc(cx);
+        self.numbers = self.session.reviews.iter().map(|review| item_numbers(doc, &review.items)).collect();
         let protect = self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para);
         let mut decor = Decor { originals: self.originals.clone(), ..Decor::default() };
         if let Some(r) = self.review() {
@@ -747,6 +762,11 @@ impl ScriptView {
 
     fn decide(&mut self, decision: Decision, window: &mut Window, cx: &mut Context<Self>) {
         let Some((r, i)) = self.current() else { return };
+        if let Err(e) = self.session.check(self.doc(cx), r, i, &decision) {
+            self.say(e.message(REWRITE_HINT));
+            cx.notify();
+            return;
+        }
         self.say("");
         self.rewriting = None;
         let session = self.session.clone();
@@ -1115,7 +1135,7 @@ impl ScriptView {
 
         let mut summary = disk::summarize(&self.session, &start, &session, &reloaded);
         summary.kept = count_changes(&session, &replayed.kept);
-        summary.lost = self.describe_lost(&session, &replayed.doc, &replayed.lost);
+        summary.lost = self.describe_lost(&session, &start, &replayed.doc, &replayed.lost);
         notes.retain(|n| self.shown_notes.insert(n.clone()));
         summary.notes = notes;
         let lost = !replayed.lost.is_empty();
@@ -1126,6 +1146,10 @@ impl ScriptView {
                         "reload: your change to paragraph {} clashed with another program's and wasn't applied. Your text: {text}",
                         id.0
                     )),
+                    Change::Removed(id, text) => crate::log::warn(&format!(
+                        "reload: removing paragraph {} clashed with another program's change and wasn't applied. Its text was: {text}",
+                        id.0
+                    )),
                     Change::Meta(key) => crate::log::warn(&format!(
                         "reload: your decision {key} clashed with another program's and wasn't applied"
                     )),
@@ -1134,6 +1158,23 @@ impl ScriptView {
             self.set_aside(&old_doc, "clashed with another program's changes", false);
         }
 
+        if !replayed.renumber.is_identity() {
+            let moved: Vec<String> = old_doc
+                .paragraphs()
+                .iter()
+                .filter_map(|p| {
+                    let to = replayed.renumber.id(p.id);
+                    (to != p.id && replayed.doc.paragraph(to).is_some()).then(|| format!("{}\u{2192}{}", p.id.0, to.0))
+                })
+                .collect();
+            if !moved.is_empty() {
+                crate::log::info(&format!(
+                    "reload: another program added lines too; your new lines were renumbered ({})",
+                    moved.join(", ")
+                ));
+            }
+        }
+        let renumber = replayed.renumber;
         let hi = self.hi;
         self.session = Rc::new(session);
         self.base = base;
@@ -1144,7 +1185,7 @@ impl ScriptView {
         self.editor.update(cx, |e, cx| {
             e.run(cx, |d, sel| {
                 *d = doc;
-                Ok(d.clamp_selection(sel))
+                Ok(d.clamp_selection(renumber.selection(sel)))
             })
         });
         self.cur = self
@@ -1186,13 +1227,32 @@ impl ScriptView {
     }
 
     /// The writer's changes a reload couldn't apply, for the notice: the text
-    /// of each line, or which decision for a decision alone.
-    fn describe_lost(&self, session: &Session, doc: &Document, lost: &[Change]) -> Vec<String> {
-        let paras: HashSet<ParaId> =
-            lost.iter().filter_map(|c| if let Change::Para(id, _) = c { Some(*id) } else { None }).collect();
+    /// of each line (quoted), what happened to a line without text, or which
+    /// decision for a decision alone. `start` is the document as last synced.
+    fn describe_lost(&self, session: &Session, start: &Document, doc: &Document, lost: &[Change]) -> Vec<String> {
+        let paras: HashSet<ParaId> = lost
+            .iter()
+            .filter_map(|c| match c {
+                Change::Para(id, _) | Change::Removed(id, _) => Some(*id),
+                Change::Meta(_) => None,
+            })
+            .collect();
+        let quoted = |text: &str| format!("\u{201c}{}\u{201d}", disk::excerpt(text, 30));
         lost.iter()
             .filter_map(|c| match c {
-                Change::Para(_, text) => Some(text.clone()),
+                // `id` is as the reloaded document has it, but looking it up
+                // in `start` is safe: only ids the host gave out after `start`
+                // (at or above its `next_id`) are renumbered, and they move
+                // further up, so a renumbered id is never in `start` (the line
+                // is new, as the fallback says). Ids below that keep their
+                // meaning in both.
+                Change::Para(id, text) if text.is_empty() => Some(match start.paragraph(*id) {
+                    Some(was) if !was.text().is_empty() => format!("emptying {}", quoted(&was.text())),
+                    _ => "a new empty line".to_string(),
+                }),
+                Change::Para(_, text) => Some(quoted(text)),
+                Change::Removed(_, text) if text.is_empty() => Some("removing an empty line".to_string()),
+                Change::Removed(_, text) => Some(format!("removing {}", quoted(text))),
                 Change::Meta(key) => {
                     let (r, i) = item_with_key(session, key)?;
                     let item = session.item(r, i);
@@ -1654,7 +1714,7 @@ impl ScriptView {
         let status = self.session.status(doc, r, i);
         let now = self.text_of(item.para, cx);
         let total = self.session.reviews[r].items.len();
-        let number = item_numbers(doc, &self.session.reviews[r].items)[i];
+        let number = self.number(doc, r, i);
 
         body.push(
             div()
@@ -1672,8 +1732,9 @@ impl ScriptView {
             body.push(warn_box("Matched approximately: check this is the right line.", None));
         }
         let rewriting_here = self.rewriting.as_ref().is_some_and(|rw| rw.r == r && rw.i == i);
-        if self.session.is_outdated(doc, r, i) && !rewriting_here {
-            body.push(warn_box("This line has changed since the suggestion was written.", Some(item.before.clone())));
+        let change = self.session.line_change(doc, r, i);
+        if !rewriting_here && let Some(text) = card_change_notice(change, status, self.session.is_outdated(doc, r, i)) {
+            body.push(warn_box(text, Some(item.before.clone())));
         }
         if rewriting_here {
             body.push(label("Rewriting in the script"));
@@ -1690,7 +1751,9 @@ impl ScriptView {
                 Some(if item.options.len() > 1 { format!("accepted option {}", k + 1) } else { "accepted".into() })
             }
             Status::Rejected => Some("kept yours".into()),
+            Status::Rewritten if change == Some(LineChange::Removed) => Some("line cut".into()),
             Status::Rewritten => Some("rewritten".into()),
+            Status::Removed => Some("line removed".into()),
         };
         body.push(label_with("Yours now", chip));
         let hi = self.hi.min(item.options.len() - 1);
@@ -1910,12 +1973,16 @@ fn count_changes(session: &Session, changes: &[Change]) -> usize {
                 Some((r, i)) => format!("p{}", session.item(r, i).para.0),
                 None => format!("k{key}"),
             },
-            Change::Para(p, _) => format!("p{}", p.0),
+            Change::Para(p, _) | Change::Removed(p, _) => format!("p{}", p.0),
         };
         seen.insert(id);
     }
     seen.len()
 }
+
+/// How the app tells the writer to rewrite a line it can't decide
+/// (see [`scriptorium_review::Refusal::message`]).
+const REWRITE_HINT: &str = "press E to rewrite this line";
 
 fn mark_of(session: &Session, doc: &Document, r: usize, i: usize) -> Mark {
     match session.status(doc, r, i) {
@@ -1924,6 +1991,27 @@ fn mark_of(session: &Session, doc: &Document, r: usize, i: usize) -> Mark {
         Status::Accepted(_) => Mark::Accepted,
         Status::Rejected => Mark::Kept,
         Status::Rewritten => Mark::Rewritten,
+        Status::Removed => Mark::Outdated,
+    }
+}
+
+/// The card's warning about how the line changed since the suggestion was
+/// written, if it did (structurally, or by hand while pending).
+fn card_change_notice(change: Option<LineChange>, status: Status, outdated: bool) -> Option<&'static str> {
+    match change {
+        Some(LineChange::Removed) if status == Status::Removed => {
+            Some("This line has been removed, so the suggestion can't be decided.")
+        }
+        Some(LineChange::Removed) => Some("Line cut: this line was removed after it was decided."),
+        Some(LineChange::Split) => Some(
+            "The line was split since the suggestion was written, so it can't be accepted: press E to rewrite this line.",
+        ),
+        Some(LineChange::Joined) => Some(
+            "The line was joined with the next since the suggestion was written, so it can't be accepted: press E to \
+             rewrite this line.",
+        ),
+        _ if outdated => Some("This line has changed since the suggestion was written."),
+        _ => None,
     }
 }
 
@@ -2178,5 +2266,19 @@ mod tests {
         // A stale, shorter outline gives None rather than panicking.
         assert!(para_ctx(&ctx[..1], &d, ParaId(2)).is_none());
         assert_eq!(scene_rows(d.script(), &ctx).len(), 1);
+    }
+
+    /// The card names a split or joined line's way out as the app's own key,
+    /// and a decided line that is gone as "line cut".
+    #[test]
+    fn change_notices_use_the_apps_words() {
+        for c in [LineChange::Split, LineChange::Joined] {
+            let text = card_change_notice(Some(c), Status::Pending, true).unwrap();
+            assert!(text.ends_with("press E to rewrite this line."), "{text}");
+        }
+        let cut = card_change_notice(Some(LineChange::Removed), Status::Rewritten, false).unwrap();
+        assert!(cut.starts_with("Line cut"), "{cut}");
+        let refusal = scriptorium_review::Refusal::LineChanged { para: ParaId(2), how: LineChange::Split };
+        assert!(refusal.message(REWRITE_HINT).ends_with("; press E to rewrite this line"));
     }
 }

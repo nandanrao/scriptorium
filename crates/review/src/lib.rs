@@ -15,10 +15,12 @@
 
 pub mod file;
 pub mod matching;
+mod meta;
 mod session;
 pub mod sessionfile;
 
 pub use file::{Entry, FileStatus, ReviewFile};
 pub use session::{
-    Appended, AppendedEntry, AppendedMany, Decision, Item, Progress, Review, Session, Status, Unmatched, Unplaced,
+    Appended, AppendedEntry, AppendedMany, Decision, Item, LineChange, Progress, Refusal, Review, Session, Status,
+    Unmatched, Unplaced,
 };

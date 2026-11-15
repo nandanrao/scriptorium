@@ -20,7 +20,7 @@ use crate::{Review, Session};
 
 pub mod sync;
 pub use sync::{
-    Change, Disk, Replayed, Seen, check, common_prefix, rebuild, review_changed, still_synced, with_unsaved,
+    Change, Disk, Renumber, Replayed, Seen, check, common_prefix, rebuild, review_changed, still_synced, with_unsaved,
 };
 
 /// Version 2 added the attached review files and the starting events.

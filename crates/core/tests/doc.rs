@@ -358,3 +358,61 @@ fn merge_undo_makes_one_step_and_replays() {
     doc.redo();
     assert_eq!(texts(&doc)[4], "Laura smiles widely.");
 }
+
+/// `for_each_applied_op` gives exactly the ops that took the starting point
+/// to the document now, undo and redo included: replaying them over the
+/// starting texts and ids gives the live ones.
+#[test]
+fn applied_ops_replay_to_the_live_document() {
+    use scriptorium_core::doc::Op;
+    use scriptorium_core::spans;
+    let mut doc = Document::new(sample());
+    let mut sel = doc.insert_text(at(3, 7), "i").unwrap();
+    sel = doc.insert_text(sel, "ng").unwrap(); // coalesces with the typing before
+    doc.enter(sel).unwrap();
+    doc.delete_backward(at(2, 0), false).unwrap();
+    doc.undo(); // the join
+    doc.undo(); // the split
+    doc.redo(); // the split again
+    let depth = doc.undo_depth();
+    doc.insert_text(at(1, 0), "A").unwrap();
+    doc.insert_text(at(1, 1), "B").unwrap();
+    doc.merge_undo_since(depth);
+    doc.undo(); // both inserts, merged
+    doc.undo(); // the split
+    doc.undo(); // the typing ("ing", one group)
+
+    let mut paras: Vec<(u64, String)> = doc.initial().paragraphs.iter().map(|p| (p.id.0, p.text())).collect();
+    let pos = |paras: &[(u64, String)], id: ParaId| paras.iter().position(|p| p.0 == id.0).unwrap();
+    let mut count = 0;
+    doc.for_each_applied_op(|op| {
+        count += 1;
+        match op {
+            Op::Splice { para, at, removed, inserted } => {
+                let i = pos(&paras, *para);
+                let ins: String = inserted.iter().map(|s| s.text.as_str()).collect();
+                paras[i].1.replace_range(*at..at + spans::len(removed), &ins);
+            }
+            Op::Split { para, at, new_para, .. } => {
+                let i = pos(&paras, *para);
+                let tail = paras[i].1.split_off(*at);
+                paras.insert(i + 1, (new_para.0, tail));
+            }
+            Op::Merge { para, next, .. } => {
+                let (i, j) = (pos(&paras, *para), pos(&paras, *next));
+                let tail = paras.remove(j).1;
+                paras[i].1.push_str(&tail);
+            }
+            Op::InsertPara { index, para } => paras.insert(*index, (para.id.0, para.text())),
+            Op::RemovePara { para, .. } => {
+                let i = pos(&paras, para.id);
+                paras.remove(i);
+            }
+            Op::SetKind { .. } | Op::SetMeta { .. } => {}
+        }
+    });
+    assert!(count > 6);
+    let live: Vec<(u64, String)> = doc.paragraphs().iter().map(|p| (p.id.0, p.text())).collect();
+    assert_eq!(paras, live);
+    assert_eq!(texts(&doc), texts(&Document::new(sample())), "everything was undone");
+}

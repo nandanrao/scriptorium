@@ -194,7 +194,7 @@ fn suggestion_on_live_text_matches_after_restart() {
 }
 
 #[test]
-fn para_on_deleted_paragraph_unmatched() {
+fn para_on_deleted_paragraph_stays_on_it_as_removed() {
     let mut doc = Document::new(fdx().to_script());
     let end6 = Pos::new(ParaId(6), doc.paragraph(ParaId(6)).unwrap().text().len());
     let end7 = Pos::new(ParaId(7), doc.paragraph(ParaId(7)).unwrap().text().len());
@@ -202,9 +202,13 @@ fn para_on_deleted_paragraph_unmatched() {
     assert!(doc.paragraph(ParaId(7)).is_none());
     let text = "---\nBEFORE: She say hello to everybody and leaves.\nPARA: 7\nAFTER: She says hello.\n\
                 ---\nBEFORE: She say hello to everybody and leaves.\nAFTER: She says hello.\n";
+    // A7: the entry stays on its (gone) line, never on another line with its
+    // text; the second entry's only line is taken, so it isn't found.
     let r = open_live(text, &doc);
-    assert!(r.items.is_empty());
-    assert_eq!(r.unmatched.iter().map(|u| u.entry).collect::<Vec<_>>(), [0, 1]);
+    assert_eq!(placed(&r), [(7, "She say hello to everybody and leaves.")]);
+    assert_eq!(r.unmatched.iter().map(|u| u.entry).collect::<Vec<_>>(), [1]);
+    let s = Session::new(vec![r]);
+    assert_eq!(s.status(&doc, 0, 0), Status::Removed);
 }
 
 #[test]

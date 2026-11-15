@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::args::Args;
 use crate::catalogue::{MAX_BATCH, MAX_OPTIONS};
-use crate::reviews::{find_review, item_numbers, status_name};
+use crate::reviews::{find_review, item_numbers};
 use crate::{Append, Applied, Ctx, Failed, Outcome, Proposal, Target, ToolError};
 
 /// Where the suggestions go, and the attached review to check duplicates
@@ -83,7 +83,7 @@ fn check_line(
 fn check_duplicate(session: &Session, doc: &Document, r: usize, id: u64, explicit: bool) -> Result<(), String> {
     let review = &session.reviews[r];
     let Some(i) = review.items.iter().position(|it| it.para == ParaId(id)) else { return Ok(()) };
-    let status = status_name(session.status(doc, r, i));
+    let status = session.status_label(doc, r, i);
     Err(format!(
         "{} already has a suggestion on ¶{id} (#{}, {status}): one suggestion per line per review; the writer \
          can ask for a new one in a new conversation",
