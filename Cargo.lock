@@ -4185,6 +4185,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scriptorium-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "scriptorium-app"
 version = "0.1.0"
 dependencies = [
@@ -4203,6 +4211,7 @@ dependencies = [
  "scriptorium-core",
  "scriptorium-fdx",
  "scriptorium-review",
+ "scriptorium-tools",
  "serde",
  "serde_json",
 ]
@@ -4238,6 +4247,18 @@ dependencies = [
  "regex",
  "scriptorium-core",
  "scriptorium-fdx",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "scriptorium-tools"
+version = "0.1.0"
+dependencies = [
+ "scriptorium-agent",
+ "scriptorium-core",
+ "scriptorium-fdx",
+ "scriptorium-review",
  "serde",
  "serde_json",
 ]

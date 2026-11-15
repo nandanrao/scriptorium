@@ -1,0 +1,21 @@
+[package]
+name = "scriptorium-tools"
+description = "The tools agents use on a script (read, list, suggest): schemas, running them over a document and session, effects as values. Pure: no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+scriptorium-core.workspace = true
+scriptorium-review.workspace = true
+# Only for `ToolSpec`, so hosts receive the catalogue in the agent's own type.
+scriptorium-agent.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+scriptorium-fdx.workspace = true
+
+[lints]
+workspace = true

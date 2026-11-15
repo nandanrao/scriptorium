@@ -1,0 +1,22 @@
+SCRIPT REVIEW v1
+Script: sample.fdx
+
+---
+BEFORE: I am go to the town tomorrow.
+AFTER: I am going to town tomorrow.
+AFTER: I'm going to town tomorrow.
+WHY: verb form
+STATUS: accepted
+CHOSEN: 2
+---
+BEFORE: They are playing truco (Argentinian cards game).
+AFTER: They are playing truco (an Argentinian card game).
+WHY: article; "card game"
+STATUS: rejected
+---
+BEFORE: Thank you very much.
+AFTER: Thanks a lot.
+---
+BEFORE: She say hello to everybody and leaves.
+AFTER: She says hello to everybody and leaves.
+WHY: agreement

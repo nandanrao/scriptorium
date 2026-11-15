@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<FinalDraft DocumentType="Script" Template="No" Version="5">
+  <Content>
+    <Paragraph Type="Scene Heading">
+      <Text>EXT. FARM HOUSE - NIGHT</Text>
+    </Paragraph>
+    <Paragraph Type="Action">
+      <Text>Laura smiles.</Text>
+    </Paragraph>
+    <Paragraph Type="Character">
+      <Text>CESAR</Text>
+    </Paragraph>
+    <Paragraph Type="Dialogue">
+      <Text>I am go to the town tomorrow.</Text>
+    </Paragraph>
+    <Paragraph Type="Action">
+      <Text>They are playing truco (Argentinian cards game).</Text>
+    </Paragraph>
+    <Paragraph Type="Character">
+      <Text>LAURA</Text>
+    </Paragraph>
+    <Paragraph Type="Dialogue">
+      <Text>Thank you very much.</Text>
+    </Paragraph>
+    <Paragraph Type="Action">
+      <Text>She say hello to everybody and leaves.</Text>
+    </Paragraph>
+  </Content>
+</FinalDraft>

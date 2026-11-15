@@ -1,0 +1,98 @@
+//! Writing files so a reader (the app, another CLI run, an agent) never sees
+//! half of one, and a crash mid-write leaves the old file in place.
+
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Makes each temporary name unique within the process, so two threads
+/// writing the same file never share one.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Write `bytes` to `path` atomically: into `.<name>.tmp-<pid>-<n>` in the same
+/// folder, fsync, then rename over `path` (and fsync the folder, best effort).
+/// An existing file keeps its permissions; a symlink is written through to
+/// its target rather than replaced. On failure the temporary file is removed
+/// and `path` is untouched.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Through a symlink to the file it points at, so the link survives.
+    let path = match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: not a file name", path.display())))?;
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{}.tmp-{}-{n}", name.to_string_lossy(), std::process::id()));
+    let result = (|| {
+        let mut f = File::create(&tmp)?;
+        if let Ok(m) = fs::metadata(&path) {
+            f.set_permissions(m.permissions())?;
+        }
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, &path)?;
+        // The rename itself is durable once the folder is synced; not every
+        // platform lets a folder be opened for that, so it's best effort.
+        if let Ok(d) = File::open(&dir) {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_replaces_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("scriptorium-fsio-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.txt");
+        write_atomic(&p, b"one").unwrap();
+        write_atomic(&p, b"two").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "two");
+        let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["a.txt"]);
+        // A missing folder fails without leaving anything behind.
+        assert!(write_atomic(&dir.join("no/such/b.txt"), b"x").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_writers_in_one_process_do_not_collide() {
+        let dir = std::env::temp_dir().join(format!("scriptorium-fsio-threads-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.txt");
+        let texts: Vec<String> = (0..8).map(|i| format!("writer {i} ").repeat(2000)).collect();
+        std::thread::scope(|s| {
+            for t in &texts {
+                let p = &p;
+                s.spawn(move || {
+                    for _ in 0..20 {
+                        write_atomic(p, t.as_bytes()).unwrap();
+                    }
+                });
+            }
+        });
+        // Whole text of one writer, never a mix; no temporary file left.
+        assert!(texts.contains(&fs::read_to_string(&p).unwrap()));
+        let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["a.txt"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

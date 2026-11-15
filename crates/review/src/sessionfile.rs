@@ -12,8 +12,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use scriptorium_core::doc::Event;
-use scriptorium_core::{Document, Script};
+use scriptorium_core::doc::{DocError, Event};
+use scriptorium_core::{Document, ElementKind, Script};
 use serde::{Deserialize, Serialize};
 
 use crate::{Review, Session};
@@ -50,6 +50,15 @@ pub struct Attached {
     /// decisions are already in the session, in `base` or in `events`; a file
     /// whose contents changed since has a new id.
     pub id: String,
+    /// [`hash`] of the file's text when it was attached or last written
+    /// through the library ([`Session::attached`]). Empty in sessions saved
+    /// before this was recorded. Its `STATUS` lines are compared with the
+    /// session only when the file has changed since. Any command that saves
+    /// the session records the file's current hash (that of
+    /// [`Review::text`], as reopened), so a hand edit to the file is reported
+    /// once, on the next open, not on every open after it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text_hash: String,
 }
 
 impl SessionFile {
@@ -115,9 +124,9 @@ pub enum Resumed {
     Discarded(String),
 }
 
-/// An opened session: the reviews, the document, and what to save.
+/// A session opened by [`resume`]: the reviews, the document, and what to save.
 #[derive(Debug, Clone)]
-pub struct Opened {
+pub struct ResumedSession {
     pub session: Session,
     pub doc: Document,
     /// The events that made `doc`'s starting point (saved as [`SessionFile::base`]).
@@ -127,41 +136,96 @@ pub struct Opened {
     pub notes: Vec<String>,
 }
 
-impl Opened {
+impl ResumedSession {
     /// The session file to write for the current state.
     pub fn to_file(&self, script_contents: &str) -> SessionFile {
         SessionFile::new(script_contents, self.session.attached(), &self.base, self.doc.log())
     }
 }
 
-/// Open the document for `script` with `reviews` attached (each with its
-/// [`Review::path`] set). `saved` is the session file's contents, if any.
+/// A review file to open with a session: its contents, a display name, and
+/// its path as the session file stores it (see [`stored_path`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewSource {
+    pub name: String,
+    pub path: String,
+    pub text: String,
+}
+
+/// Open the document for `script` (`script_contents` is its file's text)
+/// with the review files in `sources` attached. `saved` is the session file's
+/// contents, if any; `script_name` is the script's file name (to check each
+/// review's `Script:` header).
 ///
-/// Fresh (or a session that can't be used): the review files' saved decisions
-/// are the starting point. Resumed: the saved starting point and events are
-/// replayed; a review not attached last time (or whose file changed) has its
-/// saved decisions applied on top as one undo step.
-pub fn resume(reviews: Vec<Review>, script: Script, script_contents: &str, saved: Option<&str>) -> Opened {
-    let mut session = Session::default();
-    let mut notes = vec![];
-    for r in reviews {
-        if let Err(e) = session.add(r) {
-            notes.push(e);
+/// Fresh, version 1, or a session that can't be used: the reviews are
+/// matched against the script and their saved decisions are the starting
+/// point (version 1 then replays its events on top; its starting point is
+/// built with decision values as version 1 wrote them, without `@<para>`,
+/// since its events check the values they replace).
+///
+/// Version 2: the saved starting point and events are replayed first (they
+/// need no reviews), then the reviews are matched against the original script
+/// and the replayed document (so a `PARA:` on a line edited or created since
+/// is found), then a review the session didn't know (new, or whose file
+/// changed) has its saved decisions applied on top as one undo step. A known
+/// review's file decisions are not applied: the session wins, and a note says
+/// so when the file's `STATUS` lines disagree with it, and the file has
+/// changed since the session last attached or wrote it ([`Attached::text_hash`];
+/// always checked for sessions saved before that was recorded).
+pub fn resume(
+    sources: Vec<ReviewSource>,
+    script: Script,
+    script_contents: &str,
+    saved: Option<&str>,
+    is_caps: &dyn Fn(&ElementKind) -> bool,
+    script_name: &str,
+) -> ResumedSession {
+    // Opens every review against `live` (or the unedited script).
+    let open_all = |live: Option<&Document>, notes: &mut Vec<String>| {
+        let mut session = Session::default();
+        for s in &sources {
+            let review = match live {
+                Some(doc) => Review::open_live(s.name.clone(), &s.text, &script, doc, is_caps, script_name),
+                None => Review::open(s.name.clone(), &s.text, &script, is_caps, script_name),
+            };
+            if let Err(e) = session.add(review.with_path(s.path.clone())) {
+                notes.push(e);
+            }
         }
-    }
-    let fresh = |session: Session, how: Resumed, notes: Vec<String>| {
-        let (doc, base) = session.open_document_with_base(script.clone());
-        Opened { session, doc, base, how, notes }
+        session
     };
-    let Some(saved) = saved else { return fresh(session, Resumed::Fresh, notes) };
+    let fresh = |how: Resumed| {
+        let mut notes = vec![];
+        let session = open_all(None, &mut notes);
+        let (doc, base) = session.open_document_with_base(script.clone());
+        ResumedSession { session, doc, base, how, notes }
+    };
+    let Some(saved) = saved else { return fresh(Resumed::Fresh) };
     let file = match SessionFile::from_json(saved) {
         Ok(f) => f,
-        Err(e) => return fresh(session, Resumed::Discarded(e), notes),
+        Err(e) => return fresh(Resumed::Discarded(e)),
     };
     if !file.is_for(script_contents) {
-        let why = "the script has changed since the session was saved".into();
-        return fresh(session, Resumed::Discarded(why), notes);
+        return fresh(Resumed::Discarded("the script has changed since the session was saved".into()));
     }
+    let doesnt_apply = |e: DocError| Resumed::Discarded(format!("the saved session doesn't apply: {e}"));
+    let how = Resumed::Resumed { events: file.events.len() };
+    let mut notes = vec![];
+    let Some(base) = file.base else {
+        // Version 1: the starting point is the review files' saved decisions.
+        let session = open_all(None, &mut notes);
+        let (start, base) = session.document_with_base(script.clone(), true);
+        return match start.replay_onto(&file.events) {
+            Ok(doc) => ResumedSession { session, doc, base, how, notes },
+            Err(e) => fresh(doesnt_apply(e)),
+        };
+    };
+    let replayed = Document::new(script.clone()).replay_onto(&base).and_then(|d| d.rebase().replay_onto(&file.events));
+    let mut doc = match replayed {
+        Ok(d) => d,
+        Err(e) => return fresh(doesnt_apply(e)),
+    };
+    let session = open_all(Some(&doc), &mut notes);
     for a in &file.reviews {
         if let Some(r) = session.reviews.iter().find(|r| r.path == a.path && r.id != a.id) {
             notes.push(format!(
@@ -170,32 +234,29 @@ pub fn resume(reviews: Vec<Review>, script: Script, script_contents: &str, saved
             ));
         }
     }
-    let (start, base, known): (Document, Vec<Event>, HashSet<String>) = match file.base {
-        Some(base) => match Document::new(script.clone()).replay_onto(&base) {
-            Ok(d) => (d.rebase(), base, file.reviews.iter().map(|a| a.id.clone()).collect()),
-            Err(e) => {
-                let why = format!("the saved session doesn't apply: {e}");
-                return fresh(session, Resumed::Discarded(why), notes);
-            }
-        },
-        None => {
-            let (d, base) = session.open_document_with_base(script.clone());
-            (d, base, session.reviews.iter().map(|r| r.id.clone()).collect())
-        }
-    };
-    let mut doc = match start.replay_onto(&file.events) {
-        Ok(d) => d,
-        Err(e) => {
-            let why = format!("the saved session doesn't apply: {e}");
-            return fresh(session, Resumed::Discarded(why), notes);
-        }
-    };
+    let known: HashSet<&str> = file.reviews.iter().map(|a| a.id.as_str()).collect();
     for r in 0..session.reviews.len() {
-        if !known.contains(&session.reviews[r].id) {
+        if !known.contains(session.reviews[r].id.as_str()) {
             session.apply_saved(&mut doc, r);
+            continue;
+        }
+        let unchanged = file.reviews.iter().any(|a| {
+            a.id == session.reviews[r].id && !a.text_hash.is_empty() && a.text_hash == hash(session.reviews[r].text())
+        });
+        if unchanged {
+            continue;
+        }
+        let n = session.file_disagreements(&doc, r);
+        if n > 0 {
+            notes.push(format!(
+                "{}: {n} decision{} saved in the file differ{} from this session; the session's are kept.",
+                session.reviews[r].name,
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "s" } else { "" },
+            ));
         }
     }
-    Opened { session, doc, base, how: Resumed::Resumed { events: file.events.len() }, notes }
+    ResumedSession { session, doc, base, how, notes }
 }
 
 /// FNV-1a, 64-bit, as 16 hex digits. Stable across platforms and Rust versions
@@ -228,7 +289,8 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let reviews = vec![Attached { path: "a.review.txt".into(), id: "0123456789ab".into() }];
+        let reviews =
+            vec![Attached { path: "a.review.txt".into(), id: "0123456789ab".into(), text_hash: "00ff".into() }];
         let f = SessionFile::new("<FinalDraft/>", reviews, &[Event::Redo], &[Event::Undo, Event::Redo]);
         let back = SessionFile::from_json(&f.to_json()).unwrap();
         assert_eq!(back, f);

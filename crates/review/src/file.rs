@@ -3,9 +3,11 @@
 //! ```text
 //! SCRIPT REVIEW v1
 //! Script: name.fdx
+//! Id: a-stable-token          (optional; identifies the review, see below)
 //!
 //! ---
 //! BEFORE: whole original paragraph
+//! PARA: 341            the paragraph's id (optional; written by tools)
 //! AFTER: whole corrected paragraph
 //! AFTER: optional alternative (repeat AFTER for 2-3 options; first = preferred)
 //! WHY: short reason
@@ -18,16 +20,24 @@
 //! fences and `#` comments are ignored, keys are case-insensitive, a new
 //! `BEFORE` starts a new block even without a `---`, and wrapped lines continue
 //! the previous field. Ported from `script-review/src/core/reviewfile.js`.
+//!
+//! The `Id:` header (`[A-Za-z0-9._-]{1,64}`, honoured only before the first
+//! block) names the review independently of its contents, so decisions stored
+//! under it survive appends and hand edits. A file without one is identified
+//! by a hash of its text (see [`crate::Review::id`]).
 
 use std::sync::LazyLock;
 
 use regex::Regex;
+use scriptorium_core::ParaId;
 
 pub const FORMAT_HEADER: &str = "SCRIPT REVIEW v1";
 
 static FIELD_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^\s*(BEFORE|AFTER|WHY|STATUS|CHOSEN|MINE)\s*:\s?(.*)$").unwrap());
-static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*(Script|Reviewer)\s*:\s*(.*)$").unwrap());
+    // `PARA:` only in capitals: "Para: ..." starts many a wrapped Spanish line.
+    LazyLock::new(|| Regex::new(r"^\s*((?i:BEFORE|AFTER|WHY|STATUS|CHOSEN|MINE)|PARA)\s*:\s?(.*)$").unwrap());
+static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*(Script|Reviewer|Id)\s*:\s*(.*)$").unwrap());
+static ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._-]{1,64}$").unwrap());
 static SEPARATOR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*-{3,}\s*$").unwrap());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -64,6 +74,9 @@ impl FileStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Entry {
     pub before: String,
+    /// The `PARA:` field: the id of the paragraph the suggestion is for, when
+    /// the writer of the file knew it.
+    pub para: Option<ParaId>,
     /// The `AFTER` texts, in order; the first is the suggester's preference.
     pub options: Vec<String>,
     pub why: String,
@@ -77,6 +90,8 @@ pub struct Entry {
 pub struct ReviewFile {
     /// The `Script:` header: the file name the review was written for.
     pub script: String,
+    /// The `Id:` header, if the file has a valid one.
+    pub id: Option<String>,
     pub entries: Vec<Entry>,
     /// Problems found while parsing (skipped blocks, bad values), for the user.
     pub warnings: Vec<String>,
@@ -85,6 +100,7 @@ pub struct ReviewFile {
 #[derive(Default)]
 struct Block {
     before: Option<String>,
+    para: Option<String>,
     after: Vec<String>,
     why: Option<String>,
     status: Option<String>,
@@ -96,6 +112,7 @@ impl Block {
     fn field(&mut self, key: &str) -> &mut String {
         let slot = match key {
             "before" => &mut self.before,
+            "para" => &mut self.para,
             "why" => &mut self.why,
             "status" => &mut self.status,
             "chosen" => &mut self.chosen,
@@ -111,6 +128,8 @@ impl ReviewFile {
         let mut out = ReviewFile::default();
         let mut cur: Option<Block> = None;
         let mut last_field: Option<String> = None;
+        // Headers count only before the first field line.
+        let mut in_body = false;
 
         for line in text.split('\n') {
             let line = line.strip_suffix('\r').unwrap_or(line);
@@ -124,6 +143,7 @@ impl ReviewFile {
                 continue;
             }
             if let Some(m) = FIELD_RE.captures(line) {
+                in_body = true;
                 let key = m[1].to_lowercase();
                 let value = m[2].to_string();
                 if key == "before" && cur.as_ref().is_some_and(|b| b.before.is_some()) {
@@ -139,10 +159,19 @@ impl ReviewFile {
                 continue;
             }
             let Some(block) = cur.as_mut() else {
-                if let Some(h) = HEADER_RE.captures(line)
-                    && h[1].eq_ignore_ascii_case("script")
-                {
-                    out.script = h[2].trim().to_string();
+                if let Some(h) = HEADER_RE.captures(line) {
+                    let value = h[2].trim();
+                    if h[1].eq_ignore_ascii_case("script") {
+                        out.script = value.to_string();
+                    } else if h[1].eq_ignore_ascii_case("id") && !in_body {
+                        if ID_RE.is_match(value) {
+                            out.id = Some(value.to_string());
+                        } else {
+                            out.warnings.push(format!(
+                                "Id \"{value}\" isn't a valid id (letters, digits, . _ -; up to 64); ignored."
+                            ));
+                        }
+                    }
                 }
                 continue;
             };
@@ -186,8 +215,16 @@ impl ReviewFile {
             }
             n.map(|n| n - 1)
         });
+        let para = b.para.as_deref().and_then(|p| {
+            let id = p.trim().parse::<u64>().ok().map(ParaId);
+            if id.is_none() {
+                self.warnings.push(format!("PARA \"{}\" is not a paragraph id; ignored.", p.trim()));
+            }
+            id
+        });
         self.entries.push(Entry {
             before: before.trim().to_string(),
+            para,
             options,
             why: b.why.unwrap_or_default().trim().to_string(),
             status,
@@ -199,34 +236,105 @@ impl ReviewFile {
     /// Write the file back out. Round-trips through [`ReviewFile::parse`]
     /// (comments and wrapping are not kept).
     pub fn serialize(&self) -> String {
-        let one_line = |s: &str| s.split('\n').map(str::trim).collect::<Vec<_>>().join(" ");
         let mut out = vec![FORMAT_HEADER.to_string()];
         if !self.script.is_empty() {
             out.push(format!("Script: {}", self.script));
         }
+        if let Some(id) = &self.id {
+            out.push(format!("Id: {id}"));
+        }
         out.push(String::new());
         for e in &self.entries {
-            out.push("---".into());
-            out.push(format!("BEFORE: {}", one_line(&e.before)));
-            for o in &e.options {
-                out.push(format!("AFTER: {}", one_line(o)));
-            }
-            if !e.why.is_empty() {
-                out.push(format!("WHY: {}", one_line(&e.why)));
-            }
-            if e.status != FileStatus::Pending {
-                out.push(format!("STATUS: {}", e.status.name()));
-            }
-            if let (FileStatus::Accepted, Some(c)) = (e.status, e.chosen) {
-                out.push(format!("CHOSEN: {}", c + 1));
-            }
-            if let Some(m) = &e.mine {
-                out.push(format!("MINE: {}", one_line(m)));
-            }
+            block_lines(e, &mut out);
         }
         out.push(String::new());
         out.join("\n")
     }
+}
+
+/// One entry as written in the file, starting with its `---` separator.
+fn block_lines(e: &Entry, out: &mut Vec<String>) {
+    let one_line = |s: &str| s.split('\n').map(str::trim).collect::<Vec<_>>().join(" ");
+    out.push("---".into());
+    out.push(format!("BEFORE: {}", one_line(&e.before)));
+    if let Some(p) = e.para {
+        out.push(format!("PARA: {}", p.0));
+    }
+    for o in &e.options {
+        out.push(format!("AFTER: {}", one_line(o)));
+    }
+    if !e.why.is_empty() {
+        out.push(format!("WHY: {}", one_line(&e.why)));
+    }
+    if e.status != FileStatus::Pending {
+        out.push(format!("STATUS: {}", e.status.name()));
+    }
+    if let (FileStatus::Accepted, Some(c)) = (e.status, e.chosen) {
+        out.push(format!("CHOSEN: {}", c + 1));
+    }
+    if let Some(m) = &e.mine {
+        out.push(format!("MINE: {}", one_line(m)));
+    }
+}
+
+/// `text` with an `Id: <id>` header line inserted, unless it already has an
+/// `Id:` header. Not a reserialize: one line goes in after the `Script:`
+/// header, else after the format line, else at the top; everything else
+/// (comments, wrapping, fences, line endings) is kept as it was.
+pub fn insert_id(text: &str, id: &str) -> String {
+    if ReviewFile::parse(text).id.is_some() {
+        return text.to_string();
+    }
+    let (bom, body) = match text.strip_prefix('\u{FEFF}') {
+        Some(rest) => ("\u{FEFF}", rest),
+        None => ("", text),
+    };
+    let eol = if body.contains("\r\n") { "\r\n" } else { "\n" };
+    // Byte offsets just past each line in the header (before the first field).
+    let (mut script_end, mut format_end) = (None, None);
+    let mut pos = 0;
+    for line in body.split_inclusive('\n') {
+        let end = pos + line.len();
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if FIELD_RE.is_match(bare) {
+            break;
+        }
+        let t = bare.trim_start();
+        if !(t.starts_with("```") || t.starts_with('#')) {
+            if let Some(h) = HEADER_RE.captures(bare)
+                && h[1].eq_ignore_ascii_case("script")
+            {
+                script_end.get_or_insert(end);
+            } else if bare.trim().eq_ignore_ascii_case(FORMAT_HEADER) {
+                format_end.get_or_insert(end);
+            }
+        }
+        pos = end;
+    }
+    let at = script_end.or(format_end).unwrap_or(0);
+    // The line before may lack its newline (a file that ends right there).
+    let lead = if at > 0 && !body[..at].ends_with('\n') { eol } else { "" };
+    format!("{bom}{}{lead}Id: {id}{eol}{}", &body[..at], &body[at..])
+}
+
+/// `text` (a review file's contents) with `entry` added as one block at the
+/// end. The rest of the text is kept as it is (comments, wrapping, fences);
+/// an `Id: <id>` header is inserted first if the file has none (see
+/// [`insert_id`]). An empty `text` gets the format line first.
+pub fn append_block(text: &str, entry: &Entry, id: &str) -> String {
+    let base = if text.trim().is_empty() { format!("{FORMAT_HEADER}\n\n") } else { text.to_string() };
+    let mut out = insert_id(&base, id);
+    let eol = if out.contains("\r\n") { "\r\n" } else { "\n" };
+    if !out.ends_with('\n') {
+        out.push_str(eol);
+    }
+    let mut lines = vec![];
+    block_lines(entry, &mut lines);
+    for l in lines {
+        out.push_str(&l);
+        out.push_str(eol);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -300,6 +408,7 @@ AFTER: They are playing truco (Argentinian card game).
                 Entry { status: FileStatus::Rejected, ..entry("e", &["f"]) },
                 Entry { status: FileStatus::Accepted, chosen: Some(2), ..entry("g", &["h1", "h2", "h3"]) },
             ],
+            id: None,
             warnings: vec![],
         };
         let text = data.serialize();

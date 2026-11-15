@@ -19,4 +19,6 @@ mod session;
 pub mod sessionfile;
 
 pub use file::{Entry, FileStatus, ReviewFile};
-pub use session::{Decision, Item, Progress, Review, Session, Status, Unmatched};
+pub use session::{
+    Appended, AppendedEntry, AppendedMany, Decision, Item, Progress, Review, Session, Status, Unmatched, Unplaced,
+};

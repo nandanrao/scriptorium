@@ -1,0 +1,4 @@
+# Hand-written compatibility fixtures (not real scripts): keep them in git.
+!*.fdx
+!*.review.txt
+!*.scriptorium.json

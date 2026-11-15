@@ -69,7 +69,7 @@ pub struct Opened {
     pub script_path: PathBuf,
     raw: String,
     fdx: FdxFile,
-    opened: sessionfile::Opened,
+    opened: sessionfile::ResumedSession,
     session_path: PathBuf,
     /// The script's folder, canonical: review paths are stored relative to it.
     dir: PathBuf,
@@ -110,17 +110,18 @@ impl Opened {
                 paths.push(p);
             }
         }
-        let mut reviews = vec![];
+        let mut sources = vec![];
         for p in paths {
-            match read_review(&p, &dir, &fdx, &script, &script_name) {
-                Ok((review, mut notes)) => {
-                    notices.append(&mut notes);
-                    reviews.push(review);
-                }
+            match read_review(&p, &dir) {
+                Ok(source) => sources.push(source),
                 Err(e) => notices.push(format!("{e}. It was taken off this script's reviews.")),
             }
         }
-        let mut opened = sessionfile::resume(reviews, script, &raw, saved.as_deref());
+        let caps = |k: &scriptorium_core::ElementKind| fdx.is_caps(k.name());
+        let mut opened = sessionfile::resume(sources, script, &raw, saved.as_deref(), &caps, &script_name);
+        for review in &opened.session.reviews {
+            notices.append(&mut review_notes(review));
+        }
         match &opened.how {
             Resumed::Fresh => {}
             Resumed::Resumed { .. } => notices.insert(0, "Picked up where you left off.".into()),
@@ -153,18 +154,14 @@ fn aside_path(session_path: &Path) -> PathBuf {
         .expect("some name is free")
 }
 
-/// Read and open one review file against the script as it is in the `.fdx`.
-/// Returns the review and what to tell the user about it.
-fn read_review(
-    path: &Path,
-    dir: &Path,
-    fdx: &FdxFile,
-    script: &scriptorium_core::Script,
-    script_name: &str,
-) -> Result<(Review, Vec<String>), String> {
+/// Read one review file, to open with the script.
+fn read_review(path: &Path, dir: &Path) -> Result<sessionfile::ReviewSource, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
-    let review = Review::open(review_title(path), &text, script, |k| fdx.is_caps(k.name()), script_name)
-        .with_path(sessionfile::stored_path(dir, path));
+    Ok(sessionfile::ReviewSource { name: review_title(path), path: sessionfile::stored_path(dir, path), text })
+}
+
+/// What to tell the user about a review just opened.
+fn review_notes(review: &Review) -> Vec<String> {
     let mut notes: Vec<String> = review.warnings.iter().map(|w| format!("{}: {w}", review.name)).collect();
     if !review.unmatched.is_empty() {
         let n = review.unmatched.len();
@@ -174,7 +171,7 @@ fn read_review(
             if n == 1 { "" } else { "s" }
         ));
     }
-    Ok((review, notes))
+    notes
 }
 
 pub fn file_name(p: &Path) -> String {
@@ -255,7 +252,7 @@ pub struct ScriptView {
 impl ScriptView {
     pub fn new(opened: Opened, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let Opened { script_path, raw, fdx, opened, session_path, dir, notices } = opened;
-        let sessionfile::Opened { session, doc, base, .. } = opened;
+        let sessionfile::ResumedSession { session, doc, base, .. } = opened;
         let originals: HashMap<ParaId, String> = fdx.to_script().paragraphs.iter().map(|p| (p.id, p.text())).collect();
         let ctx = annotate(&fdx.to_script());
         let caps: Vec<bool> = fdx.paragraphs().iter().map(|p| fdx.is_caps(&p.kind)).collect();
@@ -342,8 +339,8 @@ impl ScriptView {
         cx.notify();
     }
 
-    /// File › Add review: open each file against the script as it is in the
-    /// `.fdx`, attach it, apply the decisions saved in it (one undo step
+    /// File › Add review: open each file against the script (by `PARA:` as
+    /// it is now, by `BEFORE` as it is in the `.fdx`), attach it, apply the decisions saved in it (one undo step
     /// each), and show the first one added.
     pub fn add_reviews(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         self.commit_rewrite_quietly(cx);
@@ -356,13 +353,24 @@ impl ScriptView {
                 continue;
             }
             let p = p.canonicalize().unwrap_or_else(|_| p.clone());
-            let (review, mut more) = match read_review(&p, &self.dir, &self.fdx, &script, &script_name) {
-                Ok(r) => r,
+            let source = match read_review(&p, &self.dir) {
+                Ok(s) => s,
                 Err(e) => {
                     notes.push(e);
                     continue;
                 }
             };
+            let fdx = &self.fdx;
+            let review = Review::open_live(
+                source.name,
+                &source.text,
+                &script,
+                self.doc(cx),
+                |k| fdx.is_caps(k.name()),
+                &script_name,
+            )
+            .with_path(source.path);
+            let mut more = review_notes(&review);
             let restored = review.restored();
             let r = match Rc::make_mut(&mut self.session).add(review) {
                 Ok(r) => r,
@@ -372,6 +380,13 @@ impl ScriptView {
                 }
             };
             notes.append(&mut more);
+            // Attached: pin the review's id into a file that has no `Id:`
+            // header, so later edits to the file don't orphan its decisions.
+            if let Some(text) = Rc::make_mut(&mut self.session).reviews[r].pin_id()
+                && let Err(e) = std::fs::write(&p, text)
+            {
+                notes.push(format!("Couldn't write the review's Id: into {}: {e}", p.display()));
+            }
             if restored > 0 {
                 let session = self.session.clone();
                 self.editor.update(cx, |e, cx| {
