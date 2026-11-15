@@ -1,7 +1,7 @@
 //! What we know about models: what they accept and what they cost.
 //!
-//! Only Anthropic's models are listed for now (prices from Anthropic's
-//! published first-party rates, checked 2026-11-15). OpenAI's and other
+//! Only Anthropic's models are listed for now (see the table for where the
+//! prices come from and when they were checked). OpenAI's and other
 //! endpoints' models are unknown here: their requests send only what the
 //! writer set, and their cost is the provider's own figure (OpenRouter
 //! reports one) or a price the writer adds to the account
@@ -47,7 +47,9 @@ fn rank(e: Effort) -> u8 {
     }
 }
 
-/// US dollars per million tokens.
+/// A model's price. **Every rate is in US dollars per million tokens**
+/// (in the accounts file too: `{"input": 3.0, "output": 15.0}` is $3 and
+/// $15 per million).
 ///
 /// `input` is the base rate for input tokens not read from or written to the
 /// prompt cache. A cache rate of `None` means unknown: a reply that used the
@@ -113,10 +115,16 @@ const fn current(context_window: u64) -> Capabilities {
     Capabilities { context_window, max_output: 128_000, adaptive_thinking: true, efforts: ALL }
 }
 
-/// A price with cache writes at 1.25× input (Anthropic's 5-minute rate)
-/// and cache reads at `cache_read`.
-const fn anthropic(input: f64, output: f64, cache_read: f64) -> Price {
-    Price { input, output, cache_read: Some(cache_read), cache_write: Some(input * 1.25), above: None }
+/// A price on Anthropic's standard rules: cache reads at 0.1× input, cache
+/// writes (5-minute) at 1.25× input.
+const fn anthropic(input: f64, output: f64) -> Price {
+    Price { input, output, cache_read: Some(input * 0.1), cache_write: Some(input * 1.25), above: None }
+}
+
+/// The standard rules, except for a cache-read rate Anthropic publishes
+/// for the model.
+const fn anthropic_read(input: f64, output: f64, cache_read: f64) -> Price {
+    Price { cache_read: Some(cache_read), ..anthropic(input, output) }
 }
 
 struct Model {
@@ -125,32 +133,37 @@ struct Model {
     price: Price,
 }
 
+/// Anthropic's first-party rates, checked 2026-11-15: input and output
+/// prices, context windows, output limits and Haiku 5.5's long-prompt rate
+/// as published; cache rates on the standard rules (see [`anthropic`]) except
+/// where a model's own cache-read rate is published (Fable/Mythos 5.2 and
+/// 5.1, Opus 5.5, Sonnet 5.5).
 const ANTHROPIC: &[Model] = &[
-    Model { id: "claude-fable-5-2", caps: current(M), price: anthropic(8.0, 40.0, 0.20) },
-    Model { id: "claude-mythos-5-2", caps: current(M), price: anthropic(8.0, 40.0, 0.20) },
-    Model { id: "claude-fable-5-1", caps: current(M), price: anthropic(10.0, 50.0, 0.25) },
-    Model { id: "claude-mythos-5-1", caps: current(M), price: anthropic(10.0, 50.0, 0.25) },
-    Model { id: "claude-fable-5", caps: current(M), price: anthropic(10.0, 50.0, 1.0) },
-    Model { id: "claude-mythos-5", caps: current(M), price: anthropic(10.0, 50.0, 1.0) },
-    Model { id: "claude-opus-5-5", caps: current(M), price: anthropic(4.0, 20.0, 0.20) },
-    Model { id: "claude-opus-5", caps: current(M), price: anthropic(5.0, 25.0, 0.50) },
-    Model { id: "claude-opus-4-8", caps: current(M), price: anthropic(5.0, 25.0, 0.50) },
-    Model { id: "claude-opus-4-7", caps: current(M), price: anthropic(5.0, 25.0, 0.50) },
+    Model { id: "claude-fable-5-2", caps: current(M), price: anthropic_read(8.0, 40.0, 0.20) },
+    Model { id: "claude-mythos-5-2", caps: current(M), price: anthropic_read(8.0, 40.0, 0.20) },
+    Model { id: "claude-fable-5-1", caps: current(M), price: anthropic_read(10.0, 50.0, 0.25) },
+    Model { id: "claude-mythos-5-1", caps: current(M), price: anthropic_read(10.0, 50.0, 0.25) },
+    Model { id: "claude-fable-5", caps: current(M), price: anthropic(10.0, 50.0) },
+    Model { id: "claude-opus-5-5", caps: current(M), price: anthropic_read(4.0, 20.0, 0.20) },
+    Model { id: "claude-opus-5", caps: current(M), price: anthropic(5.0, 25.0) },
+    Model { id: "claude-opus-4-8", caps: current(M), price: anthropic(5.0, 25.0) },
+    Model { id: "claude-opus-4-7", caps: current(M), price: anthropic(5.0, 25.0) },
     Model {
         id: "claude-opus-4-6",
         caps: Capabilities { context_window: M, max_output: 128_000, adaptive_thinking: true, efforts: NO_XHIGH },
-        price: anthropic(5.0, 25.0, 0.50),
+        price: anthropic(5.0, 25.0),
     },
-    Model { id: "claude-sonnet-5-5", caps: current(M), price: anthropic(2.0, 10.0, 0.10) },
-    Model { id: "claude-sonnet-5", caps: current(M), price: anthropic(2.0, 10.0, 0.20) },
+    Model { id: "claude-sonnet-5-5", caps: current(M), price: anthropic_read(2.0, 10.0, 0.10) },
+    Model { id: "claude-sonnet-5", caps: current(M), price: anthropic(2.0, 10.0) },
     Model {
         id: "claude-sonnet-4-6",
         caps: Capabilities { context_window: M, max_output: 128_000, adaptive_thinking: true, efforts: NO_XHIGH },
-        price: anthropic(3.0, 15.0, 0.30),
+        price: anthropic(3.0, 15.0),
     },
     Model {
         id: "claude-haiku-5-5",
         caps: current(M),
+        // Prompts over 100k tokens: $0.50 / $2.50, cache rates on the standard rules.
         price: Price {
             above: Some(PriceTier {
                 input_tokens: 100_000,
@@ -159,20 +172,23 @@ const ANTHROPIC: &[Model] = &[
                 cache_read: Some(0.05),
                 cache_write: Some(0.625),
             }),
-            ..anthropic(0.10, 0.50, 0.01)
+            ..anthropic(0.10, 0.50)
         },
     },
     Model {
         id: "claude-haiku-4-5",
         caps: Capabilities { context_window: 200_000, max_output: 64_000, adaptive_thinking: false, efforts: &[] },
-        price: anthropic(1.0, 5.0, 0.10),
+        price: anthropic(1.0, 5.0),
     },
 ];
 
-/// The table entry for `model`, also found by its name after a vendor
-/// prefix (OpenRouter's `anthropic/claude-opus-5-5`).
+/// The table entry for `model`, also found by the name other endpoints
+/// give it: OpenRouter's `anthropic/claude-opus-4.6` or
+/// `anthropic/claude-sonnet-4.6:thinking` (vendor prefix and `:variant`
+/// dropped, dots read as dashes).
 fn find(model: &str) -> Option<&'static Model> {
     let bare = model.rsplit('/').next().unwrap_or(model);
+    let bare = bare.split(':').next().unwrap_or(bare).replace('.', "-");
     ANTHROPIC.iter().find(|m| m.id == model || m.id == bare)
 }
 
@@ -202,9 +218,19 @@ mod tests {
         assert!(opus.adaptive_thinking);
         assert_eq!(opus.max_output, 128_000);
         assert_eq!(capabilities("anthropic/claude-opus-5-5"), Some(opus));
+        // OpenRouter's ids.
+        assert_eq!(capabilities("anthropic/claude-opus-5.5"), Some(opus));
+        assert_eq!(capabilities("anthropic/claude-opus-4.6").unwrap().efforts, NO_XHIGH);
+        assert_eq!(capabilities("anthropic/claude-sonnet-4.6:thinking").unwrap().efforts, NO_XHIGH);
+        assert_eq!(capabilities("anthropic/claude-haiku-4.5").unwrap().max_output, 64_000);
+        assert_eq!(capabilities("openai/gpt-5"), None);
         assert_eq!(capabilities("claude-haiku-4-5").unwrap().context_window, 200_000);
         assert_eq!(capabilities("gpt-5"), None);
-        assert_eq!(anthropic_price("claude-opus-5-5").unwrap().cache_write, Some(5.0));
+        let opus_price = anthropic_price("claude-opus-5-5").unwrap();
+        assert_eq!((opus_price.cache_read, opus_price.cache_write), (Some(0.20), Some(5.0)));
+        let sonnet46 = anthropic_price("claude-sonnet-4-6").unwrap();
+        assert!((sonnet46.cache_read.unwrap() - 0.30).abs() < 1e-12, "0.1× input");
+        assert!((sonnet46.cache_write.unwrap() - 3.75).abs() < 1e-12, "1.25× input");
         assert_eq!(anthropic_price("anthropic/claude-opus-5-5"), None, "only the first-party id");
     }
 

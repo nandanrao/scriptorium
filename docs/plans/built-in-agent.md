@@ -82,13 +82,14 @@ crates/agent  (scriptorium-agent, pure: no I/O)
   turn        the agent loop as a state machine (Run): Send -> reply -> RunTools -> results -> Send…
               (caller does the HTTP and runs the tools; the crate never blocks)
   file        a thread as stored on disk, with its system prompt and tools hash
-  presets     known providers' endpoints
 
 crates/tools  (scriptorium-tools, pure; uses the agent crate only for ToolSpec)
   catalogue   the tool catalogue: names, descriptions, JSON schemas (shared with the MCP server)
   prompt      the system prompt, versioned in the repo
 
-crates/providers (scriptorium-providers, does I/O: used by CLI and app)
+crates/providers (scriptorium-providers, pure core + I/O shell: used by CLI and app)
+  core:       account (accounts file model), presets (Anthropic, OpenAI, OpenRouter),
+              models (capability + price tables), resolve (account + thread -> Request), cost
   accounts    config file + keyring
   oauth       (after v1) PKCE + loopback listener (ChatGPT, OpenRouter), token refresh
   http        streaming POST on a worker thread (ureq: small, sync), feeds SseParser

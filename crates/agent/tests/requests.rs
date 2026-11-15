@@ -631,6 +631,7 @@ fn output_limit_effort_and_extra_headers() {
     assert_eq!(build_request(Protocol::Anthropic, &c, &t).unwrap().body["max_tokens"], 64000);
     let o = build_request(Protocol::OpenaiChat, &c, &t).unwrap().body;
     assert!(o.get("max_completion_tokens").is_none());
+    assert!(o.get("max_tokens").is_none());
     assert!(o.get("reasoning_effort").is_none());
 
     let c = Call { max_tokens: Some(1234), extra_headers: &headers, ..c };
@@ -639,14 +640,21 @@ fn output_limit_effort_and_extra_headers() {
         assert_eq!(r.headers.last(), Some(&headers[0]), "{p:?}");
     }
     assert_eq!(build_request(Protocol::Anthropic, &c, &t).unwrap().body["max_tokens"], 1234);
-    assert_eq!(build_request(Protocol::OpenaiChat, &c, &t).unwrap().body["max_completion_tokens"], 1234);
+    // Other OpenAI-compatible servers get `max_tokens`; OpenAI itself the newer name.
+    let o = build_request(Protocol::OpenaiChat, &c, &t).unwrap().body;
+    assert_eq!((o["max_tokens"].as_u64(), o.get("max_completion_tokens")), (Some(1234), None));
+    let to_openai = Call { base_url: "https://api.openai.com/v1/", ..c };
+    let o = build_request(Protocol::OpenaiChat, &to_openai, &t).unwrap().body;
+    assert_eq!((o["max_completion_tokens"].as_u64(), o.get("max_tokens")), (Some(1234), None));
+    let lookalike = Call { base_url: "https://api.openai.com.example.org/v1", ..c };
+    assert_eq!(build_request(Protocol::OpenaiChat, &lookalike, &t).unwrap().body["max_tokens"], 1234);
 
     for (effort, anthropic, openai) in [
         (Effort::Low, "low", Some("low")),
         (Effort::Medium, "medium", Some("medium")),
         (Effort::High, "high", Some("high")),
-        (Effort::XHigh, "xhigh", None),
-        (Effort::Max, "max", None),
+        (Effort::XHigh, "xhigh", Some("high")),
+        (Effort::Max, "max", Some("high")),
     ] {
         let c = Call { effort: Some(effort), ..c };
         let a = build_request(Protocol::Anthropic, &c, &t).unwrap().body;

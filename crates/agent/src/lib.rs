@@ -18,7 +18,6 @@
 //! Pure: values in, values out. No network, files, clocks or threads.
 
 pub mod file;
-pub mod presets;
 pub mod protocol;
 mod sse;
 mod thread;

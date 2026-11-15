@@ -69,11 +69,11 @@ pub enum Thinking {
 /// Anthropic: `output_config.effort`. Accepted by Claude Opus 4.6+, Sonnet
 /// 4.6+, Haiku 5.5 and Fable (Opus 4.5 takes `low`/`medium`/`high`); Haiku 4.5
 /// and older reject it.
-/// OpenAI protocol: `reasoning_effort`, for `Low`/`Medium`/`High` only (the
-/// others are not sent). Only reasoning models accept it.
+/// OpenAI protocol: `reasoning_effort`, which has only `low`/`medium`/`high`:
+/// `XHigh` and `Max` are sent as `high`. Only reasoning models accept it.
 ///
-/// Which models accept what is the caller's decision (an account setting);
-/// the presets don't track model capabilities.
+/// Which models accept what is the caller's decision (scriptorium-providers
+/// keeps a capability table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
@@ -97,11 +97,11 @@ impl Effort {
         }
     }
 
-    /// OpenAI's `reasoning_effort`, if it has this level.
-    fn openai(self) -> Option<&'static str> {
+    /// OpenAI's `reasoning_effort`: its highest level is `high`.
+    fn openai(self) -> &'static str {
         match self {
-            Effort::Low | Effort::Medium | Effort::High => Some(self.name()),
-            Effort::XHigh | Effort::Max => None,
+            Effort::Low | Effort::Medium | Effort::High => self.name(),
+            Effort::XHigh | Effort::Max => "high",
         }
     }
 }
@@ -118,7 +118,10 @@ pub struct Call<'a> {
     pub system: &'a str,
     pub tools: &'a [ToolSpec],
     /// Output limit. Anthropic requires one and defaults to 64000; the OpenAI
-    /// protocol sends `max_completion_tokens` only when set.
+    /// protocol sends it only when set, as `max_completion_tokens` to OpenAI
+    /// itself (`api.openai.com`, which deprecated `max_tokens`) and as
+    /// `max_tokens` to every other OpenAI-compatible server (many don't know
+    /// the newer name).
     pub max_tokens: Option<u64>,
     /// See [`Effort`]; `None` for the model's default.
     pub effort: Option<Effort>,

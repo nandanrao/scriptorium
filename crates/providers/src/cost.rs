@@ -46,14 +46,6 @@ impl PriceBook {
     }
 }
 
-impl Price {
-    /// What `tokens` of fresh (uncached) input cost, in US dollars: for
-    /// "reading the whole script costs about $0.18" before it's sent.
-    pub fn input_cost(&self, tokens: u64) -> f64 {
-        self.rates(tokens).0 * tokens as f64 / 1e6
-    }
-}
-
 /// One reply's cost in US dollars: the provider's figure, else `usage`
 /// priced with `price`. `None` when the counts are incomplete, there's no
 /// price, or the reply used the cache and the price has no cache rate.
@@ -129,7 +121,6 @@ mod tests {
         let c = reply_cost(Some(&opus), &usage(1_000_000, 50_000, 200_000, 100_000)).unwrap();
         // 700k × $4 + 200k × $0.20 + 100k × $5 + 50k × $20, per million.
         assert!(close(c, 2.8 + 0.04 + 0.5 + 1.0), "{c}");
-        assert!(close(opus.input_cost(35_000), 0.14));
     }
 
     #[test]
@@ -137,6 +128,13 @@ mod tests {
         let haiku = PriceBook::builtin().price(&Origin::new(ANTHROPIC, "claude-haiku-5-5")).unwrap();
         assert!(close(reply_cost(Some(&haiku), &usage(100_000, 0, 0, 0)).unwrap(), 0.01));
         assert!(close(reply_cost(Some(&haiku), &usage(200_000, 0, 0, 0)).unwrap(), 0.10));
+        // The whole request moves to the long-prompt rates, cache included: 300k input
+        // (100k cached, 50k written) and 10k output at $0.50 / $0.05 / $0.625 / $2.50.
+        let c = reply_cost(Some(&haiku), &usage(300_000, 10_000, 100_000, 50_000)).unwrap();
+        assert!(close(c, (150_000.0 * 0.50 + 100_000.0 * 0.05 + 50_000.0 * 0.625 + 10_000.0 * 2.50) / 1e6), "{c}");
+        // Counted on all input: 90k fresh plus 20k cached is over the line.
+        let c = reply_cost(Some(&haiku), &usage(110_000, 0, 20_000, 0)).unwrap();
+        assert!(close(c, (90_000.0 * 0.50 + 20_000.0 * 0.05) / 1e6), "{c}");
     }
 
     #[test]

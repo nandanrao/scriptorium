@@ -21,6 +21,13 @@ pub fn headers(api_key: &str) -> Vec<(String, String)> {
     h
 }
 
+/// Whether `base_url` is OpenAI's own API (not another OpenAI-compatible server).
+fn is_openai(base_url: &str) -> bool {
+    let rest = base_url.split_once("://").map_or(base_url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    host.eq_ignore_ascii_case("api.openai.com") || host.eq_ignore_ascii_case("api.openai.com:443")
+}
+
 pub fn body(call: &Call, thread: &Thread) -> Value {
     let mut messages = vec![];
     if !call.system.is_empty() {
@@ -102,10 +109,11 @@ pub fn body(call: &Call, thread: &Thread) -> Value {
         "messages": messages,
     });
     if let Some(n) = call.max_tokens {
-        body["max_completion_tokens"] = json!(n);
+        let field = if is_openai(call.base_url) { "max_completion_tokens" } else { "max_tokens" };
+        body[field] = json!(n);
     }
-    if let Some(effort) = call.effort.and_then(|e| e.openai()) {
-        body["reasoning_effort"] = json!(effort);
+    if let Some(effort) = call.effort {
+        body["reasoning_effort"] = json!(effort.openai());
     }
     if !call.tools.is_empty() {
         body["tools"] = json!(

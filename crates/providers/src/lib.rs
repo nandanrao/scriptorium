@@ -5,7 +5,7 @@
 //! settings. [`resolve()`] turns an account (plus the thread's model, if it
 //! has one) into everything a request needs, and [`build_request`] builds
 //! the HTTP request for a thread with [`scriptorium_agent::protocol`].
-//! [`models`] holds what we know about models: what they accept
+//! [`presets`] are the providers offered by name. [`models`] holds what we know about models: what they accept
 //! ([`Capabilities`]) and what they cost ([`Price`]); [`cost`] prices a
 //! thread for the token/cost display.
 //!
@@ -20,12 +20,14 @@
 pub mod account;
 pub mod cost;
 pub mod models;
+pub mod presets;
 pub mod resolve;
 
 pub use account::{Account, AccountsFile, Provider};
 pub use cost::{PriceBook, ThreadCost, reply_cost, thread_cost};
 pub use models::{Capabilities, Price, PriceTier, capabilities};
-pub use resolve::{Resolved, build_request, models_request, resolve};
+pub use presets::{PRESETS, Preset};
+pub use resolve::{DEFAULT_MAX_TOKENS, Resolved, build_request, models_request, resolve};
 
 use scriptorium_agent::AgentError;
 
