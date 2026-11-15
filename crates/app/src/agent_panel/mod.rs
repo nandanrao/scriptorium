@@ -148,6 +148,7 @@ pub fn bindings() -> Vec<KeyBinding> {
     // Overrides of gpui-base's `Input` keys, only in the composer: the same
     // depth as gpui-base's bindings and registered after them, so these win.
     let composer = Some("AgentComposer > Input");
+    let accounts_field = Some("AccountsSheet > Input");
     let mut b = vec![
         KeyBinding::new(sec!("l"), ToggleAgentPanel, Some("Workspace")),
         KeyBinding::new("escape", ReturnFocus, panel),
@@ -160,6 +161,11 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", ReturnFocus, composer),
         KeyBinding::new("tab", FocusNext, composer),
         KeyBinding::new("shift-tab", FocusPrev, composer),
+        // The accounts sheet's text fields: gpui-base's Tab is "indent"; here it moves on.
+        KeyBinding::new("tab", FocusNext, accounts_field),
+        KeyBinding::new("shift-tab", FocusPrev, accounts_field),
+        KeyBinding::new("tab", FocusNext, Some("AccountsSheet")),
+        KeyBinding::new("shift-tab", FocusPrev, Some("AccountsSheet")),
         // gpui-base: Cmd/Ctrl+. is ToggleCodeActions inside `Input`.
         KeyBinding::new(sec!("."), Stop, composer),
         // gpui-base's search and replace have no UI here.

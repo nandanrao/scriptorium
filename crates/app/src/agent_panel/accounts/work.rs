@@ -22,19 +22,23 @@ pub struct Snapshot {
 /// (the account is saved even when its key couldn't be stored).
 #[derive(Debug, Clone)]
 pub struct Done {
-    pub snapshot: Snapshot,
+    /// The accounts after the change; an error if they couldn't be read
+    /// back (the change itself was made).
+    pub snapshot: Result<Snapshot, String>,
     pub problem: Option<String>,
 }
 
-/// The keys the sheet uses. `SCRIPTORIUM_TEST_KEYS=memory` (kept in this
-/// process only) or `=env` replace the keyring for tests that must not
-/// touch the real one.
+/// The keys the sheet uses. In debug builds `SCRIPTORIUM_TEST_KEYS=memory`
+/// (kept in this process only) or `=env` replace the keyring for tests that
+/// must not touch the real one; release builds ignore it.
 pub fn keys_from_env() -> Keys {
+    #[cfg(debug_assertions)]
     match std::env::var("SCRIPTORIUM_TEST_KEYS").as_deref() {
-        Ok("memory") => Keys::in_memory(|k| std::env::var(k).ok()),
-        Ok("env") => Keys::env_only(),
-        _ => Keys::system(),
+        Ok("memory") => return Keys::in_memory(|k| std::env::var(k).ok()),
+        Ok("env") => return Keys::env_only(),
+        _ => {}
     }
+    Keys::system()
 }
 
 pub fn snapshot(path: &Path, keys: &Keys) -> Result<Snapshot, String> {
@@ -43,19 +47,25 @@ pub fn snapshot(path: &Path, keys: &Keys) -> Result<Snapshot, String> {
     Ok(Snapshot { file, statuses })
 }
 
-/// Adds or replaces `account`, then stores `key` if one was typed. The
-/// first account becomes the default; so does one asked to be.
+/// Saves `account`, then stores `key` if one was typed. `create` is
+/// `Some(id base)` for a new account: its id is then chosen here, unused in
+/// the file as it is now, so it never replaces an account (or keychain
+/// entry) another change made meanwhile. With `None` the account with
+/// that id is replaced. The first account becomes the default.
 pub fn save_account(
     path: &Path,
     keys: &Keys,
-    account: Account,
+    mut account: Account,
+    create: Option<&str>,
     key: Option<&str>,
-    make_default: bool,
 ) -> Result<Done, String> {
     let mut file = config::load(path).map_err(|e| e.to_string())?;
     let first = file.accounts.is_empty();
+    if let Some(base) = create {
+        account.id = file.unused_id(base);
+    }
     file.upsert(account.clone()).map_err(|e| e.to_string())?;
-    if first || make_default {
+    if first {
         file.set_default(&account.id).map_err(|e| e.to_string())?;
     }
     config::save(path, &file).map_err(|e| e.to_string())?;
@@ -63,25 +73,25 @@ pub fn save_account(
         .filter(|k| !k.trim().is_empty())
         .and_then(|k| keys.set(&account, k).err())
         .map(|e| format!("The account is saved, but its key was not: {e}."));
-    Ok(Done { snapshot: snapshot(path, keys)?, problem })
+    Ok(Done { snapshot: snapshot(path, keys), problem })
 }
 
 /// Removes an account and its keychain entry.
 pub fn remove_account(path: &Path, keys: &Keys, id: &str) -> Result<Done, String> {
     let mut file = config::load(path).map_err(|e| e.to_string())?;
     let Some(account) = file.remove(id) else {
-        return Ok(Done { snapshot: snapshot(path, keys)?, problem: None });
+        return Ok(Done { snapshot: snapshot(path, keys), problem: None });
     };
     config::save(path, &file).map_err(|e| e.to_string())?;
     let problem = keys.delete(&account).err().map(|e| format!("The account is removed, but its key was not: {e}."));
-    Ok(Done { snapshot: snapshot(path, keys)?, problem })
+    Ok(Done { snapshot: snapshot(path, keys), problem })
 }
 
-pub fn make_default(path: &Path, keys: &Keys, id: &str) -> Result<Snapshot, String> {
+pub fn make_default(path: &Path, keys: &Keys, id: &str) -> Result<Done, String> {
     let mut file = config::load(path).map_err(|e| e.to_string())?;
     file.set_default(id).map_err(|e| e.to_string())?;
     config::save(path, &file).map_err(|e| e.to_string())?;
-    snapshot(path, keys)
+    Ok(Done { snapshot: snapshot(path, keys), problem: None })
 }
 
 /// Deletes the keychain entry; returns the status afterwards.
@@ -92,14 +102,14 @@ pub fn delete_key(keys: &Keys, account: &Account) -> Result<KeyStatus, String> {
 
 /// "Check": the cheap models request (no tokens, no script text) with the
 /// typed key, or else the stored one. Says how it went, in a sentence.
-pub fn check(keys: &Keys, account: &Account, typed: Option<&str>) -> Result<String, String> {
+pub fn check(keys: &Keys, account: &Account, typed: Option<&str>, cancel: &CancelToken) -> Result<String, String> {
     let key =
         typed.map(str::trim).filter(|k| !k.is_empty()).map(String::from).or_else(|| keys.get(account).map(|k| k.0));
     let request = models_request(account, key.as_deref()).map_err(|e| e.to_string())?;
     let transport = transport_from_env(None).map_err(|e| e.to_string())?;
     let mut body = String::new();
     let ended = transport
-        .send(&request, &CancelToken::new(), &mut |line| {
+        .send(&request, cancel, &mut |line| {
             body.push_str(line);
             body.push('\n');
             Flow::Continue
@@ -136,19 +146,19 @@ mod tests {
         let path = scratch("first");
         let keys = keys();
         let a = Account::new("work", "Work", Provider::Anthropic);
-        let done = save_account(&path, &keys, a.clone(), Some(" sk-1 "), false).unwrap();
+        let done = save_account(&path, &keys, a.clone(), None, Some(" sk-1 ")).unwrap();
         assert!(done.problem.is_none());
-        assert_eq!(done.snapshot.file.default.as_deref(), Some("work"));
-        assert_eq!(done.snapshot.statuses["work"], KeyStatus::Keyring);
+        assert_eq!(done.snapshot.as_ref().unwrap().file.default.as_deref(), Some("work"));
+        assert_eq!(done.snapshot.as_ref().unwrap().statuses["work"], KeyStatus::Keyring);
         assert_eq!(keys.get(&a).unwrap().0, "sk-1");
         // The file never holds a key.
         assert!(!std::fs::read_to_string(&path).unwrap().contains("sk-1"));
 
         let b = Account::new("home", "Home", Provider::Openai);
-        let done = save_account(&path, &keys, b, None, false).unwrap();
-        assert_eq!(done.snapshot.file.default.as_deref(), Some("work"), "a second one isn't");
-        assert!(matches!(done.snapshot.statuses["home"], KeyStatus::Missing { .. }));
-        let snap = make_default(&path, &keys, "home").unwrap();
+        let done = save_account(&path, &keys, b, None, None).unwrap();
+        assert_eq!(done.snapshot.as_ref().unwrap().file.default.as_deref(), Some("work"), "a second one isn't");
+        assert!(matches!(done.snapshot.as_ref().unwrap().statuses["home"], KeyStatus::Missing { .. }));
+        let snap = make_default(&path, &keys, "home").unwrap().snapshot.unwrap();
         assert_eq!(snap.file.default.as_deref(), Some("home"));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -158,10 +168,10 @@ mod tests {
         let path = scratch("edit");
         let keys = keys();
         let mut a = Account::new("work", "Work", Provider::Anthropic);
-        save_account(&path, &keys, a.clone(), Some("sk-1"), false).unwrap();
+        save_account(&path, &keys, a.clone(), None, Some("sk-1")).unwrap();
         a.model = Some("claude-sonnet-5-5".into());
-        let done = save_account(&path, &keys, a.clone(), Some(""), false).unwrap();
-        assert_eq!(done.snapshot.file.accounts[0].model.as_deref(), Some("claude-sonnet-5-5"));
+        let done = save_account(&path, &keys, a.clone(), None, Some("")).unwrap();
+        assert_eq!(done.snapshot.as_ref().unwrap().file.accounts[0].model.as_deref(), Some("claude-sonnet-5-5"));
         assert_eq!(keys.get(&a).unwrap().0, "sk-1");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -171,8 +181,8 @@ mod tests {
         let path = scratch("nokeyring");
         let keys = Keys::env_only();
         let a = Account::new("work", "Work", Provider::Anthropic);
-        let done = save_account(&path, &keys, a, Some("sk-1"), false).unwrap();
-        assert_eq!(done.snapshot.file.accounts.len(), 1);
+        let done = save_account(&path, &keys, a, None, Some("sk-1")).unwrap();
+        assert_eq!(done.snapshot.as_ref().unwrap().file.accounts.len(), 1);
         let p = done.problem.unwrap();
         assert!(p.contains("SCRIPTORIUM_WORK_KEY"), "{p}");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -183,13 +193,31 @@ mod tests {
         let path = scratch("remove");
         let keys = keys();
         let a = Account::new("work", "Work", Provider::Anthropic);
-        save_account(&path, &keys, a.clone(), Some("sk-1"), false).unwrap();
+        save_account(&path, &keys, a.clone(), None, Some("sk-1")).unwrap();
         let done = remove_account(&path, &keys, "work").unwrap();
-        assert!(done.snapshot.file.accounts.is_empty());
-        assert_eq!(done.snapshot.file.default, None);
+        assert!(done.snapshot.as_ref().unwrap().file.accounts.is_empty());
+        assert_eq!(done.snapshot.as_ref().unwrap().file.default, None);
         assert_eq!(keys.get(&a), None);
         // Removing what is already gone is not an error.
         assert!(remove_account(&path, &keys, "work").unwrap().problem.is_none());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_new_accounts_id_is_picked_against_the_file_as_it_is_now() {
+        let path = scratch("fresh-id");
+        let keys = keys();
+        // The form chose "anthropic" when the file was empty; meanwhile
+        // another change added that account and stored its key.
+        let other = Account::new("anthropic", "Other", Provider::Anthropic);
+        save_account(&path, &keys, other.clone(), None, Some("sk-other")).unwrap();
+        let mine = Account::new("anthropic", "Mine", Provider::Anthropic);
+        let done = save_account(&path, &keys, mine, Some("anthropic"), Some("sk-mine")).unwrap();
+        let file = done.snapshot.unwrap().file;
+        assert_eq!(file.accounts.len(), 2);
+        assert_eq!(file.get("anthropic").unwrap().name, "Other", "not replaced");
+        assert_eq!(file.get("anthropic-2").unwrap().name, "Mine");
+        assert_eq!(keys.get(&other).unwrap().0, "sk-other", "its key is untouched");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -200,7 +228,7 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         let a = Account::new("work", "Work", Provider::Anthropic);
         assert!(snapshot(&path, &keys()).is_err());
-        assert!(save_account(&path, &keys(), a, None, false).is_err());
+        assert!(save_account(&path, &keys(), a, None, None).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -208,7 +236,7 @@ mod tests {
     #[test]
     fn check_needs_a_key_before_it_sends_anything() {
         let a = Account::new("work", "Work", Provider::Anthropic);
-        let e = check(&keys(), &a, Some("  ")).unwrap_err();
+        let e = check(&keys(), &a, Some("  "), &CancelToken::new()).unwrap_err();
         assert!(e.contains("no API key"), "{e}");
     }
 }

@@ -123,16 +123,26 @@ impl Form {
 
     /// The id a new account gets: the name as a slug, else the provider's.
     /// Never another provider's id (those are reserved for its own accounts).
-    fn new_id(&self, file: &AccountsFile) -> String {
+    fn id_base(&self) -> String {
         let slug = slug(&self.name);
-        let base = if slug.is_empty() {
+        if slug.is_empty() {
             self.kind.id().to_string()
         } else if Provider::from_id(&slug).is_some_and(|p| Kind::of(&p) != self.kind) {
             format!("custom-{slug}")
         } else {
             slug
-        };
-        file.unused_id(&base)
+        }
+    }
+
+    /// For a new account: what its id is built from. The write picks the
+    /// id that is unused in the file as it is then (see `work::save_account`);
+    /// an id chosen earlier may have been taken by then.
+    pub fn create_base(&self) -> Option<String> {
+        self.editing.is_none().then(|| self.id_base())
+    }
+
+    fn new_id(&self, file: &AccountsFile) -> String {
+        file.unused_id(&self.id_base())
     }
 
     /// The account as entered, without checking it. `base` is the account
@@ -158,7 +168,12 @@ impl Form {
     /// Something worth telling the writer now, before saving: plain http to
     /// another machine.
     pub fn warnings(&self, file: &AccountsFile, base: Option<&Account>) -> Vec<String> {
-        self.draft(self.id_for(file), base).warnings()
+        plain_warnings(&self.draft(self.id_for(file), base))
+    }
+
+    /// The environment variables the key could come from (for "Advanced").
+    pub fn env_vars(&self, file: &AccountsFile, base: Option<&Account>) -> Vec<String> {
+        self.draft(self.id_for(file), base).key_env_vars()
     }
 
     /// The account to save, or what to fix first.
@@ -190,6 +205,33 @@ impl Form {
     }
 }
 
+/// Warnings about an account in plain words (the library's own carry the
+/// account's internal id).
+pub fn plain_warnings(a: &Account) -> Vec<String> {
+    if a.warnings().is_empty() {
+        vec![]
+    } else {
+        vec!["This address isn't secure (http). Your key and script text would be sent unencrypted.".into()]
+    }
+}
+
+/// A friendlier name for a suggested model id.
+pub fn model_label(id: &str) -> String {
+    let name = match id {
+        "claude-opus-5-5" => "Claude Opus 5.5",
+        "claude-sonnet-5-5" => "Claude Sonnet 5.5",
+        "claude-haiku-5-5" => "Claude Haiku 5.5",
+        "claude-fable-5-2" => "Claude Fable 5.2",
+        "gpt-5" => "GPT-5",
+        "gpt-5-mini" => "GPT-5 mini",
+        "anthropic/claude-opus-5.5" => "Claude Opus 5.5",
+        "anthropic/claude-sonnet-5.5" => "Claude Sonnet 5.5",
+        "openai/gpt-5" => "GPT-5",
+        _ => return id.to_string(),
+    };
+    name.to_string()
+}
+
 fn slug(name: &str) -> String {
     let mut out = String::new();
     for c in name.trim().chars() {
@@ -210,33 +252,45 @@ pub enum Tone {
     Bad,
 }
 
-/// The short status for the list: "in keychain", "from SCRIPTORIUM_X_KEY",
+/// The short status for the list: "in keychain", "from your environment",
 /// "missing" (or "no key" for an endpoint that may not need one).
 pub fn key_short(status: &KeyStatus, needs_key: bool) -> (String, Tone) {
     match status {
         KeyStatus::Keyring => ("in keychain".into(), Tone::Good),
-        KeyStatus::Env(var) => (format!("from {var}"), Tone::Good),
+        KeyStatus::Env(_) => ("from your environment".into(), Tone::Good),
         KeyStatus::Missing { .. } if needs_key => ("missing".into(), Tone::Bad),
         KeyStatus::Missing { .. } => ("no key".into(), Tone::Plain),
     }
 }
 
-/// The longer status for the form, including which variables would be read.
-pub fn key_long(status: &KeyStatus, needs_key: bool) -> (String, Tone) {
+/// The help under the key field, in plain words (no variable names: see
+/// [`key_advanced`]). `provider` is the provider's name.
+pub fn key_long(status: &KeyStatus, needs_key: bool, provider: &str) -> (String, Tone) {
     match status {
-        KeyStatus::Keyring => ("A key is in the system keychain.".into(), Tone::Good),
-        KeyStatus::Env(var) => (format!("The key comes from the environment variable {var}."), Tone::Good),
-        KeyStatus::Missing { env_vars, keyring } => {
-            let vars = env_vars.join(" or ");
-            let tone = if needs_key { Tone::Bad } else { Tone::Plain };
-            let head = if needs_key { "No key yet." } else { "No key (this endpoint may not need one)." };
-            let text = match keyring {
-                Some(why) => format!("{head} The keychain isn't available ({why}); set {vars} instead."),
-                None => format!("{head} Add one below, or set {vars}."),
-            };
-            (text, tone)
+        KeyStatus::Keyring => ("A key is saved in your keychain. Leave this empty to keep it.".into(), Tone::Good),
+        KeyStatus::Env(_) => {
+            ("Using a key from your environment, which takes priority over one saved here.".into(), Tone::Good)
         }
+        KeyStatus::Missing { keyring: Some(_), .. } => (
+            "Your system's keychain isn't available, so a key can't be saved here. See Advanced for another way."
+                .into(),
+            Tone::Bad,
+        ),
+        KeyStatus::Missing { .. } if needs_key => (format!("Paste your key from {provider}."), Tone::Plain),
+        KeyStatus::Missing { .. } => ("This endpoint may not need a key. Paste one if it does.".into(), Tone::Plain),
     }
+}
+
+/// The technical detail for the "Advanced" disclosure.
+pub fn key_advanced(env_vars: &[String], status: Option<&KeyStatus>) -> String {
+    let mut text = format!(
+        "Instead of the keychain, the key can come from the environment variable {}. A variable that is set is used first.",
+        env_vars.join(" or ")
+    );
+    if let Some(KeyStatus::Missing { keyring: Some(why), .. }) = status {
+        text.push_str(&format!(" The keychain said: {why}."));
+    }
+    text
 }
 
 /// The accounts file's path from the environment, or why there isn't one.
@@ -371,13 +425,36 @@ mod tests {
             keyring: None,
         };
         assert_eq!(key_short(&KeyStatus::Keyring, true).0, "in keychain");
-        assert_eq!(key_short(&KeyStatus::Env("SCRIPTORIUM_X_KEY".into()), true).0, "from SCRIPTORIUM_X_KEY");
+        assert_eq!(key_short(&KeyStatus::Env("SCRIPTORIUM_X_KEY".into()), true).0, "from your environment");
         assert_eq!(key_short(&missing, true), ("missing".into(), Tone::Bad));
         assert_eq!(key_short(&missing, false), ("no key".into(), Tone::Plain));
-        let (long, tone) = key_long(&missing, true);
-        assert!(long.contains("SCRIPTORIUM_WORK_KEY or SCRIPTORIUM_ANTHROPIC_KEY"), "{long}");
-        assert_eq!(tone, Tone::Bad);
+        let (long, tone) = key_long(&missing, true, "Anthropic");
+        assert_eq!((long.as_str(), tone), ("Paste your key from Anthropic.", Tone::Plain));
+        assert!(!key_long(&KeyStatus::Env("SCRIPTORIUM_X_KEY".into()), true, "A").0.contains("SCRIPTORIUM"));
         let no_ring = KeyStatus::Missing { env_vars: vec!["SCRIPTORIUM_A_KEY".into()], keyring: Some("no bus".into()) };
-        assert!(key_long(&no_ring, true).0.contains("no bus"));
+        assert!(!key_long(&no_ring, true, "A").0.contains("no bus"));
+        let adv = key_advanced(&["SCRIPTORIUM_WORK_KEY".into(), "SCRIPTORIUM_ANTHROPIC_KEY".into()], Some(&no_ring));
+        assert!(adv.contains("SCRIPTORIUM_WORK_KEY or SCRIPTORIUM_ANTHROPIC_KEY") && adv.contains("no bus"), "{adv}");
+    }
+
+    #[test]
+    fn warnings_use_plain_words_without_ids() {
+        let file = AccountsFile::default();
+        let mut f = Form::new(Kind::Custom);
+        f.name = "Proxy box".into();
+        f.base_url = "http://api.example.org/v1".into();
+        let w = f.warnings(&file, None);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("isn't secure") && !w[0].contains("proxy-box"), "{w:?}");
+    }
+
+    #[test]
+    fn new_accounts_build_their_id_from_a_base() {
+        let mut f = Form::new(Kind::Anthropic);
+        assert_eq!(f.create_base().as_deref(), Some("anthropic"));
+        f.editing = Some("anthropic".into());
+        assert_eq!(f.create_base(), None);
+        assert_eq!(model_label("claude-opus-5-5"), "Claude Opus 5.5");
+        assert_eq!(model_label("something-else"), "something-else");
     }
 }
