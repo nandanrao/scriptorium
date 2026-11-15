@@ -19,8 +19,9 @@ Living notes on direction. Update this when a decision is made or reversed.
 - `.fdx` round-trips byte-for-byte; we splice changes, never reserialize.
 - Undo/redo comes from the core's append-only event log, not from the UI.
 - Licence: MIT OR Apache-2.0 (placeholder, open to change).
-- **UI stack: GPUI native** (2026-11-14), pinned to a Zed commit. Decided by
-  the spike below. A web build may later come from `gpui_web`.
+- **UI stack: GPUI native** (2026-11-14), via crates.io `gpui-pre`, following
+  gpui-kit (2026-11-14); the built-in-agent plan records the gpui-kit decision.
+  Decided by the spike below. A web build may later come from `gpui_web`.
 
 ## Spike: GPUI native editor (done, 2026-11-14: successful)
 

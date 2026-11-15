@@ -26,6 +26,13 @@ pub struct InputArea {
     pub child: AnyElement,
 }
 
+impl IntoElement for InputArea {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
 impl Element for InputArea {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -102,6 +109,13 @@ pub struct ParaState {
 impl ParaElement {
     fn top_pad(&self) -> Pixels {
         if self.ix == 0 { layout::page_top() } else { px(0.) }
+    }
+}
+
+impl IntoElement for ParaElement {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
     }
 }
 

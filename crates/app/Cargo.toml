@@ -15,9 +15,9 @@ path = "src/main.rs"
 scriptorium-core.workspace = true
 scriptorium-fdx.workspace = true
 scriptorium-review.workspace = true
-# GPUI is pinned to one Zed commit; upgrade on purpose (see AGENTS.md).
-gpui = { git = "https://github.com/zed-industries/zed", rev = "99c890d39d336052d9dae34c7914b55ee82abc5f" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "99c890d39d336052d9dae34c7914b55ee82abc5f", features = ["wayland", "x11", "font-kit"] }
+# GPUI: crates.io snapshot gpui-pre (same as gpui-kit).
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["wayland", "x11", "font-kit"] }
 unicode-segmentation.workspace = true
 
 [lints]

@@ -33,9 +33,12 @@ commands, invertible ops, event log, undo/redo, paragraph-id rules), `spans`,
 Direction and open questions live in `docs/PLAN.md`. Read it before starting
 new feature work: the roadmap is still being planned.
 
-GPUI is a git dependency pinned to one Zed commit. Zed's `gpui*` crates are
-Apache-2.0 and may be copied with attribution; Zed's `editor`, `ui`, `text`,
-`rope` crates are GPL-3.0 — read them for ideas, never copy code from them.
+GPUI comes from crates.io as `gpui-pre`: weekly unpatched snapshots of Zed's
+GPUI, published for gpui-kit, pinned exactly. Upgrade it when gpui-kit
+(longbridge/gpui-kit) upgrades, in a commit of its own; when Zed publishes
+official weekly GPUI releases, revisit. Zed's `gpui*` crates are Apache-2.0 and
+may be copied with attribution; Zed's `editor`, `ui`, `text`, `rope` crates are
+GPL-3.0 — read them for ideas, never copy code from them.
 
 ## Rules
 
@@ -116,6 +119,10 @@ WAYLAND_DISPLAY=wayland-N target/debug/scriptorium-app SCRIPT.fdx REVIEW.txt &
 WAYLAND_DISPLAY=wayland-N wtype -k Shift_L a   # each wtype run drops its first key: lead with Shift
 WAYLAND_DISPLAY=wayland-N grim shot.png
 ```
+
+Every command that talks to a display (the app, wtype, grim) must set
+`WAYLAND_DISPLAY=wayland-N` for the private compositor on the same command
+line. Never rely on the inherited environment: it points at the user's session.
 
 Work on copies of scripts in a scratch directory: the app writes a session
 file and an output `.fdx` next to the script.
