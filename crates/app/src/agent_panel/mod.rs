@@ -28,6 +28,8 @@
 
 pub mod accounts;
 pub mod composer;
+#[cfg(debug_assertions)]
+mod debug_fixture;
 pub mod driver;
 mod live;
 pub mod messages;
@@ -218,16 +220,14 @@ impl AgentPanel {
         let chat = cx.new(|_| Chat::new(script.clone(), script_path.clone()));
         let messages = cx.new(|cx| MessageView::new(script.clone(), window, cx));
         let observe = cx.observe(&chat, |this: &mut Self, chat, cx| {
-            let (ops, extra) = chat.update(cx, |c, _| (c.take_view_ops(), extra_lines(c)));
-            this.messages.update(cx, |m, cx| {
-                apply_view_ops(m, ops, cx);
-                m.set_extra(extra, cx);
-            });
+            let ops = chat.update(cx, |c, _| c.take_view_ops());
+            this.messages.update(cx, |m, cx| apply_view_ops(m, ops, cx));
+            cx.notify();
         });
         let events = cx.subscribe_in(&chat, window, Self::on_chat_event);
         Self {
             focus: cx.focus_handle(),
-            script,
+            script: script.clone(),
             script_path,
             threads: cx.new(|cx| ThreadList::new(window, cx)),
             messages,
@@ -309,7 +309,10 @@ impl AgentPanel {
     /// The panel's focus stops for Tab, in order. U6 and U7 add Send/Stop,
     /// the model chip and the thread list's own stops.
     fn tab_stops(&self, cx: &App) -> Vec<FocusHandle> {
-        vec![self.composer.read(cx).focus_handle(cx), self.threads.read(cx).focus_handle(cx)]
+        let mut stops = vec![self.composer.read(cx).focus_handle(cx)];
+        stops.extend(self.messages.read(cx).tab_stops());
+        stops.push(self.threads.read(cx).focus_handle(cx));
+        stops
     }
 
     fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -385,6 +388,27 @@ impl AgentPanel {
         }
     }
 
+    /// The run's notices and question, above the composer (a stand-in for
+    /// U6's notices and question card).
+    fn render_notices(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        let lines = extra_lines(self.chat.read(cx));
+        (!lines.is_empty()).then(|| {
+            div()
+                .id("agent-notices")
+                .flex_none()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(RULE)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_size(px(12.))
+                .text_color(INK_2)
+                .children(lines.into_iter().map(|l| div().child(l)))
+        })
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         div()
             .flex_none()
@@ -443,6 +467,7 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, _: &RedoAny, window, cx| this.undo_menu(true, window, cx)))
             .child(self.render_header(cx))
             .child(div().flex_1().min_h_0().child(self.messages.clone()))
+            .children(self.render_notices(cx))
             .child(self.composer.clone())
     }
 }
@@ -466,7 +491,7 @@ fn extra_lines(c: &Chat) -> Vec<String> {
 fn apply_view_ops(m: &mut MessageView, ops: Vec<ViewOp>, cx: &mut Context<MessageView>) {
     for op in ops {
         match op {
-            ViewOp::SetThread(t) => m.set_thread(t, cx),
+            ViewOp::SetThread { id, thread } => m.set_thread(&id, thread, cx),
             ViewOp::PushTurn(t) => m.push_turn(t, cx),
             ViewOp::StreamEvents(events) => m.stream_events(events, cx),
             ViewOp::Stream(op) => m.update_stream(|s| op.apply(s), cx),

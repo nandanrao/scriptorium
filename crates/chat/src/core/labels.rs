@@ -88,10 +88,22 @@ pub fn done(tool: &str, args: &Value, result: &str, review: Option<&str>) -> Str
     }
 }
 
-/// The label of a call that failed with `reason`; the panel shows it in the
-/// warning colour.
-pub fn failed(tool: &str, reason: &str) -> String {
-    format!("{tool} failed: {reason}")
+/// The label of a call that failed; the panel shows it in the warning colour.
+/// Plain words for the writer, never the tool's name; `reason` (the tool's own
+/// message, written for the model) stays in the row's expandable result.
+pub fn failed(tool: &str, _reason: &str) -> String {
+    let what = match tool {
+        "script_info" => "look at the script summary",
+        "read_scene" => "read the scene",
+        "read_script" => "read the script",
+        "list_paragraphs" => "find lines",
+        "list_reviews" => "list reviews",
+        "list_suggestions" => "list suggestions",
+        "suggest_change" => "write the suggestion",
+        "suggest_changes" => "write the suggestions",
+        _ => "finish a step",
+    };
+    format!("Couldn't {what}")
 }
 
 enum Scene {
@@ -383,7 +395,7 @@ mod tests {
     #[test]
     fn unknown_and_failed() {
         assert_eq!(done("nope", &Value::Null, "", None), "Ran nope");
-        assert_eq!(failed("read_scene", "no scene 99 (1 to 40)"), "read_scene failed: no scene 99 (1 to 40)");
+        assert_eq!(failed("read_scene", "no scene 99 (1 to 40)"), "Couldn't read the scene");
         assert_eq!(NOT_RUN, "Not run (stopped)");
         assert_eq!(OWN_REVIEW, "this conversation's review");
     }

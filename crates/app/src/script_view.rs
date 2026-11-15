@@ -317,7 +317,6 @@ impl Render for RailTip {
 pub(crate) type SessionLease = Rc<Option<scriptorium_fsio::SessionLock>>;
 
 /// Why the live store can't do what a tool call asks.
-#[allow(dead_code)] // The live store (U5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LiveError {
     /// Busy: another program holds the lock, or changed the files while the
@@ -1493,7 +1492,7 @@ impl ScriptView {
     }
 }
 
-#[allow(dead_code)] // The live store (agent_panel/live.rs, U5).
+#[allow(dead_code)] // Helpers the live store (agent_panel/live.rs) doesn't use yet.
 impl ScriptView {
     // ---- for the live store (agent_panel/live.rs, U5) ---------------------------
     //

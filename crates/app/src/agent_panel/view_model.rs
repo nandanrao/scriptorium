@@ -114,6 +114,11 @@ impl Preview {
     pub fn full(&self) -> &str {
         &self.full
     }
+
+    /// The whole result, shared (no copy).
+    pub fn full_shared(&self) -> Arc<str> {
+        self.full.clone()
+    }
 }
 
 /// What a row is.
@@ -141,7 +146,10 @@ pub enum Kind {
     },
     /// The run failed; the thread is unchanged and may be sent again.
     Error {
+        /// Plain words for the writer.
         text: String,
+        /// The provider's or library's own message, for an expandable detail.
+        detail: String,
         retryable: bool,
     },
     /// A retryable failure; sending again in `secs`.
@@ -173,7 +181,10 @@ enum Part {
 /// A failure shown at the tail of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
+    /// Plain words for the writer.
     pub text: String,
+    /// The raw error text.
+    pub detail: String,
     pub retryable: bool,
 }
 
@@ -258,14 +269,14 @@ impl Stream {
     pub fn fail(&mut self, error: &AgentError) {
         self.clear();
         let retryable = matches!(error, AgentError::Api { retryable: true, .. });
-        self.failure = Some(Failure { text: error.to_string(), retryable });
+        self.failure = Some(Failure { text: plain_error(error), detail: error.to_string(), retryable });
     }
 
     /// A failure told in words (the thread is busy elsewhere, the round
     /// limit…): shown like [`Stream::fail`].
     pub fn fail_with(&mut self, text: impl Into<String>, retryable: bool) {
         self.clear();
-        self.failure = Some(Failure { text: text.into(), retryable });
+        self.failure = Some(Failure { text: text.into(), detail: String::new(), retryable });
     }
 
     /// The writer pressed Stop: running rows read "Not run (stopped)" and a
@@ -293,6 +304,25 @@ impl Stream {
     pub fn usage(&self) -> Option<Usage> {
         self.usage
     }
+}
+
+/// What went wrong, in words for the writer (the raw text stays in the detail).
+pub fn plain_error(error: &AgentError) -> String {
+    use scriptorium_agent::ErrorKind;
+    match error {
+        AgentError::Api { kind, .. } => match kind {
+            ErrorKind::Auth => "The service refused the key. Check your key in Accounts.",
+            ErrorKind::RateLimit => "The service is limiting requests, or the credit is used up. Check Accounts.",
+            ErrorKind::Overloaded => "The service is busy right now.",
+            ErrorKind::Offline => "Can't reach the service. Check your connection.",
+            ErrorKind::BadRequest => "The service refused the request. Check the model in Accounts.",
+            ErrorKind::Other => "The service had a problem.",
+        },
+        AgentError::Parse(_) => "The service's reply wasn't understood.",
+        AgentError::NotReady(_) | AgentError::Mismatch(_) => "This conversation can't be sent as it is.",
+        AgentError::File(_) => "This conversation's file can't be read.",
+    }
+    .into()
 }
 
 /// What the view model needs besides the thread and the stream.
@@ -466,7 +496,10 @@ fn stream_rows(message: usize, stream: &Stream, out: &mut Vec<Row>) {
         out.push(Row { key: Key::Tail("waiting"), kind: Kind::Waiting { secs } });
     }
     if let Some(f) = &stream.failure {
-        out.push(Row { key: Key::Tail("error"), kind: Kind::Error { text: f.text.clone(), retryable: f.retryable } });
+        out.push(Row {
+            key: Key::Tail("error"),
+            kind: Kind::Error { text: f.text.clone(), detail: f.detail.clone(), retryable: f.retryable },
+        });
     }
     if stream.stopped {
         out.push(Row { key: Key::Tail("stopping"), kind: Kind::Notice { text: "Stopping…".into() } });
@@ -820,7 +853,7 @@ mod tests {
         let r = build(&t, &Stream::new(), false);
         let Kind::Tool(row) = &r[1].kind else { panic!() };
         assert_eq!(row.state, ToolState::Failed);
-        assert_eq!(row.label, "read_scene failed: no such scene");
+        assert_eq!(row.label, "Couldn't read the scene");
         assert_eq!(row.result.as_ref().unwrap().full(), "no such scene\nmore");
     }
 
@@ -885,8 +918,15 @@ mod tests {
         s.fail(&AgentError::offline("no connection"));
         assert!(s.usage().is_none());
         let r = build(&Thread::default(), &s, false);
-        assert_eq!(kinds(&r), vec![&Kind::Error { text: "no connection".into(), retryable: true }]);
-        assert_eq!(s.failure().unwrap().text, "no connection");
+        assert_eq!(
+            kinds(&r),
+            vec![&Kind::Error {
+                text: plain_error(&AgentError::offline("no connection")),
+                detail: "no connection".into(),
+                retryable: true
+            }]
+        );
+        assert_eq!(s.failure().unwrap().detail, "no connection");
         // A new event clears the line.
         s.event(ev_text(0, "again"));
         assert!(s.failure().is_none());
@@ -897,7 +937,14 @@ mod tests {
         let mut s = Stream::new();
         s.fail(&AgentError::Parse("bad".into()));
         let r = build(&Thread::default(), &s, false);
-        assert_eq!(kinds(&r), vec![&Kind::Error { text: "unexpected reply: bad".into(), retryable: false }]);
+        assert_eq!(
+            kinds(&r),
+            vec![&Kind::Error {
+                text: "The service's reply wasn't understood.".into(),
+                detail: "unexpected reply: bad".into(),
+                retryable: false
+            }]
+        );
     }
 
     #[test]

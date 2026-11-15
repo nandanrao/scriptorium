@@ -52,6 +52,7 @@ use scriptorium_providers::shell::{CancelToken, Ended, Flow, Keys, Transport, co
 use scriptorium_providers::{AccountsFile, Price};
 
 use super::live::LiveScript;
+pub use super::messages::ReviewRef;
 use super::view_model::Stream;
 use crate::script_view::ScriptView;
 
@@ -323,9 +324,13 @@ fn work(job: Job, transport: Arc<dyn Transport>, keys: Keys, tx: mpsc::Sender<To
 /// view's API is touched in one place only.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewOp {
-    /// Show this thread: another one (opened, new), or the same one grown
+    /// Show thread `id` (`""` for a new conversation not sent yet): another
+    /// one (opened, new, created by its first save), or the same one grown
     /// (a tool's result during a round).
-    SetThread(Thread),
+    SetThread {
+        id: String,
+        thread: Thread,
+    },
     /// A step's thread was saved: it replaces the streaming rows.
     PushTurn(Thread),
     /// Streamed events, a frame's worth.
@@ -335,13 +340,6 @@ pub enum ViewOp {
     RunActive(bool),
     /// The thread's review in the open script (link and label).
     Review(Option<ReviewRef>),
-}
-
-/// The thread's attached review.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewRef {
-    pub id: String,
-    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -407,6 +405,8 @@ pub struct Chat {
     choice: Option<(String, Option<String>)>,
     ops: Vec<ViewOp>,
     review: Option<ReviewRef>,
+    /// The thread id the message view was last given.
+    view_id: Option<String>,
 }
 
 impl EventEmitter<ChatEvent> for Chat {}
@@ -427,6 +427,7 @@ impl Chat {
             choice: None,
             ops: vec![],
             review: None,
+            view_id: None,
         }
     }
 
@@ -593,9 +594,28 @@ impl Chat {
         self.added.clear();
         self.notices.clear();
         self.ops.push(ViewOp::Stream(StreamOp::Clear));
-        self.ops.push(ViewOp::SetThread(self.shown()));
+        self.show(false);
         self.sync_review(cx);
         cx.notify();
+    }
+
+    /// Gives the message view the thread as shown. `turn`: a step was saved,
+    /// so it replaces the streaming rows. Another thread id than the view
+    /// has (a new thread's first save) switches its thread.
+    fn show(&mut self, turn: bool) {
+        let id = self.thread.as_ref().map_or_else(String::new, |t| t.id.clone());
+        let thread = self.shown();
+        if self.view_id.as_deref() != Some(id.as_str()) {
+            self.view_id = Some(id.clone());
+            if turn {
+                self.ops.push(ViewOp::Stream(StreamOp::Clear));
+            }
+            self.ops.push(ViewOp::SetThread { id, thread });
+        } else if turn {
+            self.ops.push(ViewOp::PushTurn(thread));
+        } else {
+            self.ops.push(ViewOp::SetThread { id, thread });
+        }
     }
 
     /// The thread as shown: the saved one plus the round's results so far.
@@ -726,7 +746,7 @@ impl Chat {
                     self.added.insert(call.id.clone(), a);
                 }
                 self.round.push(done.result);
-                self.ops.push(ViewOp::SetThread(self.shown()));
+                self.show(false);
                 self.sync_review(cx);
             }
             ToUi::Notice(text) => self.notices.push(text),
@@ -737,7 +757,7 @@ impl Chat {
                 self.thread = Some(*file);
                 self.round.clear();
                 self.usage = None;
-                self.ops.push(ViewOp::PushTurn(self.shown()));
+                self.show(true);
                 self.sync_review(cx);
                 if first {
                     cx.emit(ChatEvent::MessageSaved);
@@ -778,7 +798,7 @@ impl Chat {
                     }
                     Outcome::Error(e) => {
                         crate::log::warn(&format!("agent: {e}"));
-                        let say = format!("The agent stopped: {e}");
+                        let say = format!("The agent stopped: {}", super::view_model::plain_error(&e));
                         fail = Some(StreamOp::Fail(e));
                         Some(say)
                     }
@@ -805,7 +825,7 @@ impl Chat {
                 })
             }
         };
-        self.ops.push(ViewOp::PushTurn(self.shown()));
+        self.show(true);
         self.ops.push(ViewOp::RunActive(false));
         self.ops.extend(fail.map(ViewOp::Stream));
         self.sync_review(cx);
@@ -997,7 +1017,7 @@ mod tests {
     /// tool calls over the CLI's store, every question answered `yes`.
     /// `on_text` runs on each text event (to stop the run).
     fn drive(f: &Folder, job: Job, cassette: &str, cancel: CancelToken, mut on_text: impl FnMut()) -> Seen {
-        let transport: Arc<dyn Transport> = Arc::new(Replay::from_text("t", cassette, TimeScale::INSTANT).unwrap());
+        let transport: Arc<dyn Transport> = Arc::new(Replay::from_text("t", cassette, TimeScale::new(1.0)).unwrap());
         let (tx, rx) = mpsc::channel();
         let keys = Keys::in_memory(|_| Some("sk-test".into()));
         let worker = {
@@ -1054,8 +1074,9 @@ mod tests {
     #[test]
     fn stop_mid_stream_ends_the_run_stopped() {
         let f = Folder::new("stop");
-        // One reply that streams a text then would go on.
-        let cassette = r#"{"lines": [
+        // One reply that streams a text then would go on, slowly enough
+        // (20 ms a line) that the stop lands mid-stream.
+        let cassette = r#"{"delay_ms": 20, "lines": [
             "event: message_start",
             {"type": "message_start", "message": {"id": "m", "usage": {"input_tokens": 1, "output_tokens": 1}}}, "",
             "event: content_block_start",
