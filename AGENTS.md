@@ -83,12 +83,18 @@ GPL-3.0 — read them for ideas, never copy code from them.
    (`*.review.txt`, and an existing one must start with `SCRIPT REVIEW`:
    `opened::agent_review`), or for MCP `write_script` a `.fdx`. A review
    already attached may be named wherever it is, but an agent writes
-   suggestions only into reviews inside the folder
-   (`scriptorium_fsio::agent_may_write`), so a session file listing one
-   elsewhere can't aim its writes out. Only commands a person runs attach
-   files from anywhere: the app's File › Add review and the CLI `reviews
-   add`. A script opened through a link uses the folder of the file it
-   points at.
+   suggestions only into an attached file inside the folder that starts
+   with `SCRIPT REVIEW` and isn't a script, session or lock file
+   (`opened::agent_may_write`), so a session file listing `run.sh` or a
+   review elsewhere can't aim its writes. The same goes for what the host
+   reads from files beside the script: a thread's planned review name must
+   be a plain `*.review.txt` (`plain_review_name`), the `<stem>.threads`
+   folder must not be a link, the session file is never written through a
+   link, and a script must be a regular `.fdx` before anything (the lock)
+   is written beside it (`check_script`). Only commands a person runs
+   attach files from anywhere: the app's File › Add review and the CLI
+   `reviews add`. A script opened through a link uses the folder of the
+   file it points at.
 
 ## How agent sessions work here (required)
 

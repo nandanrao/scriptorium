@@ -24,8 +24,10 @@ propose anything.
 2. Send the pass in one batch, into one review file named for it, e.g.
    `dialogue-pass.review.txt`. Always give `review_file`; it lives next to the
    script and is created and attached for you. It must be a `.review.txt` in
-   the script's folder (or a folder inside it), or a review already attached;
-   other paths are refused. Check the result for lines that
+   the script's folder (or a folder inside it); other paths are refused.
+   Suggestions only go into review files inside the script's folder, and a
+   file there that doesn't start with `SCRIPT REVIEW` must be attached by the
+   writer first. Check the result for lines that
    failed, and fix or drop them.
 3. Tell the writer briefly what you proposed, without repeating the proposals,
    and that they can open the script in the Scriptorium app to decide; it
