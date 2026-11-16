@@ -42,22 +42,22 @@ S1() {
     app_start || return
     shot 01-review-closed
     ctrl l
-    check "Ctrl+L opens the panel (remembered)" file_has config/scriptorium/agent-panel open
+    check "Ctrl+L opens the panel (remembered)" wait_for 10 file_has config/scriptorium/agent-panel open
     type_text "a draft"
     shot 02-review-1500-rail-typed
     # Closing on Ctrl+L happens only from the composer: so it had the focus.
     ctrl l
-    check "Ctrl+L again (from the composer) closes it" file_has config/scriptorium/agent-panel closed
+    check "Ctrl+L again (from the composer) closes it" wait_for 10 file_has config/scriptorium/agent-panel closed
     key -k a
     check "focus went back to the card (A accepts)" \
         wait_for 5 file_re film.scriptorium.json '"review/[^/"]*/0","from":null,"to":"accepted'
     key -k u
     ctrl 0
     ctrl l
-    check "opens in the script view" file_has config/scriptorium/agent-panel open
+    check "opens in the script view" wait_for 10 file_has config/scriptorium/agent-panel open
     shot 03-script-1500
     ctrl l
-    check "closes in the script view" file_has config/scriptorium/agent-panel closed
+    check "closes in the script view" wait_for 10 file_has config/scriptorium/agent-panel closed
     type_text "Q"
     check "focus went back to the editor (a key edits the script)" \
         wait_for 5 file_has film.scriptorium.json '"inserted":[{"text":"Q"'

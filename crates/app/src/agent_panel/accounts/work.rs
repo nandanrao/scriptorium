@@ -30,7 +30,9 @@ pub struct Done {
 
 /// The keys the sheet uses. In debug builds `SCRIPTORIUM_TEST_KEYS=memory`
 /// (kept in this process only) or `=env` replace the keyring for tests that
-/// must not touch the real one; release builds ignore it.
+/// must not touch the real one; release builds ignore it. Otherwise the
+/// keyring, or the environment alone with `SCRIPTORIUM_KEYRING=off` (as
+/// the CLI and the run driver).
 pub fn keys_from_env() -> Keys {
     #[cfg(debug_assertions)]
     match std::env::var("SCRIPTORIUM_TEST_KEYS").as_deref() {
@@ -38,7 +40,7 @@ pub fn keys_from_env() -> Keys {
         Ok("env") => return Keys::env_only(),
         _ => {}
     }
-    Keys::system()
+    Keys::from_env()
 }
 
 pub fn snapshot(path: &Path, keys: &Keys) -> Result<Snapshot, String> {

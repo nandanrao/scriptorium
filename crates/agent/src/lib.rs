@@ -70,7 +70,8 @@ pub enum AgentError {
     NotReady(String),
     /// Tool results that don't answer the waiting calls exactly.
     Mismatch(String),
-    /// A stored thread file can't be read.
+    /// A file can't be read or written. The message names which (the thread
+    /// file, a replay cassette, a recording) and is shown as it is.
     File(String),
 }
 
@@ -101,7 +102,7 @@ impl std::fmt::Display for AgentError {
             AgentError::Parse(m) => write!(f, "unexpected reply: {m}"),
             AgentError::NotReady(m) => write!(f, "can't send yet: {m}"),
             AgentError::Mismatch(m) => write!(f, "tool results refused: {m}"),
-            AgentError::File(m) => write!(f, "can't read the thread file: {m}"),
+            AgentError::File(m) => write!(f, "{m}"),
         }
     }
 }

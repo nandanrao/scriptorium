@@ -106,7 +106,25 @@ fn nonempty(v: String) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
+/// Set to `off` to keep keys out of the OS keyring: only the
+/// `SCRIPTORIUM_<ACCOUNT>_KEY` / `SCRIPTORIUM_<PROVIDER>_KEY` variables are
+/// read, and nothing on the machine's keyring is read or changed (CI, a
+/// session without a keyring, tests). The CLI and the app both honour it,
+/// through [`Keys::from_env`].
+pub const KEYRING_ENV: &str = "SCRIPTORIUM_KEYRING";
+
+/// Whether [`KEYRING_ENV`] is `off` (any case, spaces ignored).
+pub fn keyring_off() -> bool {
+    std::env::var(KEYRING_ENV).is_ok_and(|v| v.trim().eq_ignore_ascii_case("off"))
+}
+
 impl Keys {
+    /// The keys a program should use: [`Keys::system`], or
+    /// [`Keys::env_only`] with `SCRIPTORIUM_KEYRING=off`.
+    pub fn from_env() -> Keys {
+        if keyring_off() { Keys::env_only() } else { Keys::system() }
+    }
+
     /// The OS keyring (when built with it) and the process environment.
     pub fn system() -> Keys {
         #[cfg(feature = "keyring")]

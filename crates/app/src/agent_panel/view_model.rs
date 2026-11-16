@@ -363,7 +363,7 @@ pub fn plain_error(error: &AgentError) -> String {
         },
         AgentError::Parse(_) => "The service's reply wasn't understood.",
         AgentError::NotReady(_) | AgentError::Mismatch(_) => "This conversation can't be sent as it is.",
-        AgentError::File(_) => "This conversation's file can't be read.",
+        AgentError::File(_) => "A file the agent needs can't be used. See the details.",
     }
     .into()
 }

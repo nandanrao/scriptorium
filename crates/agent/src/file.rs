@@ -83,14 +83,15 @@ impl ThreadFile {
         struct Header {
             version: u32,
         }
-        let h: Header = serde_json::from_str(s).map_err(|e| AgentError::File(e.to_string()))?;
+        let unreadable = |m: String| AgentError::File(format!("can't read the thread file: {m}"));
+        let h: Header = serde_json::from_str(s).map_err(|e| unreadable(e.to_string()))?;
         if h.version == 0 || h.version > VERSION {
-            return Err(AgentError::File(format!(
+            return Err(unreadable(format!(
                 "version {} is not supported (this version of Scriptorium reads up to {VERSION})",
                 h.version
             )));
         }
-        serde_json::from_str(s).map_err(|e| AgentError::File(e.to_string()))
+        serde_json::from_str(s).map_err(|e| unreadable(e.to_string()))
     }
 }
 

@@ -101,12 +101,11 @@ fresh() {
 }
 
 # The environment both programs run with: offline, deterministic, nothing of
-# the user's (config, state, keyring: the CLI reads SCRIPTORIUM_KEYRING, the
-# app SCRIPTORIUM_TEST_KEYS).
+# the user's (config, state, keyring).
 run_env() {
     env -u DISPLAY -u SCRIPTORIUM_REPLAY -u SCRIPTORIUM_WORK_KEY \
         HOME="$WORK" XDG_CONFIG_HOME="$WORK/config" XDG_STATE_HOME="$WORK/state" \
-        SCRIPTORIUM_KEYRING=off SCRIPTORIUM_TEST_KEYS=env SCRIPTORIUM_ANTHROPIC_KEY=test \
+        SCRIPTORIUM_KEYRING=off SCRIPTORIUM_ANTHROPIC_KEY=test \
         SCRIPTORIUM_TEST_CLOCK=$CLOCK SCRIPTORIUM_TEST_TIME_SCALE=${TIME_SCALE:-0.01} "$@"
 }
 
