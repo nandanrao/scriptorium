@@ -148,22 +148,54 @@ pub fn host_of(base_url: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
-/// The key a first-use disclosure is remembered under: the provider host and
-/// the script's path, so a new host or a new script asks again. `None` when
-/// the URL has no host.
+/// Where an account's requests go, as `scheme://host:port`, lowercased and
+/// with the default port filled in: `https://API.Anthropic.com/v1` gives
+/// `https://api.anthropic.com:443`. A URL without a scheme is taken as
+/// https. `None` if there is no host.
+pub fn origin_of(base_url: &str) -> Option<String> {
+    let trimmed = base_url.trim();
+    let scheme = trimmed.split_once("://").map_or("https".to_string(), |(s, _)| s.to_ascii_lowercase());
+    let host = host_of(trimmed)?;
+    // A port is what follows the last `:` after any IPv6 `]`.
+    let after_v6 = host.rfind(']').map_or(0, |i| i + 1);
+    let has_port =
+        host[after_v6..].rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if has_port {
+        return Some(format!("{scheme}://{host}"));
+    }
+    let host = host.trim_end_matches(':');
+    let port = match scheme.as_str() {
+        "http" => "80",
+        _ => "443",
+    };
+    Some(format!("{scheme}://{host}:{port}"))
+}
+
+/// The key a first-use disclosure is remembered under: where the requests
+/// go ([`origin_of`]: scheme, host and port) and the script's path, so a new
+/// address or a new script asks again. `None` when the URL has no host.
 pub fn disclosure_key(base_url: &str, script_path: &str) -> Option<String> {
-    Some(format!("{}\u{1f}{script_path}", host_of(base_url)?))
+    Some(format!("{}\u{1f}{script_path}", origin_of(base_url)?))
 }
 
 /// The disclosure shown before the first send: the app renders it as a card,
 /// the CLI prints it. `host` is who the text goes to, as the writer should
-/// read it: "Anthropic (api.anthropic.com)", or a bare host.
-pub fn disclosure_text(host: &str, script_name: &str, threads_folder: &str) -> String {
-    format!(
+/// read it: "Anthropic (api.anthropic.com)", or a bare host. `plain_http`:
+/// the address is plain `http://` to another machine, so it says the key and
+/// the script travel unencrypted.
+pub fn disclosure_text(host: &str, script_name: &str, threads_folder: &str, plain_http: bool) -> String {
+    let mut text = format!(
         "What gets sent. Your messages, and the parts of {script_name} the agent reads (scenes, search results, \
-         sometimes the whole script), go to {host} with your key. This conversation is saved in {threads_folder} \
-         next to the script, and contains excerpts of it."
-    )
+         sometimes the whole script), go to {host} with your key. So can the review files attached to the script, \
+         including notes from collaborators. The agent writes its suggestions to a review file next to the script. \
+         This conversation is saved in {threads_folder} next to the script, and contains excerpts of it."
+    );
+    if plain_http {
+        text.push_str(&format!(
+            " Warning: {host} is reached over plain http, so your key and the script travel unencrypted."
+        ));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -253,9 +285,24 @@ mod tests {
     }
 
     #[test]
-    fn keys_differ_by_host_and_script() {
+    fn origins() {
+        assert_eq!(origin_of("https://API.Anthropic.com/v1").as_deref(), Some("https://api.anthropic.com:443"));
+        assert_eq!(origin_of("HTTP://localhost:11434/v1").as_deref(), Some("http://localhost:11434"));
+        assert_eq!(origin_of("http://[::1]/v1").as_deref(), Some("http://[::1]:80"));
+        assert_eq!(origin_of("http://[::1]:8080").as_deref(), Some("http://[::1]:8080"));
+        assert_eq!(origin_of("example.org/v1").as_deref(), Some("https://example.org:443"));
+        assert_eq!(origin_of(""), None);
+    }
+
+    #[test]
+    fn keys_differ_by_scheme_host_port_and_script() {
         let a = disclosure_key("https://api.anthropic.com/v1", "/s/a.fdx");
         assert_eq!(a, disclosure_key("https://API.anthropic.com", "/s/a.fdx"));
+        assert_eq!(a, disclosure_key("https://api.anthropic.com:443/v1", "/s/a.fdx"));
+        assert_ne!(a, disclosure_key("http://api.anthropic.com/v1", "/s/a.fdx"));
+        assert_ne!(a, disclosure_key("https://api.anthropic.com:8443/v1", "/s/a.fdx"));
+        let local = disclosure_key("http://localhost:11434", "/s/a.fdx");
+        assert_ne!(local, disclosure_key("http://localhost:8080", "/s/a.fdx"));
         assert_ne!(a, disclosure_key("https://api.openai.com/v1", "/s/a.fdx"));
         assert_ne!(a, disclosure_key("https://api.anthropic.com/v1", "/s/b.fdx"));
         assert_eq!(disclosure_key("", "/s/a.fdx"), None);
@@ -263,7 +310,13 @@ mod tests {
 
     #[test]
     fn disclosure_names_everything() {
-        let t = disclosure_text("api.anthropic.com", "PURPLE LIST.fdx", "PURPLE LIST.threads/");
+        let t = disclosure_text("api.anthropic.com", "PURPLE LIST.fdx", "PURPLE LIST.threads/", false);
         assert!(t.contains("api.anthropic.com") && t.contains("PURPLE LIST.fdx") && t.contains("PURPLE LIST.threads/"));
+        assert!(
+            t.contains("review files attached") && t.contains("collaborators") && t.contains("writes its suggestions")
+        );
+        assert!(!t.contains("plain http"));
+        let t = disclosure_text("gpu.example.org", "a.fdx", "a.threads/", true);
+        assert!(t.contains("plain http") && t.contains("unencrypted"), "{t}");
     }
 }

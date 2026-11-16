@@ -1,7 +1,7 @@
 //! First-use disclosures already shown, per user: `seen.json` beside the
 //! accounts file (`$XDG_CONFIG_HOME/scriptorium/`, macOS Application
 //! Support), shared by the CLI and the app. Keys are
-//! [`disclosure_key`](crate::model::disclosure_key)s: one per provider host
+//! [`disclosure_key`](crate::model::disclosure_key)s: one per provider address (scheme, host, port)
 //! and script, so a new host or a new script shows the disclosure again.
 //!
 //! Losing an entry (two programs saving at once, a damaged file) only means

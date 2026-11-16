@@ -226,6 +226,13 @@ fn env_var(name: &str) -> String {
     format!("SCRIPTORIUM_{upper}_KEY")
 }
 
+/// Whether `base_url` is plain `http://` to another machine (not this one or
+/// a private network), so a key and script text sent there travel unencrypted.
+pub fn insecure_url(base_url: &str) -> bool {
+    let base_url = base_url.trim();
+    base_url.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://")) && !is_local(base_url)
+}
+
 /// Whether a URL's host is this machine or a private network, where plain
 /// `http://` is normal.
 fn is_local(base_url: &str) -> bool {
@@ -303,8 +310,7 @@ impl Account {
 
     /// Whether the key goes over plain `http://` to another machine.
     pub fn insecure_http(&self) -> bool {
-        matches!(&self.provider, Provider::Custom { base_url, .. }
-            if base_url.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("http://")) && !is_local(base_url))
+        matches!(&self.provider, Provider::Custom { base_url, .. } if insecure_url(base_url))
     }
 
     fn check(&self) -> Result<(), String> {
