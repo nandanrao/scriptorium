@@ -131,6 +131,12 @@ pub fn init(cx: &mut App) {
     #[cfg(not(target_os = "macos"))]
     let font = load_bundled_font(cx);
     crate::log::info(&format!("agent panel font: {font}"));
+    if let Some(cassette) = replaying() {
+        crate::log::warn(&format!(
+            "replaying {cassette} ({} is set): nothing is sent to a provider",
+            scriptorium_providers::shell::REPLAY_ENV
+        ));
+    }
     if scriptorium_providers::shell::keyring_off() {
         crate::log::info(&format!(
             "{}=off: keys come from the environment only; the keyring isn't touched",
@@ -139,6 +145,19 @@ pub fn init(cx: &mut App) {
     }
     cx.set_global(PanelFont(font.into()));
 }
+
+/// The cassette replayed instead of talking to providers, when
+/// `SCRIPTORIUM_REPLAY` is set (see `transport_from_env`): logged at start
+/// and shown under the panel's header, as the CLI prints a note, so nobody
+/// mistakes recorded replies for a live model.
+fn replaying() -> Option<String> {
+    std::env::var_os(scriptorium_providers::shell::REPLAY_ENV)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string_lossy().into_owned())
+}
+
+/// The strip under the header while [`replaying`].
+pub(crate) const REPLAY_NOTICE: &str = "Replaying a recording: nothing is sent to a provider.";
 
 /// The keys a run and the accounts sheet use, so both always agree: the
 /// keyring and the environment, or the environment alone with
@@ -558,9 +577,27 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, _: &UndoAny, window, cx| this.undo_menu(false, window, cx)))
             .on_action(cx.listener(|this, _: &RedoAny, window, cx| this.undo_menu(true, window, cx)))
             .child(self.render_header(cx))
+            .children(replaying().map(|cassette| {
+                div()
+                    .id("agent-replay-notice")
+                    .flex_none()
+                    .px_3()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(RULE)
+                    .bg(ACCENT_SOFT)
+                    .text_size(px(11.))
+                    .text_color(INK_2)
+                    .child(format!("{REPLAY_NOTICE} ({})", file_label(&cassette)))
+            }))
             .child(div().flex_1().min_h_0().child(self.messages.clone()))
             .child(self.composer.clone())
     }
+}
+
+/// A path's file name, for the replay strip.
+fn file_label(path: &str) -> String {
+    Path::new(path).file_name().map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// The status bar's line when the run asks something (the whole-script
