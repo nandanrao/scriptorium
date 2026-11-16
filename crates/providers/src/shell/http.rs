@@ -44,9 +44,14 @@ impl Http {
     /// Timeouts: 30 s to connect, and 5 minutes for any one read (a stalled
     /// stream, or a local server still reading a long prompt, gives up
     /// then). No limit on a whole reply: long replies stream for minutes.
+    ///
+    /// Redirects are never followed: a request carries the account's key
+    /// and the script's text, and both go only to the address the account
+    /// names. A redirect is an error naming where it pointed.
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(30)))
             .timeout_per_read(Some(Duration::from_secs(300)))
             .user_agent(concat!("scriptorium/", env!("CARGO_PKG_VERSION")))
@@ -102,6 +107,17 @@ impl Http {
         };
         let status = response.status().as_u16();
         rec.status = Some(status);
+        if (300..400).contains(&status) {
+            let to = response.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("another address");
+            let message = format!(
+                "{host} redirected the request to {to}. Scriptorium doesn't follow redirects, so your key and script \
+                 go only where the account points: if the service moved, change the account's address."
+            );
+            // In the shape error bodies have, so the shared mapping quotes it.
+            let body = serde_json::json!({ "message": message }).to_string();
+            rec.body = Some(body.clone());
+            return Err(Failure::Status { status, retry_after: None, body });
+        }
         if !(200..300).contains(&status) {
             let retry_after = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(String::from);
             let mut bytes = vec![];
@@ -326,6 +342,27 @@ mod tests {
         assert!(got.is_empty());
         let expected = Failure::Status { status: 529, retry_after: Some("3".into()), body: body.into() }.to_error();
         assert_eq!(r.unwrap_err(), expected);
+    }
+
+    #[test]
+    fn redirects_are_not_followed() {
+        // Were it followed, the key and body would go to the second server.
+        let (to, target) = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", l.local_addr().unwrap());
+            l.set_nonblocking(true).unwrap();
+            (url, l)
+        };
+        let (url, server) = serve(
+            format!("HTTP/1.1 307 Temporary Redirect\r\nlocation: {to}/steal\r\ncontent-length: 0\r\n\r\n")
+                .into_bytes(),
+        );
+        let (got, r) = lines(&Http::new(), &post(&url));
+        server.join().unwrap();
+        assert!(got.is_empty());
+        let e = r.unwrap_err().to_string();
+        assert!(e.contains("redirect") && e.contains(&format!("{to}/steal")), "{e}");
+        assert!(target.accept().is_err(), "the redirect was followed");
     }
 
     #[test]
