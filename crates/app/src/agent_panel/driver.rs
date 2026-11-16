@@ -47,7 +47,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AsyncApp, Context, EventEmitter, Task, WeakEntity};
-use scriptorium_agent::file::ThreadFile;
+use scriptorium_agent::file::{ThreadFile, ToolsCheck, check_tools};
 use scriptorium_agent::turn::{self, Limits, Outcome};
 use scriptorium_agent::{AgentError, Event, Request as HttpRequest, Thread, ToolCall, Usage};
 use scriptorium_chat::exec::{self, Added, CallDone, Gate, ReviewError};
@@ -501,6 +501,13 @@ pub struct Chat {
     own: OwnRuns,
     /// The open conversation is in use by another program: readable, not sendable.
     read_only: bool,
+    /// The open conversation was started with other tools: the composer
+    /// shows a card ([New conversation] [Continue]) until the writer
+    /// answers it or sends.
+    tools_changed: bool,
+    /// The writer was told about the tools on open, so the run's own
+    /// notice ([`host::TOOLS_CHANGED`]) isn't repeated.
+    tools_told: bool,
 }
 
 /// What the thread list reads off the UI thread: the folder and the process's runs.
@@ -551,6 +558,8 @@ impl Chat {
             view_id: None,
             own: OwnRuns::default(),
             read_only: false,
+            tools_changed: false,
+            tools_told: false,
         }
     }
 
@@ -696,6 +705,17 @@ impl Chat {
         }
     }
 
+    /// A question as a run asks it ([`ToUi::Ask`]), for tests of the UI
+    /// around it; the answer arrives on the receiver.
+    #[cfg(test)]
+    pub(crate) fn ask_for_test(&mut self, q: Question, cx: &mut Context<Self>) -> mpsc::Receiver<bool> {
+        let (tx, rx) = mpsc::channel();
+        self.question = Some((q, tx));
+        cx.emit(ChatEvent::Asking);
+        cx.notify();
+        rx
+    }
+
     /// The account and model for the next run (stored in the thread by it).
     pub fn choose(&mut self, account: String, model: Option<String>, cx: &mut Context<Self>) {
         self.choice = Some((account, model));
@@ -709,10 +729,17 @@ impl Chat {
         }
         let file = self.store().read(id).map_err(|e| e.to_string())?;
         let busy = matches!(self.own.probe(&self.store(), id), Err(StoreError::Busy));
+        let changed = check_tools(&file, &scriptorium_tools::catalogue()) == ToolsCheck::Changed;
         self.reset(Some(Arc::new(file)), cx);
         if busy {
             self.read_only = true;
             self.notices.push(READ_ONLY_NOTE.to_string());
+            cx.notify();
+        } else if changed {
+            // Said on open, before the writer decides to continue; the run's
+            // own notice (host::prepare) isn't repeated.
+            self.tools_changed = true;
+            self.tools_told = true;
             cx.notify();
         }
         Ok(())
@@ -769,6 +796,23 @@ impl Chat {
         Ok(())
     }
 
+    /// Whether to show the older-tools card ([`host::TOOLS_CHANGED`]).
+    pub fn tools_changed(&self) -> bool {
+        self.tools_changed
+    }
+
+    /// The older-tools card's answer: `keep` (Continue) keeps this
+    /// conversation; else a new one starts.
+    pub fn older_tools(&mut self, keep: bool, cx: &mut Context<Self>) -> Result<(), String> {
+        if keep {
+            self.tools_changed = false;
+            cx.notify();
+            Ok(())
+        } else {
+            self.new_thread(cx)
+        }
+    }
+
     /// A sticky line for the writer: for the composer's (U6's) refusals to
     /// send (blank, still running, no account…). Runs report through their
     /// own notices.
@@ -799,6 +843,8 @@ impl Chat {
         // A choice was for the thread it was made on.
         self.choice = None;
         self.read_only = false;
+        self.tools_changed = false;
+        self.tools_told = false;
         self.ops.push(ViewOp::Stream(StreamOp::Clear));
         self.show(false);
         self.sync_review(cx);
@@ -933,6 +979,8 @@ impl Chat {
             if message { "message" } else { "again" }
         ));
         self.begin(which, message, rx, cancel, cx);
+        // Sending (or Retry) continues on the older tools: the card goes.
+        self.tools_changed = false;
         Ok(())
     }
 
@@ -1006,6 +1054,7 @@ impl Chat {
                     self.added.insert(call.id.clone(), a);
                 }
             }
+            ToUi::Notice(text) if self.tools_told && text == host::TOOLS_CHANGED => {}
             ToUi::Notice(text) => self.notices.push(text),
             ToUi::Saved(file) => {
                 let run = self.run.as_mut().expect("not stopped, so running");
@@ -1483,6 +1532,175 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.session().reviews.iter().any(|r| r.id == id)));
         assert!(std::fs::read_to_string(f.0.join("Tighten the smile.review.txt")).unwrap().contains("Laura grins."));
         assert!(!chat.read_with(cx, |c, _| c.waiting_for_files()));
+    }
+
+    /// One exchange: the model answers `text` (any request).
+    fn text_cassette(text: &str) -> String {
+        let lines = serde_json::json!([
+            "event: message_start",
+            {"type": "message_start", "message": {"id": "m", "usage": {"input_tokens": 10, "output_tokens": 1}}}, "",
+            "event: content_block_start",
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, "",
+            "event: content_block_delta",
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}, "",
+            "event: content_block_stop", {"type": "content_block_stop", "index": 0}, "",
+            "event: message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}, "",
+            "event: message_stop", {"type": "message_stop"}, "",
+        ]);
+        serde_json::json!({"expect": {}, "lines": lines}).to_string()
+    }
+
+    /// Marks thread `id` as started with other tools.
+    fn age_tools(f: &Folder, id: &str) {
+        let store = ThreadStore::for_script(&f.0.join("film.fdx"));
+        let lock = store.lock(id, Duration::ZERO).unwrap();
+        let mut file = store.read(id).unwrap();
+        file.tools_hash = "0000000000000000".into();
+        store.write(&lock, &file).unwrap();
+    }
+
+    fn on_thread(f: &Folder, id: &str, message: Option<&str>) -> Job {
+        Job { which: Which::Thread(id.into()), message: message.map(Into::into), ..job(f, "x") }
+    }
+
+    #[gpui::test]
+    fn a_conversation_started_with_other_tools_says_so_on_open(cx: &mut TestAppContext) {
+        let f = Folder::new("tools-changed");
+        seen_disclosure(&f);
+        let (_window, _view, chat) = live(cx, &f);
+        run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        let id = chat.read_with(cx, |c, _| c.thread().unwrap().id.clone());
+        chat.update(cx, |c, cx| c.new_thread(cx)).unwrap();
+        // Same tools: nothing to say.
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        assert!(chat.read_with(cx, |c, _| c.notices().is_empty() && !c.tools_changed()));
+        // Started with other tools: the card, not a notice.
+        age_tools(&f, &id);
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        assert!(chat.read_with(cx, |c, _| c.tools_changed() && c.notices().is_empty()));
+        // Continue, then send: the run's own notice isn't repeated, and the
+        // thread now has the current tools.
+        chat.update(cx, |c, cx| c.older_tools(true, cx)).unwrap();
+        assert!(!chat.read_with(cx, |c, _| c.tools_changed()));
+        run_live(cx, &chat, on_thread(&f, &id, Some("More")), &text_cassette("Sure."));
+        assert!(chat.read_with(cx, |c, _| !c.tools_changed() && !c.notices().iter().any(|n| n == host::TOOLS_CHANGED)));
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        assert!(!chat.read_with(cx, |c, _| c.tools_changed()));
+        // Tools that change while the thread is open (not told on open):
+        // the run says so, once.
+        age_tools(&f, &id);
+        run_live(cx, &chat, on_thread(&f, &id, Some("Again")), &text_cassette("Yes."));
+        let told = chat.read_with(cx, |c, _| c.notices().iter().filter(|n| *n == host::TOOLS_CHANGED).count());
+        assert_eq!(told, 1);
+    }
+
+    #[gpui::test]
+    fn retry_answers_the_older_tools_card_for_good(cx: &mut TestAppContext) {
+        let f = Folder::new("tools-retry");
+        seen_disclosure(&f);
+        let (_window, _view, chat) = live(cx, &f);
+        run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        let id = chat.read_with(cx, |c, _| c.thread().unwrap().id.clone());
+        age_tools(&f, &id);
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        assert!(chat.read_with(cx, |c, _| c.tools_changed()));
+        // Retry (no new message): once the run is over the card stays gone.
+        run_live(cx, &chat, on_thread(&f, &id, None), &text_cassette("Again."));
+        assert!(chat.read_with(cx, |c, _| !c.tools_changed() && !c.notices().iter().any(|n| n == host::TOOLS_CHANGED)));
+    }
+
+    #[gpui::test]
+    fn the_older_tools_cards_new_conversation_starts_one(cx: &mut TestAppContext) {
+        let f = Folder::new("tools-new");
+        seen_disclosure(&f);
+        let (_window, _view, chat) = live(cx, &f);
+        run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        let id = chat.read_with(cx, |c, _| c.thread().unwrap().id.clone());
+        age_tools(&f, &id);
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        chat.update(cx, |c, cx| c.older_tools(false, cx)).unwrap();
+        assert!(chat.read_with(cx, |c, _| c.thread().is_none() && !c.tools_changed()));
+        // The old conversation is still there.
+        assert!(ThreadStore::for_script(&f.0.join("film.fdx")).read(&id).is_ok());
+    }
+
+    /// A workspace window on `f`'s script with the app's keys, and its view.
+    fn workspace(
+        cx: &mut TestAppContext,
+        f: &Folder,
+    ) -> (WindowHandle<crate::workspace::Workspace>, Entity<ScriptView>) {
+        cx.update(|cx| {
+            super::super::init(cx);
+            cx.bind_keys(crate::bindings());
+        });
+        let path = f.0.join("film.fdx");
+        let window = cx.add_window(|window, cx| crate::workspace::Workspace::new(Some(path), vec![], window, cx));
+        let view = window.read_with(cx, |w, _| w.script_view().unwrap()).unwrap();
+        (window, view)
+    }
+
+    fn toggle_panel(
+        cx: &mut TestAppContext,
+        window: WindowHandle<crate::workspace::Workspace>,
+        view: &Entity<ScriptView>,
+    ) {
+        window.update(cx, |_, window, cx| view.update(cx, |v, cx| v.toggle_agent(window, cx))).unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_question_with_the_panel_closed_shows_in_the_status_bar_until_seen(cx: &mut TestAppContext) {
+        let f = Folder::new("say-unsay");
+        let (window, view) = workspace(cx, &f);
+        let notice = |cx: &mut TestAppContext| view.read_with(cx, |v, _| v.notice_text().to_string());
+        // Open, then the run asks while the panel is open: nothing to say.
+        toggle_panel(cx, window, &view);
+        let chat = view.read_with(cx, |v, cx| v.agent_chat(cx).unwrap());
+        let _reply = chat.update(cx, |c, cx| c.ask_for_test(Question::WholeScript("Read it?".into()), cx));
+        cx.run_until_parked();
+        assert!(!notice(cx).contains("question"));
+        // Closed mid-question: the status bar says so.
+        toggle_panel(cx, window, &view);
+        assert!(!view.read_with(cx, |v, _| v.agent_open()));
+        assert!(notice(cx).starts_with("The agent has a question"), "{}", notice(cx));
+        // Reopened: the card shows, the line goes.
+        toggle_panel(cx, window, &view);
+        assert!(view.read_with(cx, |v, _| v.agent_open()));
+        assert_eq!(notice(cx), "");
+        // Asked while closed, then answered: the line goes too.
+        toggle_panel(cx, window, &view);
+        chat.update(cx, |c, cx| c.answer(false, cx));
+        let reply = chat.update(cx, |c, cx| c.ask_for_test(Question::WholeScript("Read it?".into()), cx));
+        cx.run_until_parked();
+        assert!(notice(cx).starts_with("The agent has a question"));
+        chat.update(cx, |c, cx| c.answer(true, cx));
+        cx.run_until_parked();
+        assert_eq!(reply.try_recv(), Ok(true));
+        assert_eq!(notice(cx), "");
+    }
+
+    #[gpui::test]
+    fn ctrl_period_in_the_editor_stops_a_run_with_the_panel_closed(cx: &mut TestAppContext) {
+        let f = Folder::new("stop-key");
+        seen_disclosure(&f);
+        let (window, view) = workspace(cx, &f);
+        toggle_panel(cx, window, &view);
+        let chat = view.read_with(cx, |v, cx| v.agent_chat(cx).unwrap());
+        toggle_panel(cx, window, &view);
+        assert!(!view.read_with(cx, |v, _| v.agent_open()));
+        // A reply that takes minutes: the run is going when the key comes.
+        let slow = text_cassette("Slowly.").replacen("{", r#"{"delay_ms": 60000, "#, 1);
+        let mut job = job(&f, "Hello");
+        job.own = chat.read_with(cx, |c, _| c.own.clone());
+        let transport: Arc<dyn Transport> = Arc::new(Replay::from_text("t", &slow, TimeScale::new(1.0)).unwrap());
+        let keys = Keys::in_memory(|_| Some("sk-test".into()));
+        chat.update(cx, |c, cx| c.launch(job, transport, keys, cx)).unwrap();
+        cx.run_until_parked();
+        assert!(chat.read_with(cx, |c, _| c.is_running()));
+        cx.simulate_keystrokes(window.into(), if cfg!(target_os = "macos") { "cmd-." } else { "ctrl-." });
+        assert!(chat.read_with(cx, |c, _| c.is_stopping()));
+        settle(cx, |cx| chat.read_with(cx, |c, _| !c.is_running()));
     }
 
     #[gpui::test]

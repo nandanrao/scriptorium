@@ -1471,6 +1471,13 @@ impl ScriptView {
                 this.say(text.clone());
                 cx.notify();
             }
+            // Only that line: a newer notice or an error stays.
+            AgentPanelEvent::Unsay(text) => {
+                if this.notice == *text {
+                    this.notice = "".into();
+                    cx.notify();
+                }
+            }
         });
         self.agent = Some((panel.clone(), sub));
         panel
@@ -1488,6 +1495,27 @@ impl ScriptView {
             self.set_agent_open(true, cx);
             panel.update(cx, |p, cx| p.focus_composer(window, cx));
         }
+    }
+
+    /// Cmd/Ctrl+. outside the panel: stops the agent's run (or answers its
+    /// question "no"), whether or not the panel is showing.
+    pub(crate) fn stop_agent(&mut self, cx: &mut Context<Self>) {
+        if let Some((panel, _)) = &self.agent {
+            let composer = panel.read(cx).composer().clone();
+            composer.update(cx, |c, cx| c.stop(cx));
+        }
+    }
+
+    /// The status bar's notice line.
+    #[cfg(test)]
+    pub(crate) fn notice_text(&self) -> SharedString {
+        self.notice.clone()
+    }
+
+    /// The agent panel's conversation, once the panel exists.
+    #[cfg(test)]
+    pub(crate) fn agent_chat(&self, cx: &App) -> Option<Entity<crate::agent_panel::driver::Chat>> {
+        self.agent.as_ref().map(|(p, _)| p.read(cx).chat().clone())
     }
 
     /// Whether the agent panel is showing.

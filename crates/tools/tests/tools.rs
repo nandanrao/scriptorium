@@ -1043,6 +1043,8 @@ fn the_system_prompt_names_only_tools_in_the_catalogue() {
     }
     let prompt = system("film.fdx");
     assert!(prompt.contains("the screenplay film.fdx") && !prompt.contains("{script}"));
+    // Sent with every request: keep it tight (about four characters a token).
+    assert!(SYSTEM.len() < 4500, "the system prompt grew to {} bytes", SYSTEM.len());
     // It does notice a tool that isn't there.
     let tools: Vec<_> = catalogue().into_iter().filter(|t| t.name == "suggest_change").collect();
     let prompt = "Use read_scene, then suggest_change. Not_a_tool or snake_ alone don't count.";

@@ -247,6 +247,13 @@ reviewers) → **1.** agent core (tests, turn loop) → **2.** providers + CLI c
    disclosure, prompt tuning for review quality (port the language-review
    prompt from `script-review`). Parts that don't need the panel can go with
    step 2's CLI chat.
+   Status (v4/polish): cost, cancel, retry, error rows and the disclosure
+   were built with the panel; the script-review language prompt is ported
+   into `tools::prompt::SYSTEM` (~900 tokens, new threads only); a
+   mid-run question with the panel closed says so in the status bar (taken
+   back when the card shows or is answered); a thread opened on older tools
+   shows a card [New conversation] [Continue]; Cmd/Ctrl+. stops a run from
+   anywhere in the script's window.
 
 After v1: OAuth sign-in (OpenRouter, then ChatGPT with its UI rules, as
 `scriptorium accounts login …` and buttons in settings).

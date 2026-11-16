@@ -263,6 +263,16 @@ mod tests {
         assert_eq!(action_in("tab", &composer), name(&agent_panel::FocusNext));
         assert_eq!(action_in("shift-tab", &composer), name(&agent_panel::FocusPrev));
         assert_eq!(action_in(sec!("."), &composer), name(&agent_panel::Stop));
+        // Cmd/Ctrl+. is Stop everywhere in a script's window, never Open
+        // (Cmd/Ctrl+O): in the panel off the composer, the editor, the card.
+        assert_eq!(action_in(sec!("."), &panel), name(&agent_panel::Stop));
+        for focus in ["ScriptEditor", "Review"] {
+            assert_eq!(action_for(sec!("."), focus), name(&agent_panel::Stop));
+        }
+        let sheet_field = ["Workspace", "AccountsSheet", "Input"];
+        assert_eq!(action_in(sec!("."), &sheet_field), name(&agent_panel::Stop));
+        assert_eq!(action_for(sec!("o"), "ScriptEditor"), name(&Open));
+        assert_ne!(action_in(sec!("."), &composer), name(&Open));
         assert_eq!(action_in(sec!("z"), &composer), name(&gpui_base::input::Undo));
         // Disabled: gpui-base's search has no UI here.
         assert_eq!(action_in(sec!("f"), &composer), None);

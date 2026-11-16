@@ -173,6 +173,10 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(sec!("l"), ToggleAgentPanel, Some("Workspace")),
         KeyBinding::new("escape", ReturnFocus, panel),
         KeyBinding::new(sec!("."), Stop, panel),
+        // Stop works from anywhere in the window too (editor, review card,
+        // the accounts sheet) while a run goes on, panel open or closed:
+        // the workspace forwards it.
+        KeyBinding::new(sec!("."), Stop, Some("Workspace")),
         KeyBinding::new(sec!("n"), NewThread, panel),
         KeyBinding::new("tab", FocusNext, panel),
         KeyBinding::new("shift-tab", FocusPrev, panel),
@@ -188,6 +192,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-tab", FocusPrev, Some("AccountsSheet")),
         // gpui-base: Cmd/Ctrl+. is ToggleCodeActions inside `Input`.
         KeyBinding::new(sec!("."), Stop, composer),
+        KeyBinding::new(sec!("."), Stop, accounts_field),
         // gpui-base's search and replace have no UI here.
         KeyBinding::new(sec!("f"), gpui::NoAction, composer),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-shift-f" } else { "ctrl-h" }, gpui::NoAction, composer),
@@ -211,6 +216,9 @@ pub enum AgentPanelEvent {
     /// A notice for the status bar: how a run ended, or that it needs the
     /// writer, while the panel was closed.
     Say(SharedString),
+    /// Take back a [`Say`](Self::Say) line if the status bar still shows it:
+    /// the question it pointed to is on screen or answered.
+    Unsay(SharedString),
 }
 
 pub struct AgentPanel {
@@ -223,6 +231,9 @@ pub struct AgentPanel {
     composer: Entity<Composer>,
     /// The conversation and its runs (driver.rs).
     chat: Entity<Chat>,
+    /// The status bar shows [`say_asking`] (taken back once the question
+    /// shows in the open panel, or is answered).
+    said_asking: bool,
     _chat: Vec<gpui::Subscription>,
 }
 
@@ -242,6 +253,9 @@ impl AgentPanel {
             let (ops, title) = chat.update(cx, |c, _| (c.take_view_ops(), c.title()));
             this.messages.update(cx, |m, cx| apply_view_ops(m, ops, cx));
             this.threads.update(cx, |t, cx| t.set_title(title, cx));
+            if chat.read(cx).question().is_none() {
+                this.unsay_asking(cx);
+            }
             cx.notify();
         });
         let events = cx.subscribe_in(&chat, window, Self::on_chat_event);
@@ -256,6 +270,13 @@ impl AgentPanel {
                 let open = view.read(cx).agent_open();
                 if was_open && !open {
                     this.composer.update(cx, |c, cx| c.reset(cx));
+                    // Closed with a question showing: the run still waits for it.
+                    if this.chat.read(cx).question().is_some() {
+                        this.say_asking(cx);
+                    }
+                } else if open && !was_open {
+                    // The question card is on screen now.
+                    this.unsay_asking(cx);
                 }
                 was_open = open;
             }));
@@ -268,6 +289,7 @@ impl AgentPanel {
             messages,
             composer,
             chat,
+            said_asking: false,
             _chat: subs,
         }
     }
@@ -325,12 +347,23 @@ impl AgentPanel {
         match e {
             // The composer handles the draft (MessageSaved, Withdrawn).
             ChatEvent::Asking if !self.is_open(cx) => {
-                cx.emit(AgentPanelEvent::Say(say_closed("The agent is waiting for you.")));
+                self.say_asking(cx);
             }
             ChatEvent::Ended { say: Some(text) } if !self.is_open(cx) => {
                 cx.emit(AgentPanelEvent::Say(say_closed(text)));
             }
             _ => {}
+        }
+    }
+
+    fn say_asking(&mut self, cx: &mut Context<Self>) {
+        self.said_asking = true;
+        cx.emit(AgentPanelEvent::Say(say_asking()));
+    }
+
+    fn unsay_asking(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.said_asking) {
+            cx.emit(AgentPanelEvent::Unsay(say_asking()));
         }
     }
 
@@ -499,6 +532,13 @@ impl Render for AgentPanel {
             .child(div().flex_1().min_h_0().child(self.messages.clone()))
             .child(self.composer.clone())
     }
+}
+
+/// The status bar's line when the run asks something (the whole-script
+/// read, a disclosure) while the panel is closed: the run waits until the
+/// writer opens the panel and answers the card.
+fn say_asking() -> SharedString {
+    format!("The agent has a question \u{2014} open the chat ({}).", crate::menus::shortcut("l")).into()
 }
 
 /// The status bar line for `text` while the panel is closed.
