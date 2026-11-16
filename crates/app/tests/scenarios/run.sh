@@ -79,19 +79,38 @@ S1() {
     shot 04-review-1700-no-rail
     ctrl l
     # Narrow windows, review view, panel open (agent_panel::columns): at
-    # 1100 the panel and card narrow beside a small page; at 900 the page
-    # gives way to the card. Nothing is cut off (Send and × show).
+    # 1100 the panel and card narrow beside the page at a readable zoom; at
+    # 1070 the card is at its narrowest; at 900 the page gives way to the
+    # card, except while rewriting (E), when the card gives way instead; at
+    # the minimum (768) the same, the status line ending in "…". Nothing is
+    # cut off (Send and × show).
     ctrl 1
     resolution 1100x1000
     ctrl l
     check "the panel is open at 1100 px" wait_for 10 file_has config/scriptorium/agent-panel open
     shot 05-review-1100-panel
+    resolution 1070x1000
+    shot 06-review-1070-panel
     resolution 900x1000
-    shot 06-review-900-panel
+    shot 07-review-900-panel
+    # Rewriting at 900 px: Ctrl+L from the composer closes the panel and
+    # focuses the card (checked above), E starts the rewrite, Ctrl+L opens
+    # the panel again with the rewrite going on.
+    ctrl l
+    check "the panel closes at 900 px" wait_for 10 file_has config/scriptorium/agent-panel closed
+    key -k e
+    ctrl l
+    check "and opens again" wait_for 10 file_has config/scriptorium/agent-panel open
+    shot 08-review-900-rewriting
+    # Esc from the composer goes back to the rewrite; Esc again puts it back.
+    key -k Escape
+    key -k Escape
+    resolution 768x1000
+    shot 09-review-768-panel
     resolution 1500x1000
     visual "02: the sidebar is a rail at 1500 px in the review view; the composer shows its focus ring"
     visual "04: no rail at 1700 px"
-    visual "05/06: at 1100 and 900 px nothing is cut off (Send, ×, the card's buttons); at 900 the page gives way to the card"
+    visual "05–09: nothing cut off (Send, ×, the card's buttons); the page readable or hidden with a note on the card; 08: rewriting keeps the page, the card gives way"
     app_quit 0
 }
 
