@@ -518,9 +518,13 @@ pub struct Added {
 pub fn run_call(script: &mut dyn Script, file: &mut ThreadFile, call: &ToolCall) -> CallDone {
     // Only the arguments the host offered ([`scriptorium_tools::catalogue`],
     // without MCP's `review_file`): the tools read more than that.
-    if let Some(spec) = scriptorium_tools::catalogue().iter().find(|s| s.name == call.name)
-        && let Err(e) = scriptorium_tools::check_args(spec, &call.input)
-    {
+    // A name that wasn't offered is refused here too, so a tool `call`
+    // knows but the catalogue doesn't can never run unchecked.
+    let specs = scriptorium_tools::catalogue();
+    let Some(spec) = specs.iter().find(|s| s.name == call.name) else {
+        return CallDone::new(call, scriptorium_tools::ToolError::Unknown(call.name.clone()).to_string(), true);
+    };
+    if let Err(e) = scriptorium_tools::check_args(spec, &call.input) {
         return CallDone::new(call, e.to_string(), true);
     }
     let writes = scriptorium_tools::may_append(&call.name);

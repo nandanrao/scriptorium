@@ -376,6 +376,18 @@ fn an_argument_not_offered_is_refused() {
         assert!(done.result.is_error && done.result.content.contains("review_file"), "{path}: {}", done.result.content);
         assert!(s.0.files.is_empty() && s.0.session.reviews.is_empty(), "{path}");
     }
+    // A top-level review_file on the batch tool, and a name not offered.
+    let call = ToolCall {
+        name: "suggest_changes".into(),
+        input: json!({"suggestions": [{"paragraph_id": 1, "options": ["x"]}], "review_file": "/tmp/x.review.txt"}),
+        ..suggest("c", 1, "x")
+    };
+    let done = run_call(&mut s, &mut file, &call);
+    assert!(done.result.is_error && done.result.content.contains("review_file"), "{}", done.result.content);
+    let call = ToolCall { name: "write_file".into(), input: json!({"path": "/tmp/x"}), ..suggest("d", 1, "x") };
+    let done = run_call(&mut s, &mut file, &call);
+    assert!(done.result.is_error && done.result.content.contains("unknown tool"), "{}", done.result.content);
+    assert!(s.0.files.is_empty() && s.0.session.reviews.is_empty());
     // A read tool too.
     let call = ToolCall {
         name: "list_suggestions".into(),
