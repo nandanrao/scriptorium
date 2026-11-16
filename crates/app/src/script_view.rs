@@ -2073,9 +2073,19 @@ impl ScriptView {
                     .when(on, |d| d.bg(ACCENT_SOFT).text_color(ACCENT).font_weight(FontWeight::SEMIBOLD))
                     .child(if n == 0 { "S".to_string() } else { n.to_string() })
                     .tooltip({
-                        let name: SharedString = match v {
-                            View::Review(r) => self.session.reviews[r].name.clone().into(),
-                            View::Script => "Script".into(),
+                        // The letters alone mean little: say what each one is,
+                        // what's left in it and its shortcut (Ctrl/Cmd+0…3).
+                        let key = (n <= 3).then(|| crate::menus::shortcut(&n.to_string()));
+                        let what = match v {
+                            View::Review(r) if left > 0 => {
+                                format!("Review: {} \u{b7} {left} left", self.session.reviews[r].name)
+                            }
+                            View::Review(r) => format!("Review: {}", self.session.reviews[r].name),
+                            View::Script => "The script".to_string(),
+                        };
+                        let name: SharedString = match key {
+                            Some(k) => format!("{what} ({k})").into(),
+                            None => what.into(),
                         };
                         move |_, cx| cx.new(|_| RailTip(name.clone())).into()
                     })
