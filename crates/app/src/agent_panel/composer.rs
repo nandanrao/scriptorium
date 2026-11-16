@@ -41,7 +41,7 @@ use crate::theme::*;
 const PLACEHOLDER: &str = "Ask about the script, or ask for changes…";
 /// The placeholder of a conversation another program has open (the full
 /// note shows under the field).
-const READ_ONLY_PLACEHOLDER: &str = "Read only: open in another program.";
+const READ_ONLY_PLACEHOLDER: &str = "Read only: open in another Scriptorium window or an AI agent.";
 
 /// What the composer tells the panel.
 #[derive(Debug, Clone, PartialEq, Eq)]

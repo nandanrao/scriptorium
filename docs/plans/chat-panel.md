@@ -313,7 +313,7 @@ another script or quitting stops them.
 | `NotReady` | The reason (usually: type a message). |
 | `Mismatch` | "Something went wrong running the tools." Logged as a bug. [Retry] |
 | `ToolsCheck::Changed` on open | Banner: older tools, earlier reasoning won't be replayed. [New thread] [Continue] |
-| Thread busy | "This thread is running in another program." (on open or send) |
+| Thread busy | "This conversation is running in another Scriptorium window or an AI agent." (on open or send) |
 
 [Retry]/[Continue] call `Run::start`. All errors also go to the log.
 

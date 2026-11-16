@@ -13,7 +13,7 @@
 //!   threads go to the UI without waiting; the two questions (disclosure,
 //!   whole-script read) block the worker until the writer answers.
 //! - `Request::wait` [`THREAD_WAIT`]: a thread another program is running is
-//!   refused after that short wait ("running in another program"); the wait
+//!   refused after that short wait ("running in another Scriptorium window or an AI agent"); the wait
 //!   covers this process's own worker that is still stopping (a script
 //!   closed and opened again).
 //!
@@ -77,12 +77,14 @@ pub const THREAD_WAIT: Duration = Duration::from_millis(500);
 /// A tool call's answer when the script view is gone.
 const CLOSED: &str = "The script was closed.";
 
-/// Shown when the thread is locked by another program.
 /// The note under a conversation opened while another program is running it.
+/// "Another program" is said the same way everywhere (the composer's
+/// placeholder, [`BUSY_THREAD`]).
 pub const READ_ONLY_NOTE: &str =
-    "This conversation is open in another Scriptorium window or an agent. You can read it here.";
+    "This conversation is open in another Scriptorium window or an AI agent. You can read it here.";
 
-pub const BUSY_THREAD: &str = "This thread is running in another program.";
+/// Shown when the thread is locked by another program.
+pub const BUSY_THREAD: &str = "This conversation is running in another Scriptorium window or an AI agent.";
 
 /// What a run asks the writer, blocking until [`Chat::answer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
