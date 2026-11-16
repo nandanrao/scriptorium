@@ -358,7 +358,7 @@ pub fn plain_error(error: &AgentError) -> String {
             ErrorKind::RateLimit => "The service is limiting requests, or the credit is used up. Check Accounts.",
             ErrorKind::Overloaded => "The service is busy right now.",
             ErrorKind::Offline => "Can't reach the service. Check your connection.",
-            ErrorKind::BadRequest => "The service refused the request. Check the model in Accounts.",
+            ErrorKind::BadRequest => "This model wasn't accepted. Choose another model.",
             ErrorKind::Other => "The service had a problem.",
         },
         AgentError::Parse(_) => "The service's reply wasn't understood.",

@@ -20,8 +20,8 @@
 //! the pure functions at the end, with their tests.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, Rgba, Subscription, Window,
-    deferred, div, prelude::*, px, rgba,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Rgba, Role,
+    SharedString, Subscription, Window, deferred, div, prelude::*, px, rgba,
 };
 use gpui_base::actions::{SelectDown, SelectUp};
 use gpui_base::input::{InputState, TextareaState};
@@ -31,7 +31,7 @@ use scriptorium_agent::file::ThreadFile;
 use scriptorium_chat::host;
 use scriptorium_chat::labels;
 use scriptorium_providers::shell::config;
-use scriptorium_providers::{AccountsFile, PriceBook, reply_cost, thread_cost};
+use scriptorium_providers::{AccountsFile, PriceBook, model_name, reply_cost, thread_cost};
 
 use super::accounts::AccountsChanged;
 use super::driver::{Chat, ChatEvent, Question, SendError};
@@ -39,6 +39,14 @@ use super::{OpenAccounts, Send};
 use crate::theme::*;
 
 const PLACEHOLDER: &str = "Ask about the script, or ask for changes…";
+
+/// What the composer tells the panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerEvent {
+    /// The writer chose a model (its name for the writer): an error row
+    /// asking to choose one can offer to try again with it.
+    ModelChosen(String),
+}
 
 /// The accounts file as last read (on start, and when the accounts sheet
 /// changes it).
@@ -61,6 +69,8 @@ pub struct Composer {
     focus: Focus,
     _subs: Vec<Subscription>,
 }
+
+impl EventEmitter<ComposerEvent> for Composer {}
 
 /// The composer's own focus stops.
 struct Focus {
@@ -141,9 +151,9 @@ impl Composer {
     // ---- what the writer does -------------------------------------------------
 
     /// Enter or the Send button. While the agent works the writer can type
-    /// but not send (Send is Stop); a question from the run is answered with
-    /// its own buttons only, so a stray Enter never says yes to it. With the
-    /// disclosure showing, Enter is its Send.
+    /// but not send (Send is Stop). A card is answered with its own buttons
+    /// only — the disclosure's "Agree and send", a question's — so a
+    /// reflexive second Enter never agrees to anything.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let chat = self.chat.read(cx);
         if chat.is_running() || chat.question().is_some() {
@@ -151,10 +161,16 @@ impl Composer {
             return;
         }
         if self.disclosure.is_some() {
-            self.accept_disclosure(window, cx);
+            crate::log::info("agent composer: Enter with the disclosure showing; not sent");
             return;
         }
         self.send_draft(window, cx);
+    }
+
+    /// Whether Send can send now: no card waits for an answer, and there's
+    /// an account to send with.
+    fn can_send(&self, cx: &App) -> bool {
+        self.disclosure.is_none() && !matches!(self.chip(cx), Chip::Setup) && self.accounts.is_ok()
     }
 
     /// Hands the draft to the driver; shows why it wasn't sent, if it wasn't.
@@ -218,17 +234,30 @@ impl Composer {
         true
     }
 
-    /// A new conversation: the cards for the old one go.
+    /// The panel closed, or another thread opened: the disclosure card,
+    /// the picker and the model field go (the draft stays).
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.disclosure = None;
-        self.sent = None;
+        self.picker = false;
+        self.other = None;
         cx.notify();
+    }
+
+    /// Opens the accounts sheet from the chip or the picker. Deferred, with
+    /// the chip focused first, so the sheet remembers the chip (not the
+    /// picker's list, gone with the pick) as what to give focus back to.
+    fn open_accounts_from_chip(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let chip = self.focus.chip.clone();
+        window.defer(cx, move |window, cx| {
+            chip.focus(window, cx);
+            window.dispatch_action(Box::new(OpenAccounts), cx);
+        });
     }
 
     /// Opens the model picker (also an error row's [Choose model]).
     pub fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.chip(cx), Chip::Setup) {
-            window.dispatch_action(Box::new(OpenAccounts), cx);
+        if matches!(self.chip(cx), Chip::Setup) || self.accounts.is_err() {
+            self.open_accounts_from_chip(window, cx);
             return;
         }
         self.other = None;
@@ -267,13 +296,14 @@ impl Composer {
         match self.picks(cx).into_iter().nth(ix) {
             Some(Pick::Model { account, model, .. }) => {
                 crate::log::info(&format!("agent composer: model {account} · {model}"));
+                cx.emit(ComposerEvent::ModelChosen(friendly(&model)));
                 self.chat.update(cx, |c, cx| c.choose(account, Some(model), cx));
                 self.refocus_chip(window, cx);
             }
             Some(Pick::Other { account }) => {
                 let now = self.current(cx).filter(|(a, _)| *a == account).map(|(_, m)| m).unwrap_or_default();
                 let field = cx.new(|cx| {
-                    let mut s = InputState::new(window, cx).placeholder("Model name, e.g. claude-sonnet-5-5");
+                    let mut s = InputState::new(window, cx).placeholder("Model name, as the provider writes it");
                     s.set_value(now, window, cx);
                     s
                 });
@@ -281,12 +311,7 @@ impl Composer {
                 self.other = Some((account, field));
                 window.defer(cx, move |window, cx| fh.focus(window, cx));
             }
-            Some(Pick::Manage) => {
-                // The sheet gives focus back to what had it when it opened:
-                // the chip, not the list that goes with the pick.
-                window.focus(&self.focus.chip, cx);
-                window.dispatch_action(Box::new(OpenAccounts), cx);
-            }
+            Some(Pick::Manage) => self.open_accounts_from_chip(window, cx),
             None => self.refocus_chip(window, cx),
         }
         cx.notify();
@@ -298,6 +323,7 @@ impl Composer {
         let model = field.read(cx).value().trim().to_string();
         if !model.is_empty() {
             crate::log::info(&format!("agent composer: model {account} · {model} (typed)"));
+            cx.emit(ComposerEvent::ModelChosen(friendly(&model)));
             self.chat.update(cx, |c, cx| c.choose(account, Some(model), cx));
         }
         self.refocus_chip(window, cx);
@@ -311,17 +337,30 @@ impl Composer {
 
     fn on_chat_event(&mut self, _: &Entity<Chat>, e: &ChatEvent, window: &mut Window, cx: &mut Context<Self>) {
         match e {
+            // Edits, not set_value, so the cursor stays where the writer
+            // left it and composer undo still works.
             ChatEvent::MessageSaved => {
                 let now = self.text(cx);
-                if let Some(rest) = self.sent.take().map(|sent| after_sent(&now, &sent)) {
-                    self.input.update(cx, |s, cx| s.set_value(rest, window, cx));
+                if let Some(n) = self.sent.take().and_then(|sent| sent_prefix(&now, &sent)) {
+                    self.input.update(cx, |s, cx| {
+                        let at = s.selected_range();
+                        s.set_selected_range(0..n, cx);
+                        s.replace("", window, cx);
+                        s.set_selected_range(at.start.saturating_sub(n)..at.end.saturating_sub(n), cx);
+                    });
                 }
             }
             ChatEvent::Withdrawn(text) => {
                 self.sent = None;
-                let now = self.text(cx);
-                let back = if now.trim().is_empty() { text.clone() } else { format!("{text}\n{now}") };
-                self.input.update(cx, |s, cx| s.set_value(back, window, cx));
+                let back = if self.text(cx).trim().is_empty() { text.clone() } else { format!("{text}\n") };
+                self.input.update(cx, |s, cx| {
+                    s.set_selected_range(0..0, cx);
+                    s.insert(back, window, cx);
+                });
+            }
+            ChatEvent::ThreadChanged => {
+                self.sent = None;
+                self.reset(cx);
             }
             ChatEvent::Ended { .. } => self.sent = None,
             ChatEvent::Asking => {}
@@ -358,26 +397,29 @@ impl Composer {
             Card::Question(q.clone())
         } else if let Some((_, text)) = &self.disclosure {
             Card::Disclose(text.clone())
-        } else if matches!(self.chip(cx), Chip::Setup) && !chat.is_running() {
+        } else if (matches!(self.chip(cx), Chip::Setup) || self.accounts.is_err()) && !chat.is_running() {
             Card::Setup
         } else {
             Card::None
         }
     }
 
-    fn usage_line(&self, cx: &App) -> Option<String> {
+    /// The usage line, and whether it's a floor (a stopped reply's counts
+    /// aren't reported).
+    fn usage_line(&self, cx: &App) -> Option<(String, bool)> {
         let chat = self.chat.read(cx);
         let total = chat.usage();
         let thread = chat.thread();
         if thread.is_none() && total == Usage::default() {
             return None;
         }
-        let Ok(file) = &self.accounts else { return Some(labels::usage_text(&total, None)) };
+        let floor = !total.known;
+        let Ok(file) = &self.accounts else { return Some((labels::usage_text(&total, None), floor)) };
         let book = PriceBook::from_accounts(file);
         let price = host::settle_account(file, thread, chat.choice().map(|c| c.0), chat.choice().and_then(|c| c.1))
             .ok()
             .and_then(|r| book.price(&r.origin()));
-        Some(labels::usage_text(&total, priced(&book, thread, &total, price.as_ref())))
+        Some((labels::usage_text(&total, priced(&book, thread, &total, price.as_ref())), floor))
     }
 
     // ---- drawing --------------------------------------------------------------
@@ -416,20 +458,23 @@ impl Composer {
             Card::Setup => return Some(self.render_setup(cx)),
             Card::Disclose(text) => {
                 let (title, body) = split_title(&text);
-                (title, body, "Send", "Not now", ACCENT)
+                (title, body, "Agree and send", "Not now", ACCENT)
             }
             Card::Question(q @ Question::Disclose(_)) => {
                 let (title, body) = split_title(q.text());
-                (title, body, "Send", "Not now", ACCENT)
+                (title, body, "Agree and send", "Not now", ACCENT)
             }
             Card::Question(q @ Question::WholeScript(_)) => (
                 None,
                 format!("{} Reading scene by scene costs less, but the agent may miss things.", q.text()),
-                "Send it",
-                "Not now",
+                "Let it read",
+                "Scene by scene",
                 OWN,
             ),
         };
+        // A question arrives while the writer may be looking elsewhere:
+        // assistive technology announces an alert.
+        let alert = matches!(self.card(cx), Card::Question(_));
         let yes_btn = self.button("agent-card-yes", yes, true, &self.focus.yes, cx, |this, window, cx| {
             this.card_answer(true, window, cx)
         });
@@ -449,6 +494,7 @@ impl Composer {
                 .gap_2()
                 .text_size(px(12.5))
                 .text_color(INK)
+                .when(alert, |d| d.role(Role::Alert))
                 .when_some(title, |d, t| d.child(div().font_weight(FontWeight::SEMIBOLD).child(t)))
                 .child(div().text_color(INK_2).child(body))
                 .child(div().flex().gap_2().justify_end().child(no_btn).child(yes_btn))
@@ -456,18 +502,28 @@ impl Composer {
         )
     }
 
+    /// No AI account yet, or the accounts file can't be read.
     fn render_setup(&self, cx: &mut Context<Self>) -> AnyElement {
-        let problem = match &self.accounts {
-            Err(e) => Some(e.clone()),
-            Ok(_) => None,
+        let problem = self.accounts.as_ref().err().cloned();
+        let (title, body, label) = match &problem {
+            None => (
+                "Connect an AI to start chatting",
+                "The agent runs on your own account with an AI company such as Anthropic or OpenAI. \
+                 Add one with its API key, and you can ask about the script or for changes.",
+                "Set up an AI account…",
+            ),
+            Some(_) => (
+                "Your AI accounts couldn't be read",
+                "Nothing has been changed. Open AI accounts to see what's wrong.",
+                "Open AI accounts…",
+            ),
         };
-        let open =
-            self.button("agent-setup", "Set up an AI account…", true, &self.focus.setup, cx, |this, window, cx| {
-                // The sheet gives focus back to what had it: the text field,
-                // as this button goes once an account is added.
-                this.focus(window, cx);
-                window.dispatch_action(Box::new(OpenAccounts), cx)
-            });
+        let open = self.button("agent-setup", label, true, &self.focus.setup, cx, |this, window, cx| {
+            // The sheet gives focus back to what had it: the text field,
+            // as this button goes once an account is added.
+            this.focus(window, cx);
+            window.dispatch_action(Box::new(OpenAccounts), cx)
+        });
         div()
             .id("agent-setup-card")
             .p_3()
@@ -479,11 +535,8 @@ impl Composer {
             .flex_col()
             .gap_2()
             .text_size(px(12.5))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Connect an AI to start chatting"))
-            .child(div().text_color(INK_2).child(
-                "The agent runs on your own account with an AI company such as Anthropic or OpenAI. \
-                 Add one with its API key, and you can ask about the script or for changes.",
-            ))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().text_color(INK_2).child(body))
             .when_some(problem, |d, p| d.child(div().text_color(WARN).child(p)))
             .child(div().flex().justify_end().child(open))
             .into_any_element()
@@ -541,6 +594,7 @@ impl Composer {
         let action = if stopping {
             div()
                 .id("agent-stopping")
+                .track_focus(&self.focus.send.clone().tab_stop(true))
                 .h(px(26.))
                 .px(px(12.))
                 .flex()
@@ -552,6 +606,22 @@ impl Composer {
             self.button("agent-stop", "Stop", false, &self.focus.send, cx, |this, _, cx| this.stop(cx))
                 .border_color(WARN)
                 .text_color(WARN)
+        } else if !self.can_send(cx) {
+            // Answer the card above (or add an account) first.
+            div()
+                .id("agent-send-off")
+                .track_focus(&self.focus.send.clone().tab_stop(true))
+                .h(px(26.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .rounded_md()
+                .border_1()
+                .border_color(RULE)
+                .bg(SIDE)
+                .text_color(INK_3)
+                .text_size(px(12.5))
+                .child("Send")
         } else {
             self.button("agent-send", "Send", true, &self.focus.send, cx, |this, window, cx| {
                 this.send(window, cx);
@@ -598,13 +668,24 @@ impl Composer {
             .gap(px(2.))
             .text_size(px(11.5))
             .child(div().flex().child(left))
-            .when_some(usage, |d, u| d.child(div().px_2().text_color(INK_3).truncate().child(u)))
+            .when_some(usage, |d, (u, floor)| {
+                d.child(
+                    div()
+                        .id("agent-usage")
+                        .px_2()
+                        .text_color(INK_3)
+                        .whitespace_nowrap()
+                        .truncate()
+                        .child(u)
+                        .when(floor, |d| d.tooltip(|_, cx| tip(cx, "A stopped reply's cost isn't reported."))),
+                )
+            })
             .into_any_element()
     }
 
     fn render_other(&self, field: &Entity<InputState>, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let focused = field.focus_handle(cx).contains_focused(window, cx);
-        div()
+        let input = div()
             .id("agent-model-other")
             .key_context("AgentComposer")
             .flex_1()
@@ -619,16 +700,27 @@ impl Composer {
             .border_color(if focused { ACCENT } else { RULE })
             // Enter here chooses the typed model; it never sends the draft.
             .on_action(cx.listener(|this, _: &Send, window, cx| this.choose_other(window, cx)))
-            .child(Input::new(field))
+            .child(Input::new(field));
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(input)
+            .child(div().px_2().text_color(INK_3).child("Enter to use it · Esc to cancel"))
             .into_any_element()
     }
 
     fn render_chip(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let chip = self.chip(cx);
-        let (text, warn) = match &chip {
-            Chip::Setup => ("No AI account".to_string(), true),
-            Chip::Problem(_) => ("Choose a model".to_string(), true),
-            Chip::Ready { name, model, .. } => (format!("{name} · {model}"), false),
+        let several = self.accounts.as_ref().is_ok_and(|f| f.accounts.len() > 1);
+        let text = chip_label(&chip, several);
+        let warn = !matches!(chip, Chip::Ready { .. });
+        let tooltip: Option<SharedString> = match &chip {
+            Chip::Ready { model, .. } => Some(format!("Model: {model}").into()),
+            Chip::Problem(p) => Some(p.clone().into()),
+            Chip::Setup => None,
         };
         let open = self.picker;
         let focused = self.focus.chip.is_focused(window);
@@ -690,16 +782,17 @@ impl Composer {
                     .on_open_change(move |open, window, cx| {
                         me_open
                             .update(cx, |s, cx| {
-                                if open && matches!(s.chip(cx), Chip::Setup) {
-                                    window.dispatch_action(Box::new(OpenAccounts), cx);
+                                if open && (matches!(s.chip(cx), Chip::Setup) || s.accounts.is_err()) {
+                                    s.open_accounts_from_chip(window, cx);
                                 } else {
                                     s.set_picker(open, window, cx)
                                 }
                             })
                             .ok();
                     })
+                    // The highlight as it is now, not as it was drawn.
                     .on_confirm(move |window, cx| {
-                        me_confirm.update(cx, |s, cx| s.pick(highlight, window, cx)).ok();
+                        me_confirm.update(cx, |s, cx| s.pick(s.highlight, window, cx)).ok();
                     })
                     .child(
                         div()
@@ -716,6 +809,7 @@ impl Composer {
                             .border_color(if open || focused { ACCENT } else { rgba(0x00000000) })
                             .text_color(if warn { WARN } else { INK_2 })
                             .hover(|d| d.bg(ACCENT_SOFT))
+                            .when_some(tooltip, |d, t| d.tooltip(move |_, cx| tip(cx, t.clone())))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 if this.picker {
                                     this.set_picker(false, window, cx);
@@ -759,6 +853,29 @@ const FILES_BUSY: &str = "Another program is saving the script's files; the agen
 fn load_accounts() -> Loaded {
     let path = config::default_path().ok_or_else(|| "There's no settings folder for AI accounts.".to_string())?;
     config::load(&path).map_err(|e| capitalized(&e.to_string()))
+}
+
+/// A small tooltip.
+struct Tip(SharedString);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(PAPER)
+            .border_1()
+            .border_color(RULE)
+            .text_size(px(12.))
+            .text_color(INK)
+            .child(self.0.clone())
+    }
+}
+
+fn tip(cx: &mut App, text: impl Into<SharedString>) -> gpui::AnyView {
+    let text = text.into();
+    cx.new(|_| Tip(text)).into()
 }
 
 fn capitalized(s: &str) -> String {
@@ -813,6 +930,22 @@ fn chip(accounts: &Loaded, thread: Option<&ThreadFile>, choice: Option<(&str, Op
     }
 }
 
+/// A model's name for the writer ("Claude Opus 5.5"), else its id.
+fn friendly(model: &str) -> String {
+    model_name(model).map_or_else(|| model.to_string(), String::from)
+}
+
+/// The chip's text: the model's name, after the account's when there are
+/// several.
+fn chip_label(chip: &Chip, several: bool) -> String {
+    match chip {
+        Chip::Setup => "No AI account".into(),
+        Chip::Problem(_) => "Choose a model".into(),
+        Chip::Ready { name, model, .. } if several => format!("{name} · {}", friendly(model)),
+        Chip::Ready { model, .. } => friendly(model),
+    }
+}
+
 /// An entry of the model picker.
 #[derive(Debug, Clone, PartialEq)]
 enum Pick {
@@ -832,8 +965,8 @@ enum Pick {
 impl Pick {
     fn label(&self) -> String {
         match self {
-            Pick::Model { name, model, several: true, .. } => format!("{name} · {model}"),
-            Pick::Model { model, .. } => model.clone(),
+            Pick::Model { name, model, several: true, .. } => format!("{name} · {}", friendly(model)),
+            Pick::Model { model, .. } => friendly(model),
             Pick::Other { .. } => "Other model…".into(),
             Pick::Manage => "Manage accounts…".into(),
         }
@@ -872,13 +1005,12 @@ fn picks(file: &AccountsFile, current: Option<(&str, &str)>) -> Vec<Pick> {
     out
 }
 
-/// The draft once `sent` is saved: empty if it's still what was sent; what
-/// was typed after it if the writer went on typing; else as it is.
-fn after_sent(now: &str, sent: &str) -> String {
-    match now.strip_prefix(sent) {
-        Some(rest) => rest.trim_start().to_string(),
-        None => now.to_string(),
-    }
+/// How many bytes at the start of the draft go once `sent` is saved: the
+/// sent text and the blank after it, if the draft still starts with it
+/// (the writer may have typed on); `None` if they changed it.
+fn sent_prefix(now: &str, sent: &str) -> Option<usize> {
+    let rest = now.strip_prefix(sent)?;
+    Some(now.len() - rest.trim_start().len())
 }
 
 /// "What gets sent. Your messages…" → ("What gets sent.", "Your messages…").
@@ -893,17 +1025,20 @@ fn split_title(text: &str) -> (Option<String>, String) {
 
 /// The price-table cost of `total`: the saved replies, each at its own
 /// model's price, plus the request in flight (`total` less the thread's) at
-/// `price`, the next run's. `None` when any part's price isn't known.
+/// `price`, the next run's. `None` when any part's price isn't known —
+/// except after a stopped reply (`total` not known), where the parts that
+/// are known make a floor.
 fn priced(
     book: &PriceBook,
     thread: Option<&ThreadFile>,
     total: &Usage,
     price: Option<&scriptorium_providers::Price>,
 ) -> Option<f64> {
+    let floor = !total.known;
     let (saved, base) = match thread {
         Some(t) => {
             let c = thread_cost(book, &t.thread);
-            (c.complete.then_some(c.usd)?, t.thread.usage())
+            ((c.complete || floor).then_some(c.usd)?, t.thread.usage())
         }
         None => (0.0, Usage::default()),
     };
@@ -919,7 +1054,10 @@ fn priced(
     if in_flight.input + in_flight.output == 0 {
         return Some(saved);
     }
-    Some(saved + reply_cost(price, &in_flight)?)
+    match reply_cost(price, &in_flight) {
+        Some(c) => Some(saved + c),
+        None => floor.then_some(saved),
+    }
 }
 
 #[cfg(test)]
@@ -976,9 +1114,10 @@ mod tests {
         // The current model leads when the presets lack it, then the presets.
         assert_eq!(p[0].label(), "my-own-model");
         for m in Provider::Anthropic.models() {
-            assert!(p.iter().any(|x| x.label() == *m), "{m} missing");
+            assert!(p.iter().any(|x| matches!(x, Pick::Model { model, .. } if model == m)), "{m} missing");
         }
-        // One account: no account names in the labels.
+        // Names for the writer; one account: no account names in the labels.
+        assert!(p.iter().any(|x| x.label() == "Claude Sonnet 5.5"));
         assert!(p.iter().all(|x| !x.label().contains(" · ")));
         assert_eq!(p[p.len() - 2], Pick::Other { account: "anthropic".into() });
         assert_eq!(p[p.len() - 1], Pick::Manage);
@@ -994,7 +1133,7 @@ mod tests {
     fn picker_names_accounts_when_there_are_several() {
         let f = file(vec![anthropic(), openai()], Some("anthropic"));
         let p = picks(&f, Some(("openai", "gpt-6-luna")));
-        assert!(p.iter().any(|x| x.label() == "OpenAI · gpt-6-luna"));
+        assert!(p.iter().any(|x| x.label() == "OpenAI · GPT-6 Luna"));
         assert!(p.iter().any(|x| x.label().starts_with("Anthropic · ")));
         assert!(p.iter().any(|x| x.is(Some(&("openai".into(), "gpt-6-luna".into())))));
         // "Other model…" is for the current account.
@@ -1002,10 +1141,20 @@ mod tests {
     }
 
     #[test]
+    fn chip_names_the_model_for_the_writer() {
+        let ready = |m: &str| Chip::Ready { account: "a".into(), name: "Anthropic".into(), model: m.into() };
+        assert_eq!(chip_label(&ready("claude-opus-5-5"), false), "Claude Opus 5.5");
+        assert_eq!(chip_label(&ready("claude-opus-5-5"), true), "Anthropic · Claude Opus 5.5");
+        assert_eq!(chip_label(&ready("my-own-model"), false), "my-own-model");
+        assert_eq!(chip_label(&Chip::Setup, false), "No AI account");
+    }
+
+    #[test]
     fn saved_message_leaves_only_what_was_typed_after() {
-        assert_eq!(after_sent("Tighten scene 12", "Tighten scene 12"), "");
-        assert_eq!(after_sent("Tighten scene 12\nand 13", "Tighten scene 12"), "and 13");
-        assert_eq!(after_sent("something else", "Tighten scene 12"), "something else");
+        assert_eq!(sent_prefix("Tighten scene 12", "Tighten scene 12"), Some(16));
+        assert_eq!(sent_prefix("Tighten scene 12\nand 13", "Tighten scene 12"), Some(17));
+        assert_eq!(sent_prefix("something else", "Tighten scene 12"), None);
+        assert_eq!(sent_prefix("Café ☕ x", "Café ☕"), Some("Café ☕ ".len()));
     }
 
     #[test]
@@ -1029,5 +1178,9 @@ mod tests {
         assert_eq!(priced(&book, None, &total, None), None);
         // Nothing in flight, nothing saved: free.
         assert_eq!(priced(&book, None, &Usage::default(), None), Some(0.0));
+        // A stopped reply: what is known is a floor, never "unknown".
+        let stopped = Usage { input: 1_000_000, known: false, ..Usage::default() };
+        assert!(priced(&book, None, &stopped, price.as_ref()).unwrap() > 0.0);
+        assert_eq!(priced(&book, None, &stopped, None), Some(0.0));
     }
 }

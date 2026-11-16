@@ -156,7 +156,8 @@ pub fn disclosure_key(base_url: &str, script_path: &str) -> Option<String> {
 }
 
 /// The disclosure shown before the first send: the app renders it as a card,
-/// the CLI prints it.
+/// the CLI prints it. `host` is who the text goes to, as the writer should
+/// read it: "Anthropic (api.anthropic.com)", or a bare host.
 pub fn disclosure_text(host: &str, script_name: &str, threads_folder: &str) -> String {
     format!(
         "What gets sent. Your messages, and the parts of {script_name} the agent reads (scenes, search results, \

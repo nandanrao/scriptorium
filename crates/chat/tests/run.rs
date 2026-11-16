@@ -976,3 +976,10 @@ fn set_whole_script_overrides_a_stored_no() {
     assert_eq!(exec::whole_script_tokens(&file), Some(10));
     assert_eq!(threads.read("t0001").unwrap().whole_script, Some(true));
 }
+
+#[test]
+fn disclosure_names_the_provider() {
+    assert_eq!(host::provider_label("api.anthropic.com"), "Anthropic (api.anthropic.com)");
+    assert_eq!(host::provider_label("openrouter.ai"), "OpenRouter (openrouter.ai)");
+    assert_eq!(host::provider_label("localhost:8080"), "localhost:8080");
+}

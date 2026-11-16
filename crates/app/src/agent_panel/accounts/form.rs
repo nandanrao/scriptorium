@@ -225,22 +225,7 @@ fn capitalised(s: &str) -> String {
 
 /// A friendlier name for a suggested model id.
 pub fn model_label(id: &str) -> String {
-    let name = match id {
-        "claude-opus-5-5" => "Claude Opus 5.5",
-        "claude-sonnet-5-5" => "Claude Sonnet 5.5",
-        "claude-haiku-5-5" => "Claude Haiku 5.5",
-        "claude-fable-5-2" => "Claude Fable 5.2",
-        "gpt-6-sol" => "GPT-6 Sol",
-        "gpt-5.6-terra" => "GPT-5.6 Terra",
-        "gpt-6-luna" => "GPT-6 Luna",
-        "gpt-5.2" => "GPT-5.2",
-        "anthropic/claude-opus-5.5" => "Claude Opus 5.5",
-        "anthropic/claude-sonnet-5.5" => "Claude Sonnet 5.5",
-        "anthropic/claude-haiku-5.5" => "Claude Haiku 5.5",
-        "anthropic/claude-fable-5.2" => "Claude Fable 5.2",
-        _ => return id.to_string(),
-    };
-    name.to_string()
+    scriptorium_providers::model_name(id).map_or_else(|| id.to_string(), String::from)
 }
 
 fn slug(name: &str) -> String {

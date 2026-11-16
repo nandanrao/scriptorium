@@ -573,10 +573,12 @@ fn reply_text(file: &ThreadFile) -> String {
     texts.join("\n\n")
 }
 
-/// "130 tokens · $0.01" for the whole thread.
+/// "130 tokens · $0.01" for the whole thread ("at least …+" after a
+/// stopped reply, whose counts aren't reported).
 fn usage_line(accounts: &AccountsFile, file: &ThreadFile) -> String {
     let cost = thread_cost(&PriceBook::from_accounts(accounts), &file.thread);
-    labels::usage_text(&file.thread.usage(), cost.complete.then_some(cost.usd))
+    let usage = file.thread.usage();
+    labels::usage_text(&usage, (cost.complete || !usage.known).then_some(cost.usd))
 }
 
 /// The thread's usage so far. `input_tokens` counts all input, cached

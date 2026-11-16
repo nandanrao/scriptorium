@@ -47,7 +47,7 @@ use gpui::{
 
 use crate::script_view::{RedoAny, ScriptView, UndoAny};
 use crate::theme::*;
-use composer::Composer;
+use composer::{Composer, ComposerEvent};
 use driver::{Chat, ChatEvent, ErrorAction, ViewOp};
 use messages::{MessageEvent, MessageView};
 use threads::ThreadList;
@@ -222,7 +222,7 @@ pub struct AgentPanel {
     composer: Entity<Composer>,
     /// The conversation and its runs (driver.rs).
     chat: Entity<Chat>,
-    _chat: [gpui::Subscription; 3],
+    _chat: Vec<gpui::Subscription>,
 }
 
 impl EventEmitter<AgentPanelEvent> for AgentPanel {}
@@ -245,15 +245,29 @@ impl AgentPanel {
         });
         let events = cx.subscribe_in(&chat, window, Self::on_chat_event);
         let actions = cx.subscribe_in(&messages, window, Self::on_message_event);
+        let composer = cx.new(|cx| Composer::new(chat.clone(), window, cx));
+        let mut subs = vec![observe, events, actions, cx.subscribe(&composer, Self::on_composer_event)];
+        // Closing the panel (Ctrl+L or ×) closes the composer's cards and picker.
+        if let Some(view) = script.upgrade() {
+            // Not read here: the script view is making this panel.
+            let mut was_open = false;
+            subs.push(cx.observe(&view, move |this: &mut Self, view, cx| {
+                let open = view.read(cx).agent_open();
+                if was_open && !open {
+                    this.composer.update(cx, |c, cx| c.reset(cx));
+                }
+                was_open = open;
+            }));
+        }
         Self {
             focus: cx.focus_handle(),
             script: script.clone(),
             script_path,
             threads: cx.new(|cx| ThreadList::new(window, cx)),
             messages,
-            composer: cx.new(|cx| Composer::new(chat.clone(), window, cx)),
+            composer,
             chat,
-            _chat: [observe, events, actions],
+            _chat: subs,
         }
     }
 
@@ -287,6 +301,23 @@ impl AgentPanel {
             ErrorAction::ManageAccounts => window.dispatch_action(Box::new(OpenAccounts), cx),
             ErrorAction::ChooseModel => self.composer.update(cx, |c, cx| c.open_picker(window, cx)),
         }
+    }
+
+    /// A model chosen after an error row asked for one: the row offers to
+    /// try again with it.
+    fn on_composer_event(&mut self, _: Entity<Composer>, e: &ComposerEvent, cx: &mut Context<Self>) {
+        let ComposerEvent::ModelChosen(name) = e;
+        let text = format!("Now using {name}.");
+        self.messages.update(cx, |m, cx| {
+            m.update_stream(
+                |s| {
+                    if s.failure().is_some_and(|f| f.action == Some(ErrorAction::ChooseModel)) {
+                        s.fail_with(text, Some(ErrorAction::Retry));
+                    }
+                },
+                cx,
+            )
+        });
     }
 
     fn on_chat_event(&mut self, _: &Entity<Chat>, e: &ChatEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -379,9 +410,9 @@ impl AgentPanel {
     }
 
     fn new_thread(&mut self, cx: &mut Context<Self>) {
-        match self.chat.update(cx, |c, cx| c.new_thread(cx)) {
-            Ok(()) => self.composer.update(cx, |c, cx| c.reset(cx)),
-            Err(e) => self.chat.update(cx, |c, cx| c.notice(e, cx)),
+        // The composer's cards go with the old thread (ChatEvent::ThreadChanged).
+        if let Err(e) = self.chat.update(cx, |c, cx| c.new_thread(cx)) {
+            self.chat.update(cx, |c, cx| c.notice(e, cx));
         }
     }
 

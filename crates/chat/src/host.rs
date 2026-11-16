@@ -270,7 +270,16 @@ pub fn disclosure(seen: &Seen, base_url: &str, script: &Path) -> Option<(String,
     let host = host_of(base_url)?;
     let name = file_name(script);
     let folder = ThreadStore::for_script(script).dir().file_name().map(|n| n.to_string_lossy().into_owned());
-    Some((key, disclosure_text(&host, &name, &format!("{}/", folder.unwrap_or_default()))))
+    Some((key, disclosure_text(&provider_label(&host), &name, &format!("{}/", folder.unwrap_or_default()))))
+}
+
+/// "Anthropic (api.anthropic.com)" for a preset provider's host; another
+/// host as it is.
+pub fn provider_label(host: &str) -> String {
+    match scriptorium_providers::PRESETS.iter().find(|p| host_of(p.base_url).as_deref() == Some(host)) {
+        Some(p) => format!("{} ({host})", p.name),
+        None => host.to_string(),
+    }
 }
 
 fn file_name(p: &Path) -> String {

@@ -134,6 +134,9 @@ pub enum ChatEvent {
     /// The run is over. `say`: the line for the status bar when the panel is
     /// closed (an error, or the writer is needed); `None` for a plain finish.
     Ended { say: Option<String> },
+    /// Another thread (or a new conversation) is open: what was showing for
+    /// the old one (a disclosure, a picker) goes.
+    ThreadChanged,
 }
 
 /// How a run that didn't finish failed, said on the worker.
@@ -706,6 +709,7 @@ impl Chat {
         self.ops.push(ViewOp::Stream(StreamOp::Clear));
         self.show(false);
         self.sync_review(cx);
+        cx.emit(ChatEvent::ThreadChanged);
         cx.notify();
     }
 
