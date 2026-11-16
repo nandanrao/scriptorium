@@ -17,12 +17,31 @@ use std::time::{Duration, Instant};
 /// writing the same file never share one.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Write `bytes` to `path` atomically: into `.<name>.tmp-<pid>-<n>` in the same
-/// folder, fsync, then rename over `path` (and fsync the folder, best effort).
-/// An existing file keeps its permissions; a symlink is written through to
-/// its target rather than replaced. On failure the temporary file is removed
-/// and `path` is untouched.
+/// How many temporary names [`write_atomic`] tries before giving up (each
+/// is random, so a clash means something else is making names there).
+const TMP_TRIES: usize = 16;
+
+/// Write `bytes` to `path` atomically: into `.<name>.tmp-<random>` in the
+/// same folder, fsync, then rename over `path` (and fsync the folder, best
+/// effort). The temporary file is created new (`create_new`, which never
+/// follows a link) under a name nobody can predict, so it can't be planted
+/// beforehand or pointed elsewhere. An existing file keeps its permissions;
+/// a new one gets the usual ones (`0666` less the umask on Unix). A symlink
+/// is written through to its target rather than replaced. On failure the
+/// temporary file is removed and `path` is untouched.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_mode(path, bytes, 0o666)
+}
+
+/// [`write_atomic`], but a file that doesn't exist yet is created readable
+/// by its owner only (`0600` on Unix; elsewhere as [`write_atomic`]): for
+/// files holding a user's conversations or settings. An existing file keeps
+/// its permissions.
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_mode(path, bytes, 0o600)
+}
+
+fn write_atomic_mode(path: &Path, bytes: &[u8], new_mode: u32) -> io::Result<()> {
     // Through a symlink to the file it points at, so the link survives.
     let path = match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)?,
@@ -35,10 +54,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(".{}.tmp-{}-{n}", name.to_string_lossy(), std::process::id()));
+    let (tmp, mut f) = create_temp(&dir, &name.to_string_lossy(), new_mode)?;
     let result = (|| {
-        let mut f = File::create(&tmp)?;
         if let Ok(m) = fs::metadata(&path) {
             f.set_permissions(m.permissions())?;
         }
@@ -57,6 +74,39 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// A new temporary file beside `name` in `dir`, created with `create_new`
+/// under a random name (mode `mode` on Unix).
+fn create_temp(dir: &Path, name: &str, mode: u32) -> io::Result<(PathBuf, File)> {
+    let mut last = None;
+    for _ in 0..TMP_TRIES {
+        let tmp = dir.join(format!(".{name}.tmp-{:016x}", random_u64()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, mode);
+        #[cfg(not(unix))]
+        let _ = mode;
+        match options.open(&tmp) {
+            Ok(f) => return Ok((tmp, f)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("no free temporary name")))
+}
+
+/// 64 unpredictable bits: std's per-process random hash keys, mixed with the
+/// time, the process id and a counter (no extra dependency).
+fn random_u64() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(TMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+    h.write_u32(std::process::id());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    h.write_u128(nanos);
+    h.finish()
 }
 
 /// How long a program waits for another to finish with a script's session.
@@ -190,6 +240,32 @@ impl SessionLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_writes_create_owner_only_files_and_keep_existing_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("scriptorium-private-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let new = dir.join("t0001.json");
+        write_atomic_private(&new, b"{}").unwrap();
+        assert_eq!(mode(&new), 0o600);
+        // A user's existing file keeps its mode, whichever write is used.
+        let existing = dir.join("film.scriptorium.json");
+        fs::write(&existing, "old").unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o644)).unwrap();
+        write_atomic_private(&existing, b"new").unwrap();
+        assert_eq!((mode(&existing), fs::read_to_string(&existing).unwrap().as_str()), (0o644, "new"));
+        write_atomic(&existing, b"newer").unwrap();
+        assert_eq!(mode(&existing), 0o644);
+        // Nothing left behind, and every temporary name differs.
+        let names: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert_ne!(random_u64(), random_u64());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_lock_is_exclusive_and_released_on_drop() {

@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use scriptorium_fsio::write_atomic;
+use scriptorium_fsio::write_atomic_private;
 use serde_json::{Value, json};
 
 /// The file's name, in the same folder as the accounts file.
@@ -49,7 +49,7 @@ impl Seen {
         }
         let text = serde_json::to_string_pretty(&json!({ "version": 1, "disclosures": self.keys }))
             .expect("strings serialize");
-        write_atomic(&self.path, text.as_bytes()).map_err(|e| format!("{}: {e}", self.path.display()))
+        write_atomic_private(&self.path, text.as_bytes()).map_err(|e| format!("{}: {e}", self.path.display()))
     }
 }
 

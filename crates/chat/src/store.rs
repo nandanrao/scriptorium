@@ -2,8 +2,8 @@
 //! (`PURPLE LIST.fdx` → `PURPLE LIST.threads/`), one `<id>.json` per thread
 //! ([`ThreadFile`]) and the `<id>.lock` that guards it ([`crate::lock`]).
 //!
-//! Thread files are written atomically ([`write_atomic`]), so a reader never
-//! sees half of one. Writing or deleting a thread needs its [`ThreadLock`].
+//! Thread files are written atomically ([`write_atomic_private`]: a new one
+//! is readable by its owner only), so a reader never sees half of one. Writing or deleting a thread needs its [`ThreadLock`].
 //! Deleting removes the thread file and leaves the lock file; listing skips
 //! lock files (and anything else that isn't a thread file).
 
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use scriptorium_agent::file::{ThreadFile, VERSION};
-use scriptorium_fsio::write_atomic;
+use scriptorium_fsio::write_atomic_private;
 
 use crate::clock::IdSource;
 use crate::core::model::{Entry, Problem, parse_rfc3339};
@@ -229,7 +229,7 @@ impl ThreadStore {
             return Err(StoreError::WrongLock { lock: lock.id().to_string(), thread: file.id.clone() });
         }
         let path = self.path(&file.id)?;
-        write_atomic(&path, file.to_json().as_bytes()).map_err(|e| io_err(&path, e))
+        write_atomic_private(&path, file.to_json().as_bytes()).map_err(|e| io_err(&path, e))
     }
 
     /// Deletes the thread file under its lock. The lock file stays (lock
