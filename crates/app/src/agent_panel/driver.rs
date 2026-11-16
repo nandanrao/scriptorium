@@ -684,7 +684,7 @@ impl Chat {
 
     // ---- inside -------------------------------------------------------------
 
-    fn store(&self) -> ThreadStore {
+    pub fn store(&self) -> ThreadStore {
         ThreadStore::for_script(&self.script_path)
     }
 
