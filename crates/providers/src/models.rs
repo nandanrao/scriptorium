@@ -333,6 +333,22 @@ pub fn anthropic_price(model: &str) -> Option<Price> {
     ANTHROPIC.iter().find(|m| m.id == model).map(|m| m.price)
 }
 
+/// A model's name for the writer ("Claude Opus 5.5"), for the preset
+/// models; `None` for an id we don't know (show the id itself).
+pub fn model_name(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "claude-opus-5-5" | "anthropic/claude-opus-5.5" => "Claude Opus 5.5",
+        "claude-sonnet-5-5" | "anthropic/claude-sonnet-5.5" => "Claude Sonnet 5.5",
+        "claude-haiku-5-5" | "anthropic/claude-haiku-5.5" => "Claude Haiku 5.5",
+        "claude-fable-5-2" | "anthropic/claude-fable-5.2" => "Claude Fable 5.2",
+        "gpt-6-sol" => "GPT-6 Sol",
+        "gpt-5.6-terra" => "GPT-5.6 Terra",
+        "gpt-6-luna" => "GPT-6 Luna",
+        "gpt-5.2" => "GPT-5.2",
+        _ => return None,
+    })
+}
+
 /// Every model in the table with its price, for listing.
 pub fn anthropic_models() -> impl Iterator<Item = (&'static str, Capabilities, Price)> {
     ANTHROPIC.iter().map(|m| (m.id, m.caps, m.price))
@@ -341,6 +357,20 @@ pub fn anthropic_models() -> impl Iterator<Item = (&'static str, Capabilities, P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names() {
+        assert_eq!(model_name("claude-opus-5-5"), Some("Claude Opus 5.5"));
+        assert_eq!(model_name("anthropic/claude-haiku-5.5"), Some("Claude Haiku 5.5"));
+        assert_eq!(model_name("gpt-6-luna"), Some("GPT-6 Luna"));
+        assert_eq!(model_name("my-own-model"), None);
+        // Every preset model has a name.
+        for p in crate::PRESETS {
+            for m in p.models {
+                assert!(model_name(m).is_some(), "{m}");
+            }
+        }
+    }
 
     #[test]
     fn lookups() {

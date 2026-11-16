@@ -248,16 +248,23 @@ pub fn cost_text(dollars: f64) -> String {
 }
 
 /// "18.2k tokens · $0.24". The cost is `usage.cost` when the provider
-/// reported one, else `priced` (computed from the price table by the caller);
-/// parts that aren't known read "tokens unknown" and "cost unknown".
+/// reported one, else `priced` (computed from the price table by the caller).
+///
+/// When a reply's counts aren't known (a stopped reply), the totals of the
+/// others are a floor: "at least 1.2k tokens · $0.01+", where `priced` is the
+/// cost of the replies that are known. A part with nothing known reads
+/// "tokens unknown" / "cost unknown".
 pub fn usage_text(usage: &Usage, priced: Option<f64>) -> String {
-    let tokens = if usage.known {
-        format!("{} tokens", tokens_short(usage.input + usage.output))
-    } else {
-        "tokens unknown".into()
-    };
-    let cost = usage.cost.or(usage.known.then_some(priced).flatten()).map_or("cost unknown".to_string(), cost_text);
-    format!("{tokens} · {cost}")
+    let tokens = usage.input + usage.output;
+    if !usage.known {
+        if tokens == 0 {
+            return "tokens unknown · cost unknown".into();
+        }
+        let cost = priced.filter(|c| *c > 0.0).map_or("cost unknown".to_string(), |c| format!("{}+", cost_text(c)));
+        return format!("at least {} tokens · {cost}", tokens_short(tokens));
+    }
+    let cost = usage.cost.or(priced).map_or("cost unknown".to_string(), cost_text);
+    format!("{} tokens · {cost}", tokens_short(tokens))
 }
 
 #[cfg(test)]
@@ -426,7 +433,11 @@ mod tests {
         assert_eq!(usage_text(&usage(1000, 0, true, Some(0.10)), Some(0.50)), "1.0k tokens · $0.10");
         assert_eq!(usage_text(&usage(1000, 0, true, None), Some(0.5)), "1.0k tokens · $0.50");
         assert_eq!(usage_text(&usage(1000, 0, true, None), None), "1.0k tokens · cost unknown");
-        assert_eq!(usage_text(&usage(1000, 0, false, None), Some(0.5)), "tokens unknown · cost unknown");
+        // A stopped reply: the rest is a floor, never wiped.
+        assert_eq!(usage_text(&usage(1000, 0, false, None), Some(0.5)), "at least 1.0k tokens · $0.50+");
+        assert_eq!(usage_text(&usage(1000, 0, false, None), None), "at least 1.0k tokens · cost unknown");
+        assert_eq!(usage_text(&usage(1000, 0, false, None), Some(0.0)), "at least 1.0k tokens · cost unknown");
+        assert_eq!(usage_text(&usage(0, 0, false, None), Some(0.5)), "tokens unknown · cost unknown");
         assert_eq!(usage_text(&usage(0, 0, true, None), Some(0.0)), "0 tokens · $0.00");
     }
 }

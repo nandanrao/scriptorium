@@ -9,7 +9,9 @@
 //! - `view_model.rs` (pure): a thread plus the streaming buffer become rows.
 //! - `messages.rs` (U3): [`messages::MessageView`], the message list.
 //! - `composer.rs` (U6): [`composer::Composer`], the one textarea focus and
-//!   undo route to; it observes [`accounts::AccountsChanged`] for the chip.
+//!   undo route to, Send/Stop, the cards above it (disclosure, whole-script
+//!   read, setup), notices, the model chip and usage. It observes the chat
+//!   and [`accounts::AccountsChanged`] itself; the panel forwards its keys.
 //! - `threads.rs` (U7): [`threads::ThreadList`], the header's title and the
 //!   thread list behind it.
 //! - `driver.rs` (U4) and `live.rs` (U5): runs. The panel holds a weak handle
@@ -45,8 +47,8 @@ use gpui::{
 
 use crate::script_view::{RedoAny, ScriptView, UndoAny};
 use crate::theme::*;
-use composer::Composer;
-use driver::{Chat, ChatEvent, ErrorAction, SendError, ViewOp};
+use composer::{Composer, ComposerEvent};
+use driver::{Chat, ChatEvent, ErrorAction, ViewOp};
 use messages::{MessageEvent, MessageView};
 use threads::ThreadList;
 
@@ -221,10 +223,7 @@ pub struct AgentPanel {
     composer: Entity<Composer>,
     /// The conversation and its runs (driver.rs).
     chat: Entity<Chat>,
-    /// A disclosure shown in place of sending: the next Send accepts it.
-    /// (Stand-in until U6's disclosure card.)
-    disclosure: Option<String>,
-    _chat: [gpui::Subscription; 3],
+    _chat: Vec<gpui::Subscription>,
 }
 
 impl EventEmitter<AgentPanelEvent> for AgentPanel {}
@@ -247,16 +246,29 @@ impl AgentPanel {
         });
         let events = cx.subscribe_in(&chat, window, Self::on_chat_event);
         let actions = cx.subscribe_in(&messages, window, Self::on_message_event);
+        let composer = cx.new(|cx| Composer::new(chat.clone(), window, cx));
+        let mut subs = vec![observe, events, actions, cx.subscribe(&composer, Self::on_composer_event)];
+        // Closing the panel (Ctrl+L or ×) closes the composer's cards and picker.
+        if let Some(view) = script.upgrade() {
+            // Not read here: the script view is making this panel.
+            let mut was_open = false;
+            subs.push(cx.observe(&view, move |this: &mut Self, view, cx| {
+                let open = view.read(cx).agent_open();
+                if was_open && !open {
+                    this.composer.update(cx, |c, cx| c.reset(cx));
+                }
+                was_open = open;
+            }));
+        }
         Self {
             focus: cx.focus_handle(),
             script: script.clone(),
             script_path,
             threads: cx.new(|cx| ThreadList::new(chat.clone(), window, cx)),
             messages,
-            composer: cx.new(|cx| Composer::new(window, cx)),
+            composer,
             chat,
-            disclosure: None,
-            _chat: [observe, events, actions],
+            _chat: subs,
         }
     }
 
@@ -286,30 +298,32 @@ impl AgentPanel {
                     self.chat.update(cx, |c, cx| c.notice(e.to_string(), cx));
                 }
             }
-            ErrorAction::NewThread => {
-                if let Err(e) = self.chat.update(cx, |c, cx| c.new_thread(cx)) {
-                    self.chat.update(cx, |c, cx| c.notice(e, cx));
-                }
-            }
-            // U6's model picker will take ChooseModel; until then, accounts.
-            ErrorAction::ManageAccounts | ErrorAction::ChooseModel => {
-                window.dispatch_action(Box::new(OpenAccounts), cx);
-            }
+            ErrorAction::NewThread => self.new_thread(cx),
+            ErrorAction::ManageAccounts => window.dispatch_action(Box::new(OpenAccounts), cx),
+            ErrorAction::ChooseModel => self.composer.update(cx, |c, cx| c.open_picker(window, cx)),
         }
     }
 
-    fn on_chat_event(&mut self, _: &Entity<Chat>, e: &ChatEvent, window: &mut Window, cx: &mut Context<Self>) {
+    /// A model chosen after an error row asked for one: the row offers to
+    /// try again with it.
+    fn on_composer_event(&mut self, _: Entity<Composer>, e: &ComposerEvent, cx: &mut Context<Self>) {
+        let ComposerEvent::ModelChosen(name) = e;
+        let text = format!("Now using {name}.");
+        self.messages.update(cx, |m, cx| {
+            m.update_stream(
+                |s| {
+                    if s.failure().is_some_and(|f| f.action == Some(ErrorAction::ChooseModel)) {
+                        s.fail_with(text, Some(ErrorAction::Retry));
+                    }
+                },
+                cx,
+            )
+        });
+    }
+
+    fn on_chat_event(&mut self, _: &Entity<Chat>, e: &ChatEvent, _: &mut Window, cx: &mut Context<Self>) {
         match e {
-            ChatEvent::MessageSaved => {
-                // Stand-in until U6: the draft goes once the message is saved.
-                let input = self.composer.read(cx).input().clone();
-                input.update(cx, |s, cx| s.set_value("", window, cx));
-            }
-            ChatEvent::Withdrawn(text) => {
-                let input = self.composer.read(cx).input().clone();
-                let text = text.clone();
-                input.update(cx, |s, cx| s.set_value(text, window, cx));
-            }
+            // The composer handles the draft (MessageSaved, Withdrawn).
             ChatEvent::Asking if !self.is_open(cx) => {
                 cx.emit(AgentPanelEvent::Say(say_closed("The agent is waiting for you.")));
             }
@@ -356,10 +370,10 @@ impl AgentPanel {
         self.composer.read(cx).is_focused(window, cx)
     }
 
-    /// The panel's focus stops for Tab, in order. U6 and U7 add Send/Stop,
-    /// the model chip and the thread list's own stops.
+    /// The panel's focus stops for Tab, in order: the composer's (field,
+    /// card buttons, Send/Stop, model chip), the messages', the thread list.
     fn tab_stops(&self, cx: &App) -> Vec<FocusHandle> {
-        let mut stops = vec![self.composer.read(cx).focus_handle(cx)];
+        let mut stops = self.composer.read(cx).tab_stops(cx);
         stops.extend(self.messages.read(cx).tab_stops());
         stops.push(self.threads.read(cx).focus_handle(cx));
         stops
@@ -374,50 +388,30 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn on_return_focus(&mut self, _: &ReturnFocus, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(AgentPanelEvent::ReturnFocus);
+    /// Escape: closes what the composer has open (the model picker or
+    /// field, the disclosure card), else gives focus back to the script.
+    fn on_return_focus(&mut self, _: &ReturnFocus, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.composer.update(cx, |c, cx| c.dismiss(window, cx)) {
+            cx.emit(AgentPanelEvent::ReturnFocus);
+        }
     }
 
-    /// Enter: send the draft. A stand-in for U6's composer: a disclosure is
-    /// shown as a line and the next Enter accepts it; a whole-script question
-    /// is answered by Enter (yes) or Stop.
-    fn on_send(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
+    /// Enter in the composer.
+    fn on_send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
         crate::log::info("agent panel: send");
-        if self.chat.read(cx).question().is_some() {
-            self.chat.update(cx, |c, cx| c.answer(true, cx));
-            return;
-        }
-        let text = self.composer.read(cx).text(cx);
-        if let Some(key) = self.disclosure.take()
-            && let Err(e) = self.chat.update(cx, |c, _| c.accept_disclosure(&key))
-        {
-            crate::log::warn(&format!("couldn't remember the disclosure: {e}"));
-        }
-        let sent = self.chat.update(cx, |c, cx| c.send(&text, cx));
-        if let Err(e) = &sent {
-            crate::log::info(&format!("agent panel: not sent: {e:?}"));
-        }
-        match sent {
-            Ok(()) | Err(SendError::Blank) => {}
-            Err(SendError::Disclose { key, text }) => {
-                self.disclosure = Some(key);
-                self.chat.update(cx, |c, cx| c.notice(format!("{text} Press Enter to send."), cx));
-            }
-            Err(e) => self.chat.update(cx, |c, cx| c.notice(e.to_string(), cx)),
-        }
+        self.composer.update(cx, |c, cx| c.send(window, cx));
     }
 
     fn on_stop(&mut self, _: &Stop, _: &mut Window, cx: &mut Context<Self>) {
-        self.chat.update(cx, |c, cx| {
-            if c.question().is_some() && !c.is_running() {
-                c.answer(false, cx);
-            }
-            c.stop(cx);
-        });
+        self.composer.update(cx, |c, cx| c.stop(cx));
     }
 
     fn on_new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
-        self.disclosure = None;
+        self.new_thread(cx);
+    }
+
+    fn new_thread(&mut self, cx: &mut Context<Self>) {
+        // The composer's cards go with the old thread (ChatEvent::ThreadChanged).
         if let Err(e) = self.chat.update(cx, |c, cx| c.new_thread(cx)) {
             self.chat.update(cx, |c, cx| c.notice(e, cx));
         }
@@ -440,27 +434,6 @@ impl AgentPanel {
         } else {
             window.dispatch_action(Box::new(gpui_base::input::Undo), cx);
         }
-    }
-
-    /// The run's notices and question, above the composer (a stand-in for
-    /// U6's notices and question card).
-    fn render_notices(&self, cx: &App) -> Option<impl IntoElement + use<>> {
-        let lines = extra_lines(self.chat.read(cx));
-        (!lines.is_empty()).then(|| {
-            div()
-                .id("agent-notices")
-                .flex_none()
-                .px_3()
-                .py_2()
-                .border_t_1()
-                .border_color(RULE)
-                .flex()
-                .flex_col()
-                .gap_1()
-                .text_size(px(12.))
-                .text_color(INK_2)
-                .children(lines.into_iter().map(|l| div().child(l)))
-        })
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -524,7 +497,6 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, _: &RedoAny, window, cx| this.undo_menu(true, window, cx)))
             .child(self.render_header(cx))
             .child(div().flex_1().min_h_0().child(self.messages.clone()))
-            .children(self.render_notices(cx))
             .child(self.composer.clone())
     }
 }
@@ -532,19 +504,6 @@ impl Render for AgentPanel {
 /// The status bar line for `text` while the panel is closed.
 fn say_closed(text: &str) -> SharedString {
     format!("{text} {} to see.", crate::menus::shortcut("l")).into()
-}
-
-/// The driver's lines the message view shows after the rows (stand-in for
-/// U6's notices and question card).
-fn extra_lines(c: &Chat) -> Vec<String> {
-    let mut lines = c.notices().to_vec();
-    if c.waiting_for_files() {
-        lines.push(scriptorium_chat::host::BUSY_WAITING.to_string());
-    }
-    if let Some(q) = c.question() {
-        lines.push(format!("{} Enter: send · {}: not now", q.text(), crate::menus::shortcut(".")));
-    }
-    lines
 }
 
 /// The one adapter from the driver's [`ViewOp`]s to the message view's API.

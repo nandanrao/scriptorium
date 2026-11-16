@@ -143,6 +143,9 @@ pub enum ChatEvent {
     /// The run is over. `say`: the line for the status bar when the panel is
     /// closed (an error, or the writer is needed); `None` for a plain finish.
     Ended { say: Option<String> },
+    /// Another thread (or a new conversation) is open: what was showing for
+    /// the old one (a disclosure, a picker) goes.
+    ThreadChanged,
 }
 
 /// How a run that didn't finish failed, said on the worker.
@@ -506,10 +509,13 @@ pub struct Lister {
     own: OwnRuns,
 }
 
+/// Each thread file with whether it is free to run now.
+pub type Listing = Vec<(scriptorium_chat::store::Listed, Result<(), StoreError>)>;
+
 impl Lister {
     /// Every thread file, each readable one with whether it is free to run
     /// now ([`Chat::probe`]'s answer).
-    pub fn read(&self) -> Result<Vec<(scriptorium_chat::store::Listed, Result<(), StoreError>)>, StoreError> {
+    pub fn read(&self) -> Result<Listing, StoreError> {
         Ok(self
             .store
             .list()?
@@ -796,6 +802,7 @@ impl Chat {
         self.ops.push(ViewOp::Stream(StreamOp::Clear));
         self.show(false);
         self.sync_review(cx);
+        cx.emit(ChatEvent::ThreadChanged);
         cx.notify();
     }
 
