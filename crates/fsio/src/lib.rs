@@ -37,7 +37,17 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// by its owner only (`0600` on Unix; elsewhere as [`write_atomic`]): for
 /// files holding a user's conversations or settings. An existing file keeps
 /// its permissions.
+///
+/// Unlike [`write_atomic`], an existing symlink at `path` is refused rather
+/// than written through: these files are never links by design, so one is
+/// someone pointing the write elsewhere.
 pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is a link; not writing through it", path.display()),
+        ));
+    }
     write_atomic_mode(path, bytes, 0o600)
 }
 
@@ -107,6 +117,49 @@ fn random_u64() -> u64 {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     h.write_u128(nanos);
     h.finish()
+}
+
+/// Where an agent may put a review file it names that isn't attached yet:
+/// `path` (relative to `dir`, the script's folder, or absolute) as a
+/// canonical path inside `dir` naming a `*.review.txt`, or why it can't be
+/// one. No `..`; the folder must exist; and the file (or its folder, when
+/// the file doesn't exist yet), resolved through any links, must still be
+/// inside `dir` (itself canonicalised, so `/var` and `/private/var` on macOS
+/// compare equal). The one rule for every review file a model names: the
+/// chat agent's, and the CLI `tool`'s and MCP's `review_file`. (An existing
+/// file must also read as a review; the caller checks its text.)
+///
+/// Checked, then used: a folder swapped for a link in between would need
+/// someone who can already write inside the script's folder, so that race
+/// isn't guarded against.
+pub fn review_in_folder(dir: &Path, path: &str) -> Result<PathBuf, String> {
+    let refuse = |why: &str| Err(format!("{path}: {why}"));
+    let p = Path::new(path);
+    let joined = if p.is_absolute() { p.to_path_buf() } else { dir.join(p) };
+    let is_review =
+        |p: &Path| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".review.txt"));
+    if !is_review(&joined) {
+        return refuse("a review file's name ends in .review.txt");
+    }
+    if joined.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return refuse("review files go in the script's folder (or a folder inside it)");
+    }
+    let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
+    let at = match joined.canonicalize() {
+        Ok(p) => p,
+        Err(_) => match (joined.parent().map(Path::canonicalize), joined.file_name()) {
+            (Some(Ok(folder)), Some(file)) => folder.join(file),
+            _ => return refuse("that folder doesn't exist"),
+        },
+    };
+    if at.parent().is_none_or(|p| !p.starts_with(&dir)) {
+        return refuse("review files go in the script's folder (or a folder inside it)");
+    }
+    // A link named like a review may point at a file that isn't one.
+    if !is_review(&at) {
+        return refuse("a review file's name ends in .review.txt");
+    }
+    Ok(at)
 }
 
 /// How long a program waits for another to finish with a script's session.
@@ -240,6 +293,69 @@ impl SessionLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_writes_refuse_links() {
+        let dir = std::env::temp_dir().join(format!("scriptorium-private-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("profile");
+        fs::write(&target, "keep\n").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("seen.json")).unwrap();
+        assert!(write_atomic_private(&dir.join("seen.json"), b"{}").is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep\n");
+        assert!(fs::symlink_metadata(dir.join("seen.json")).unwrap().file_type().is_symlink());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_in_folder_confines_to_the_scripts_folder() {
+        let base = std::env::temp_dir().join(format!("scriptorium-confine-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("film/reviews")).unwrap();
+        fs::write(base.join("outside.review.txt"), "SCRIPT REVIEW v1\n").unwrap();
+        let dir = base.join("film");
+        let canon = dir.canonicalize().unwrap();
+        // The folder given as is, or through a link to it (as macOS's /var
+        // is a link to /private/var): both compare canonically.
+        let mut dirs = vec![dir.clone()];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&dir, base.join("alias")).unwrap();
+            dirs.push(base.join("alias"));
+        }
+        for d in &dirs {
+            assert_eq!(review_in_folder(d, "a.review.txt"), Ok(canon.join("a.review.txt")));
+            let abs = d.join("d.review.txt").to_string_lossy().into_owned();
+            assert_eq!(review_in_folder(d, &abs), Ok(canon.join("d.review.txt")));
+        }
+        assert_eq!(review_in_folder(&dir, "reviews/b.REVIEW.txt"), Ok(canon.join("reviews/b.REVIEW.txt")));
+        let abs = canon.join("c.review.txt").to_string_lossy().into_owned();
+        assert_eq!(review_in_folder(&dir, &abs), Ok(canon.join("c.review.txt")));
+        let outside = base.join("outside.review.txt").to_string_lossy().into_owned();
+        for bad in [
+            outside.as_str(),
+            "../outside.review.txt",
+            "reviews/../a.review.txt",
+            "notes.txt",
+            "missing/x.review.txt",
+            "/etc/x.review.txt",
+        ] {
+            assert!(review_in_folder(&dir, bad).is_err(), "{bad}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("outside.review.txt"), dir.join("link.review.txt")).unwrap();
+            std::os::unix::fs::symlink(&base, dir.join("up")).unwrap();
+            std::os::unix::fs::symlink(base.join("film/notes"), dir.join("dangling.review.txt")).unwrap();
+            assert!(review_in_folder(&dir, "link.review.txt").is_err());
+            assert!(review_in_folder(&dir, "up/new.review.txt").is_err());
+            // A dangling link's own name is inside, but create_new won't follow it.
+            assert!(review_in_folder(&dir, "dangling.review.txt").is_ok());
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -4,7 +4,7 @@
 //! The server runs the CLI library in-process: no `scriptorium` binary needed.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde_json::{Value, json};
@@ -262,19 +262,55 @@ fn paths_are_relative_to_the_script_not_the_server() {
         json!({ "script": script, "review_file": "../../nowhere/x.review.txt", "paragraph_id": id,
                 "options": ["x y z"] }),
     );
-    assert!(err && text.contains("doesn't exist") && text.contains("review_file"), "{text}");
+    assert!(err && text.contains("..") && text.contains("review_file"), "{text}");
     assert!(!s.dir.join("nowhere").exists());
-    // Only a .review.txt, and no folder made for anything else.
+    // Not attached: only a review inside the script's folder. Nothing
+    // outside is created, attached or written, and no folder is made.
     std::fs::write(scripts.join("notes.txt"), "keep me\n").unwrap();
-    for bad in ["notes.txt", "made/x.txt"] {
+    std::fs::write(scripts.join("config.review.txt"), "export PATH=/tmp\n").unwrap();
+    std::fs::write(s.dir.join("outside.review.txt"), "SCRIPT REVIEW v1\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&s.dir, scripts.join("up")).unwrap();
+    let abs_new = s.dir.join("new.review.txt").to_string_lossy().into_owned();
+    let abs_old = s.dir.join("outside.review.txt").to_string_lossy().into_owned();
+    let mut bad = vec![
+        "notes.txt",
+        "made/x.txt",
+        "config.review.txt",
+        "../outside.review.txt",
+        "reviews/../../outside.review.txt",
+        "~/scriptorium-mcp-test-never.review.txt",
+        abs_new.as_str(),
+        abs_old.as_str(),
+    ];
+    if cfg!(unix) {
+        bad.extend(["up/new.review.txt", "up/made/new.review.txt"]);
+    }
+    for bad in bad {
         let (text, err) = s.call(
             "suggest_change",
             json!({ "script": script, "review_file": bad, "paragraph_id": id, "options": ["x y z"] }),
         );
-        assert!(err && text.contains(".review.txt"), "{bad}: {text}");
+        assert!(err && text.contains("review"), "{bad}: {text}");
     }
     assert_eq!(std::fs::read_to_string(scripts.join("notes.txt")).unwrap(), "keep me\n");
-    assert!(!scripts.join("made").exists());
+    assert_eq!(std::fs::read_to_string(scripts.join("config.review.txt")).unwrap(), "export PATH=/tmp\n");
+    assert_eq!(std::fs::read_to_string(s.dir.join("outside.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
+    assert!(!scripts.join("made").exists() && !s.dir.join("made").exists() && !s.dir.join("new.review.txt").exists());
+    if let Some(home) = std::env::var_os("HOME") {
+        assert!(!Path::new(&home).join("scriptorium-mcp-test-never.review.txt").exists());
+    }
+    // A review the writer attached can be named wherever it is, whatever
+    // its name.
+    std::fs::write(s.dir.join("shared.txt"), "SCRIPT REVIEW v1\n").unwrap();
+    let shared = s.dir.join("shared.txt").to_string_lossy().into_owned();
+    s.ok("attach_reviews", json!({ "script": script, "files": [shared] }));
+    s.ok(
+        "suggest_change",
+        json!({ "script": script, "review_file": shared, "paragraph_id": id, "options": ["I'll go to town tomorrow."] }),
+    );
+    assert!(std::fs::read_to_string(s.dir.join("shared.txt")).unwrap().contains("go to town"));
+    s.ok("detach_reviews", json!({ "script": script, "files": [shared] }));
 
     // Two reviews attached: the error names the parameter, not a CLI flag.
     let (text, err) = s.call("decide_suggestion", json!({ "script": script, "n": 1, "decision": "accept" }));

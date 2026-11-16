@@ -8,10 +8,12 @@
 //! `files`, `output`) is relative to the script's folder: that is where the
 //! model expects them, whatever folder the server was started in.
 //!
-//! `review_file` must name a `*.review.txt`. One in a folder that doesn't exist yet: the folder is created
-//! when it is inside the script's folder (e.g. `reviews/dialogue.review.txt`);
-//! anywhere else it is an error, so a typo never scatters folders around the
-//! disk.
+//! `review_file` names a review already attached, or else a `*.review.txt`
+//! inside the script's folder (no `..`, no links out; an existing file must
+//! read as a review): see [`review_file_at`] and the CLI's `tool`. A folder
+//! inside the script's folder that doesn't exist yet is created (e.g.
+//! `reviews/dialogue.review.txt`), so a typo never scatters folders around
+//! the disk.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -37,8 +39,8 @@ const SCRIPT: &str = "Absolute path to the screenplay (.fdx). A relative path is
 const REVIEW: &str = "Which attached review to use, by name or file (a path relative to the script's folder). Leave \
                       out when only one review is attached to the script.";
 const REVIEW_FILE: &str = "The review file to add to, ending in .review.txt, e.g. \"dialogue-pass.review.txt\": a path relative to the \
-                           script's folder (or absolute), created and attached if missing. Always give one, named \
-                           for the pass, and keep it for the whole pass.";
+                           script's folder, inside it, created and attached if missing (or an attached review). \
+                           Always give one, named for the pass, and keep it for the whole pass.";
 const FILES: &str = "Review files: paths relative to the script's folder, or absolute.";
 
 /// The shared tools that only read.
@@ -263,29 +265,39 @@ fn in_script_dir(script: &str, path: &str) -> Result<String, String> {
     Ok(script_dir(script)?.join(path).to_string_lossy().into_owned())
 }
 
-/// A `review_file` resolved like [`in_script_dir`], creating its folder if
-/// it's missing and inside the script's folder (see the module docs).
+/// A `review_file` resolved like [`in_script_dir`]. No `..`. A missing
+/// folder is created only for a `*.review.txt` and only inside the script's
+/// folder (checked through any links). Whether the file may be used is the
+/// CLI `tool`'s rule: a review already attached, wherever it is, else a
+/// review in the script's folder ([`scriptorium_fsio::review_in_folder`]).
 fn review_file_at(script: &str, file: &str) -> Result<String, String> {
-    // Checked again by the CLI's `tool`; here too so no folder is made for it.
-    if !file.to_lowercase().ends_with(".review.txt") {
-        return Err(format!("{file}: review_file must name a .review.txt file"));
+    if Path::new(file).components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(format!(
+            "{file}: review_file can't contain `..`; put it in the script's folder (or a folder inside it)"
+        ));
     }
     let at = in_script_dir(script, file)?;
     let parent = match Path::new(&at).parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => return Ok(at),
     };
-    if parent.is_dir() {
+    if parent.is_dir() || !file.to_lowercase().ends_with(".review.txt") {
         return Ok(at);
     }
     let dir = script_dir(script)?;
-    if normalize(&parent).starts_with(&dir) {
+    let dir = dir.canonicalize().unwrap_or(dir);
+    // The nearest folder that exists, resolved through links, must be inside.
+    let inside = parent
+        .ancestors()
+        .find(|a| a.is_dir())
+        .and_then(|a| a.canonicalize().ok())
+        .is_some_and(|a| a.starts_with(&dir));
+    if inside && normalize(&parent).starts_with(&dir) {
         std::fs::create_dir_all(&parent).map_err(|e| format!("can't create the folder {}: {e}", parent.display()))?;
         Ok(at)
     } else {
         Err(format!(
-            "the folder {} doesn't exist; put review_file in the script's folder (or a folder inside it), or in a \
-             folder that exists",
+            "the folder {} doesn't exist; put review_file in the script's folder (or a folder inside it)",
             parent.display()
         ))
     }

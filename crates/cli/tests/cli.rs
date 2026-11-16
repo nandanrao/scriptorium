@@ -257,7 +257,7 @@ fn tool_subcommand() {
     assert_eq!(session(&f.0)["reviews"].as_array().unwrap().len(), 1);
     assert!(f.ok(&["reviews", "film.fdx"]).contains("new.review.txt  0 of 2 decided"));
 
-    // An existing header-less file is attached with its Id pinned.
+    // An existing review without an `Id:` is attached with its Id pinned.
     let args = r#"{"paragraph_id": 3, "options": ["I go to town tomorrow."]}"#;
     let out = f.ok(&["tool", "film.fdx", "suggest_change", args, "--review-file", "notes/b.review.txt"]);
     assert!(out.contains("#2 (e1, ¶3)"), "{out}");
@@ -265,16 +265,44 @@ fn tool_subcommand() {
     assert!(b.contains("\nId: ") && b.contains("BEFORE: Laura smiles.") && b.contains("PARA: 3"), "{b}");
     assert_eq!(session(&f.0)["reviews"].as_array().unwrap().len(), 2);
 
-    // review_file names only a .review.txt (absolute paths stay allowed:
-    // the user or their agent chose it), and arguments not offered are refused.
+    // A review_file that isn't attached must be a *.review.txt inside the
+    // script's folder (no `..`, no links out, no absolute path elsewhere),
+    // and an existing one must read as a review. Arguments not offered are
+    // refused.
+    let outside = f.0.parent().unwrap().join(format!("scriptorium-cli-outside-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("x.review.txt"), "SCRIPT REVIEW v1\n").unwrap();
     std::fs::write(f.path("notes.txt"), "keep me\n").unwrap();
-    let profile = f.path("profile").to_string_lossy().into_owned();
-    for bad in ["notes.txt", profile.as_str()] {
+    std::fs::write(f.path("config.review.txt"), "export PATH=/tmp\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, f.path("out")).unwrap();
+    let abs_new = outside.join("new.review.txt").to_string_lossy().into_owned();
+    let abs_old = outside.join("x.review.txt").to_string_lossy().into_owned();
+    let mut bad = vec!["notes.txt", "config.review.txt", abs_new.as_str(), abs_old.as_str()];
+    let up = format!("../{}/new.review.txt", outside.file_name().unwrap().to_string_lossy());
+    bad.push(&up);
+    if cfg!(unix) {
+        bad.push("out/new.review.txt");
+    }
+    for bad in bad {
         let (ok, text) = f.run(&["tool", "film.fdx", "suggest_change", args, "--review-file", bad]);
-        assert!(!ok && text.contains(".review.txt"), "{bad}: {text}");
+        assert!(!ok && text.contains("review"), "{bad}: {text}");
     }
     assert_eq!(std::fs::read_to_string(f.path("notes.txt")).unwrap(), "keep me\n");
-    assert!(!f.path("profile").exists());
+    assert_eq!(std::fs::read_to_string(f.path("config.review.txt")).unwrap(), "export PATH=/tmp\n");
+    assert!(!outside.join("new.review.txt").exists());
+    assert_eq!(std::fs::read_to_string(outside.join("x.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
+    // A file that isn't a review: refused until the user attaches it.
+    let (ok, text) = f.run(&["tool", "film.fdx", "suggest_change", args, "--review-file", "config.review.txt"]);
+    assert!(!ok && text.contains("isn't a review file") && text.contains("reviews add"), "{text}");
+    // Attached by the user, a review outside the folder can be named.
+    f.ok(&["reviews", "film.fdx", "add", &abs_old]);
+    let other = r#"{"paragraph_id": 0, "options": ["EXT. FARM HOUSE - DAWN"]}"#;
+    let out = f.ok(&["tool", "film.fdx", "suggest_change", other, "--review-file", &abs_old]);
+    assert!(out.contains("#1"), "{out}");
+    assert!(std::fs::read_to_string(outside.join("x.review.txt")).unwrap().contains("DAWN"));
+    f.ok(&["reviews", "film.fdx", "remove", &abs_old]);
+    std::fs::remove_dir_all(&outside).unwrap();
     let (ok, text) = f.run(&["tool", "film.fdx", "read_scene", r#"{"scene": 1, "path": "/etc"}"#]);
     assert!(!ok && text.contains("`path`"), "{text}");
     assert_eq!(session(&f.0)["reviews"].as_array().unwrap().len(), 2);

@@ -20,7 +20,7 @@ use scriptorium_core::outline::annotate;
 use scriptorium_core::text::looks_same;
 use scriptorium_core::{ElementKind, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
-use scriptorium_review::file::{Case, FORMAT_HEADER, append_block, insert_id, parse_typed_lines};
+use scriptorium_review::file::{Case, FORMAT_HEADER, append_block, insert_id, is_review_text, parse_typed_lines};
 use scriptorium_review::matching::{Para, match_entries};
 use scriptorium_review::sessionfile::{self, SessionFile};
 use scriptorium_review::{Decision, Entry, Line, Review, Session, Shape, Status, Unplaced};
@@ -126,6 +126,10 @@ AGENT TOOLS
         list_suggestions, suggest_change, suggest_changes. Arguments are a
         JSON object, e.g. '{\"scene\": 2}'. Suggestions go to --review-file
         (created and attached if missing), else to the only attached review.
+        --review-file names an attached review, or else a *.review.txt inside
+        the script's folder (no .., no links out; an existing file must start
+        with SCRIPT REVIEW). Attach other files with `reviews add` first.
+        Arguments the tool doesn't list are refused.
         The read-only tools (all but suggest_*) never write, and show the
         script as written if the saved session can't be used.
   scriptorium tool [<script.fdx>] --list [--json]
@@ -1204,7 +1208,7 @@ pub fn tool(
     let from_json = args.get("review_file").and_then(Value::as_str).map(str::to_string);
     let review_at = match review_file.map(str::to_string).or(from_json) {
         Some(f) => {
-            let at = review_location(&f)?;
+            let at = review_location(&f).map_err(|e| format!("review_file {e}"))?;
             let map = args.as_object_mut().ok_or("the tool arguments must be a JSON object")?;
             map.insert("review_file".into(), Value::String(sessionfile::stored_path(&o.dir, &at)));
             Some(at)
@@ -1245,15 +1249,21 @@ pub fn tool(
         Target::File(stored) => match scriptorium_tools::find_review(&o.session, stored) {
             Some(r) => (r, true),
             None => {
-                let at = review_at.clone().expect("a file target comes from review_file");
-                // A review file that isn't attached yet is attached or
-                // created only as a `*.review.txt`: never some other file
-                // the agent named. (Its format line isn't required: review
-                // files without one are valid and attach as `reviews add`
-                // attaches them.)
-                let named = at.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-                if !named.ends_with(".review.txt") {
-                    return Err(format!("{stored}: review_file must name a .review.txt file"));
+                // Not attached: the agent may only name a review in the
+                // script's folder (the rule the chat agent follows too), and
+                // an existing file there only if it reads as a review. A
+                // review the user attached is found above, wherever it is.
+                let named = review_at.clone().expect("a file target comes from review_file");
+                let at = scriptorium_fsio::review_in_folder(&o.dir, &named.to_string_lossy())
+                    .map_err(|e| format!("review_file {e}"))?;
+                if at.exists() {
+                    let text = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+                    if !is_review_text(&text) {
+                        return Err(format!(
+                            "review_file {stored} isn't a review file (it doesn't start with {FORMAT_HEADER}); \
+                             attach it with `reviews add` first if it is one"
+                        ));
+                    }
                 }
                 if at.exists() {
                     // Attached the way `reviews add` does (its saved

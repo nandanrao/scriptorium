@@ -73,6 +73,15 @@ GPL-3.0 — read them for ideas, never copy code from them.
    the script); never give the app a code path the CLI lacks. Anything that
    writes the session or a review file holds `scriptorium_fsio::SessionLock`
    (`<script>.scriptorium.lock`) from reading the files to writing them.
+6. **A model never picks an arbitrary file.** Tool calls are checked against
+   the tools offered (`scriptorium_tools::check_args`): an argument that
+   wasn't offered is refused. A review file a model names (the CLI `tool`'s
+   and MCP's `review_file`; the built-in agent isn't offered one) is either
+   a review already attached, wherever it is, or a `*.review.txt` inside the
+   script's folder (`scriptorium_fsio::review_in_folder`: no `..`, no links
+   out) that, if it exists, starts with `SCRIPT REVIEW`. Only the writer's
+   own commands (File › Add review, `reviews add`, MCP `attach_reviews`)
+   attach files from anywhere.
 
 ## How agent sessions work here (required)
 

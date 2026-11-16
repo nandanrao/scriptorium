@@ -321,11 +321,13 @@ fn own_review(store: &mut dyn ReviewStore, file: &mut ThreadFile) -> Result<(usi
     }
     let id = naming::review_id(&file.id);
     let mut found = None;
-    if let Some(stored) = &file.review_path {
-        let at = resolve_path(store.dir(), stored);
-        if store.disk_text(&at).is_some_and(|text| is_ours(&text, &id, file)) {
-            found = Some(at);
-        }
+    // The thread file's path is checked like any other: a thread file
+    // edited (or planted) to name a file elsewhere never re-attaches it.
+    if let Some(stored) = &file.review_path
+        && let Ok(at) = scriptorium_fsio::review_in_folder(store.dir(), stored)
+        && store.disk_text(&at).is_some_and(|text| is_ours(&text, &id, file))
+    {
+        found = Some(at);
     }
     if found.is_none() {
         found = find_by_id(store, &id)?;
@@ -387,11 +389,11 @@ fn find_by_id(store: &dyn ReviewStore, id: &str) -> Result<Option<PathBuf>, Revi
 /// A review file named by path (a [`Target::File`]). The built-in agent is
 /// never offered `review_file` ([`run_call`] refuses it), so this is defence
 /// in depth: the file must be a `*.review.txt` inside the script's folder
-/// once links are resolved, and a file that's there must already be a
-/// review ([`is_review_text`]); anything else is refused, never attached,
-/// created or written.
+/// once links are resolved ([`scriptorium_fsio::review_in_folder`]), and a
+/// file that's there must already be a review ([`is_review_text`]);
+/// anything else is refused, never attached, created or written.
 fn file_review(store: &mut dyn ReviewStore, path: &str) -> Result<(usize, bool), ReviewError> {
-    let at = review_in_folder(store.dir(), path)?;
+    let at = scriptorium_fsio::review_in_folder(store.dir(), path).map_err(ReviewError::Failed)?;
     let stored = stored_path(store.dir(), &at);
     if let Some(r) = scriptorium_tools::find_review(store.session(), &stored) {
         return Ok((recheck(store, r)?, false));
@@ -407,37 +409,6 @@ fn file_review(store: &mut dyn ReviewStore, path: &str) -> Result<(usize, bool),
     let id = scriptorium_fsio::opened::new_review_id(path, &scriptorium_fsio::opened::review_salt(&at));
     let text = insert_id(&format!("{FORMAT_HEADER}\nScript: {}\n\n", store.script_name()), &id);
     Ok((store.create(&at, &text)?, true))
-}
-
-/// `path` (relative to `dir`, the script's folder, canonical) as a canonical
-/// path inside `dir` naming a `*.review.txt`, or why it can't be one: no
-/// `..`, the folder must exist, and the file (or its folder, when the file
-/// doesn't exist yet) resolved through any links must still be in `dir`.
-fn review_in_folder(dir: &Path, path: &str) -> Result<PathBuf, ReviewError> {
-    let refuse = |why: &str| Err(ReviewError::Failed(format!("{path}: {why}")));
-    let joined = resolve_path(dir, path);
-    let name = joined.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-    if !name.ends_with(".review.txt") {
-        return refuse("a review file's name ends in .review.txt");
-    }
-    if joined.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return refuse("review files go in the script's folder");
-    }
-    let at = match joined.canonicalize() {
-        Ok(p) => p,
-        Err(_) => match (joined.parent().map(Path::canonicalize), joined.file_name()) {
-            (Some(Ok(folder)), Some(file)) => folder.join(file),
-            _ => return refuse("that folder doesn't exist"),
-        },
-    };
-    if !at.starts_with(dir) || at.parent().is_none_or(|p| !p.starts_with(dir)) {
-        return refuse("review files go in the script's folder");
-    }
-    // A link named like a review may point at a file that isn't one.
-    if !at.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".review.txt")) {
-        return refuse("a review file's name ends in .review.txt");
-    }
-    Ok(at)
 }
 
 /// Review `r` again if its file changed on disk since it was read: the

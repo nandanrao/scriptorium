@@ -458,6 +458,35 @@ fn a_file_target_must_be_a_review_in_the_scripts_folder() {
     std::fs::remove_dir_all(&base).unwrap();
 }
 
+#[test]
+fn a_threads_review_path_outside_the_folder_is_never_reattached() {
+    let base = std::env::temp_dir().join(format!("scriptorium-review-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("film")).unwrap();
+    let base = base.canonicalize().unwrap();
+    let mut m = Mem::new();
+    m.dir = base.join("film");
+    let outside = base.join("planted.review.txt");
+    let planted = new_review_text("film.fdx", "t0001");
+    std::fs::write(&outside, &planted).unwrap();
+    m.files.insert(outside.clone(), planted.clone());
+    let mut s = OneStore(m);
+    let mut file = thread("Dialogue pass");
+    file.review_id = Some("thread-t0001".into());
+    for stored in ["../planted.review.txt", outside.to_str().unwrap()] {
+        file.review_path = Some(stored.into());
+        let done = call(&mut s, &mut file, suggest("a", 1, "Laura grins."));
+        assert!(!done.result.is_error, "{}", done.result.content);
+        assert_eq!(s.0.files[&outside], planted, "{stored}");
+        assert!(s.0.session.reviews.iter().all(|r| !r.path.contains("planted")), "{stored}");
+        // Made afresh in the script's folder instead.
+        assert_eq!(file.review_path.as_deref(), Some("Dialogue pass.review.txt"));
+        s.0.session = Session::new(vec![]);
+        s.0.files.retain(|p, _| *p == outside);
+    }
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
 /// A script whose files are always busy.
 struct Busy;
 
