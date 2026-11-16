@@ -22,9 +22,14 @@ crates/
   core/   scriptorium-core   document model, outline (scenes/speakers), text, diff
   fdx/    scriptorium-fdx    Final Draft import + byte-preserving export
   review/ scriptorium-review review files, matching suggestions to lines, decisions, saved sessions
+  agent/  scriptorium-agent  the built-in agent minus I/O: threads, wire protocols, reply parser, turn driver, thread files (frozen)
+  tools/  scriptorium-tools  the screenplay tools agents call (catalogue, call, apply) and the system prompt
+  providers/ scriptorium-providers  AI accounts, model and price tables, request building; shell: keyring keys, accounts file, HTTP (features `shell`, `keyring`)
+  chat/   scriptorium-chat   chat threads and the host run loop shared by the CLI and the panel: `<script>.threads/`, locks, shared apply path (feature `shell`; core builds without it)
   fsio/   scriptorium-fsio   atomic writes, the session lock, `opened` (feature): the script opened as the CLI and chat host open it
-  cli/    scriptorium-cli    `scriptorium` binary: headless access to everything
-  app/    scriptorium-app    GPUI desktop app: script view, reviews, editing inside paragraphs
+  cli/    scriptorium-cli    `scriptorium` binary: headless access to everything, including `chat`, `threads`, `accounts` (feature `chat`, default)
+  mcp/    scriptorium-mcp    MCP server for the Claude plugin; depends on cli with default-features = false (no providers, keyring or HTTP)
+  app/    scriptorium-app    GPUI desktop app: script view, reviews, editing inside paragraphs, the agent panel (Ctrl/Cmd+L) and the accounts sheet
 ```
 
 `core` modules: `model` (Script/Paragraph/Span), `doc` (editable Document:

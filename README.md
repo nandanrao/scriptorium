@@ -11,7 +11,7 @@ CLI, so you (or your coding agent) can add what you need. See [AGENTS.md](AGENTS
 agent can do from the command line (suggest changes, accept them, rewrite a
 line, undo), working on the same saved session you see in the app.
 
-**Status:** v0.3.0: reviewing, full editing and multi-line suggestions work; see the roadmap.
+**Status:** v0.4.0: reviewing, full editing, multi-line suggestions and AI chat work; see the roadmap.
 
 ## Try it
 
@@ -76,11 +76,53 @@ Sharing a folder with someone needs the same Scriptorium version on both sides.
 Problems are logged to `~/Library/Logs/Scriptorium/scriptorium.log` (macOS) or
 `~/.local/state/scriptorium/scriptorium.log` (Linux).
 
+## AI chat
+
+Press `Ctrl+L` (`Cmd+L` on a Mac) to open a chat column at the right of the
+window. Ask the agent about your script or ask it to improve something. It
+reads the script, and any change it wants goes in as a **suggestion** on a
+review card for that conversation. Nothing changes in your script until you
+accept it. Each conversation (thread) is saved next to the script, in
+`MY SCRIPT.threads/`.
+
+**Set up.** You bring your own API key from Anthropic, OpenAI or OpenRouter
+(or a custom endpoint, such as a local model server). Open **AI accounts…**
+(the **Scriptorium** menu on a Mac, the File menu elsewhere), add an account, paste the key and
+press Check. The key is kept in your computer's keychain, not in the script or
+in a file. From the command line, the same thing:
+`scriptorium accounts add --provider anthropic --key-stdin`. If you would
+rather not use the keychain, set `SCRIPTORIUM_ANTHROPIC_KEY` (or
+`SCRIPTORIUM_OPENAI_KEY`, `SCRIPTORIUM_OPENROUTER_KEY`) instead.
+
+**Privacy.** Nothing is sent until you press Send. The first time you send on
+a script, a card tells you what goes out: your messages, and the parts of the
+script the agent reads (scenes, search results, sometimes the whole script),
+to your provider's server with your key. Scriptorium has no server of its own.
+The saved conversation next to the script contains excerpts of it, so keep that
+folder as private as the script. If the agent wants to read the whole script,
+it asks first, with an estimated cost. Your provider's own terms apply to
+what it receives.
+
+**For agents (CLI).** Same threads and files as the app; add `--json` for
+one parseable object. Keys come from stdin, never from arguments.
+
+```
+scriptorium accounts [list] [--json]
+scriptorium accounts add [<id>] --provider anthropic|openai|openrouter|custom [--model <m>] [--default] --key-stdin
+scriptorium accounts check <id>                         # cheap request: does the key work?
+scriptorium chat "MY SCRIPT.fdx" --json "tighten MARA's dialogue in scene 12"   # script first; --yes accepts the first-use disclosure; --thread <id> continues
+scriptorium threads "MY SCRIPT.fdx" [show <id> | set-model <id> <account> <model> | remove <id>] [--json]
+```
+
+`scriptorium --help` has every option (exit statuses, `--allow-whole-script`,
+`--record`). Chat suggestions land in the thread's review, so the usual
+`suggestions` and `decide` commands work on them.
+
 ## Roadmap
 
 Being planned; see [docs/PLAN.md](docs/PLAN.md). Direction so far: writing stays
 in Final Draft at first, and Scriptorium starts with **review** and
-**translation**. v0.3.0 is done: full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
+**translation**. v0.4.0 is done: AI chat, on top of v0.3.0's full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
 
 Done so far: the document model, Final Draft import/export with byte-identical
 round trips, an event-sourced editing core (undo/redo, stable paragraph ids), a

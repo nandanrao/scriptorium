@@ -33,12 +33,34 @@ Living notes on direction. Update this when a decision is made or reversed.
   same edit steps as typing. Plan: [plans/block-suggestions.md](plans/block-suggestions.md)
   (built and reviewed, 2026-11-15). No revision marks, no locked scene numbers, `[cut]` marks a
   removal; the script view keeps its dots, the card shows the change.
+- **v0.4.0** (2026-11-15): AI chat. The in-app chat panel (Ctrl/Cmd+L; the agent
+  proposes edits as review suggestions), `scriptorium chat` / `threads` /
+  `accounts`, providers Anthropic, OpenAI and OpenRouter plus custom endpoints.
+  Plan: [plans/chat-panel.md](plans/chat-panel.md).
 - **Built-in agent** (2026-11-14), plan in
-  [plans/built-in-agent.md](plans/built-in-agent.md): step 0 and the agent
-  core are built; next the MCP server and app on the shared code, for a
-  working version used through the plugins. **Paused for a future week:** the
-  `providers` crate, `scriptorium chat` and the in-app chat panel (design
-  first, on gpui-kit, when resumed).
+  [plans/built-in-agent.md](plans/built-in-agent.md). Status (2026-11-15):
+  step 0 and the agent core (step 1) built; MCP server and app on the shared
+  code built (v0.2.0). **Step 2** (`providers` crate, `scriptorium accounts`
+  and `chat`, plus the `chat` crate they share): built for v0.4.0, live
+  smoke test per provider still to do. **Step 3** (agent panel in the app,
+  on gpui-base; threads list, composer, streaming view, tool rows,
+  suggestions into the thread's review, accounts sheet): built for v0.4.0.
+  **Step 4** (cost display, stop, retry, errors as notices, first-use
+  disclosure): built for v0.4.0; prompt tuning for review quality (porting
+  the `script-review` language-review prompt) is not done.
+
+- **Chat panel decisions** (decided 2026-11-15, user may revisit; from
+  [plans/chat-panel.md](plans/chat-panel.md)):
+  - No implicit context: a message carries only what the writer typed, not the
+    scene or suggestion they're looking at. Deferred past v0.4.0.
+  - When the panel opens and the window is narrower than about 1600 px, the
+    sidebar collapses (to a rail with the view list's shortcuts); it comes
+    back when the panel closes or the window widens.
+  - `scriptorium chat` may write the session file while the app is open (to
+    attach a thread's review), as the MCP server does today; the app reloads
+    and merges. The in-app agent never writes the session file.
+  - `keyring` crate, Secret Service on Linux and the Keychain on macOS, with
+    the `SCRIPTORIUM_<PROVIDER>_KEY` env-var fallback.
 
 - **`gpui-pre 0.3.12` lacks some newer Zed GPUI fixes** (checked 2026-11-14,
   no regressions in our UI): combining-mark placement in the text system
@@ -393,6 +415,15 @@ Caveats:
   make diffs noisy. Test with the PURPLE LIST file.
 - Git doesn't give stable paragraph identity (open question 5); cross-language
   alignment still needs it.
+
+## Open items (v0.4.0)
+
+- The OpenAI Responses API is needed for 6.1 Sol and Terra tools (deferred).
+- Live per-provider smoke tests (Anthropic, OpenAI, OpenRouter, a custom
+  endpoint) are still to do; CI and the test suite use recorded cassettes only.
+- `scriptorium-mcp` now depends on `scriptorium-cli` with
+  `default-features = false`, so the MCP server builds without providers,
+  keyring and HTTP.
 
 ## Open questions (to settle in roadmap planning)
 
