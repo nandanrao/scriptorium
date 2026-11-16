@@ -11,7 +11,8 @@ name = "scriptorium-mcp"
 path = "src/main.rs"
 
 [dependencies]
-scriptorium-cli.workspace = true
+# Without `chat`: the MCP server needs no providers, keyring or HTTP.
+scriptorium-cli = { workspace = true, default-features = false }
 scriptorium-fsio = { workspace = true, features = ["opened"] }
 scriptorium-tools.workspace = true
 serde_json.workspace = true

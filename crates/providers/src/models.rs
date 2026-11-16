@@ -1,11 +1,13 @@
 //! What we know about models: what they accept and what they cost.
 //!
-//! Only Anthropic's models are listed for now (see the table for where the
-//! prices come from and when they were checked). OpenAI's and other
-//! endpoints' models are unknown here: their requests send only what the
-//! writer set, and their cost is the provider's own figure (OpenRouter
-//! reports one) or a price the writer adds to the account
-//! ([`crate::Account::prices`]). Keep this table current when models change.
+//! Anthropic's models are listed with prices (see the table for where the
+//! prices come from and when they were checked); OpenAI's current models
+//! with their capabilities only, chiefly whether Chat Completions lets them
+//! call tools. Other models are unknown here: their requests send only what
+//! the writer set. Cost for anything but Anthropic's first-party models is
+//! the provider's own figure (OpenRouter reports one) or a price the writer
+//! adds to the account ([`crate::Account::prices`]). Keep these tables
+//! current when models change.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +24,20 @@ pub struct Capabilities {
     pub adaptive_thinking: bool,
     /// The effort levels it accepts, lowest first; empty if it takes none.
     pub efforts: &'static [Effort],
+    /// Whether it calls tools on the OpenAI Chat Completions protocol.
+    pub chat_tools: ChatTools,
+}
+
+/// Whether a model calls tools on the OpenAI Chat Completions protocol
+/// ([`scriptorium_agent::Protocol::OpenaiChat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatTools {
+    Yes,
+    /// Only with `reasoning_effort: "none"` (OpenAI's models from GPT-5.4
+    /// on): requests to it send that, whatever effort the account sets.
+    WithoutReasoning,
+    /// Never: OpenAI keeps its tool calling to the Responses API.
+    No,
 }
 
 impl Capabilities {
@@ -112,7 +128,13 @@ const NO_XHIGH: &[Effort] = &[Effort::Low, Effort::Medium, Effort::High, Effort:
 const M: u64 = 1_000_000;
 
 const fn current(context_window: u64) -> Capabilities {
-    Capabilities { context_window, max_output: 128_000, adaptive_thinking: true, efforts: ALL }
+    Capabilities {
+        context_window,
+        max_output: 128_000,
+        adaptive_thinking: true,
+        efforts: ALL,
+        chat_tools: ChatTools::Yes,
+    }
 }
 
 /// A price on Anthropic's standard rules: cache reads at 0.1× input, cache
@@ -150,14 +172,26 @@ const ANTHROPIC: &[Model] = &[
     Model { id: "claude-opus-4-7", caps: current(M), price: anthropic(5.0, 25.0) },
     Model {
         id: "claude-opus-4-6",
-        caps: Capabilities { context_window: M, max_output: 128_000, adaptive_thinking: true, efforts: NO_XHIGH },
+        caps: Capabilities {
+            context_window: M,
+            max_output: 128_000,
+            adaptive_thinking: true,
+            efforts: NO_XHIGH,
+            chat_tools: ChatTools::Yes,
+        },
         price: anthropic(5.0, 25.0),
     },
     Model { id: "claude-sonnet-5-5", caps: current(M), price: anthropic_read(2.0, 10.0, 0.10) },
     Model { id: "claude-sonnet-5", caps: current(M), price: anthropic(2.0, 10.0) },
     Model {
         id: "claude-sonnet-4-6",
-        caps: Capabilities { context_window: M, max_output: 128_000, adaptive_thinking: true, efforts: NO_XHIGH },
+        caps: Capabilities {
+            context_window: M,
+            max_output: 128_000,
+            adaptive_thinking: true,
+            efforts: NO_XHIGH,
+            chat_tools: ChatTools::Yes,
+        },
         price: anthropic(3.0, 15.0),
     },
     Model {
@@ -177,13 +211,82 @@ const ANTHROPIC: &[Model] = &[
     },
     Model {
         id: "claude-haiku-4-5",
-        caps: Capabilities { context_window: 200_000, max_output: 64_000, adaptive_thinking: false, efforts: &[] },
+        caps: Capabilities {
+            context_window: 200_000,
+            max_output: 64_000,
+            adaptive_thinking: false,
+            efforts: &[],
+            chat_tools: ChatTools::Yes,
+        },
         price: anthropic(1.0, 5.0),
     },
 ];
 
-/// The table entry for `model`, also found by the name other endpoints
-/// give it: OpenRouter's `anthropic/claude-opus-4.6` or
+/// OpenAI's efforts through Chat Completions (`xhigh` and `max` are sent as
+/// `high`).
+const OPENAI_EFFORTS: &[Effort] = &[Effort::Low, Effort::Medium, Effort::High];
+
+const fn openai(context_window: u64, chat_tools: ChatTools) -> Capabilities {
+    Capabilities { context_window, max_output: 128_000, adaptive_thinking: false, efforts: OPENAI_EFFORTS, chat_tools }
+}
+
+/// OpenAI's current models, checked 2026-11-15. Sources:
+/// - <https://developers.openai.com/api/docs/guides/migrate-to-responses>:
+///   "Starting with GPT-5.4, Chat Completions does not support tool calling
+///   with `reasoning_effort` values other than `none`."
+/// - The per-model pages, `https://developers.openai.com/api/docs/models/<id>`
+///   (context windows, output limits, which efforts each takes): gpt-6-sol
+///   and gpt-6-luna say Chat Completions calls functions only with
+///   `reasoning_effort: "none"`; gpt-6.1-sol and gpt-6.1-terra take no
+///   `none`-free tool calls there ("tool calling requires Responses", also in
+///   <https://developers.openai.com/api/docs/guides/latest-model>).
+/// - GPT-6 Astra: its model page doesn't say; it rejects `none` and the
+///   function-calling and reasoning guides
+///   (<https://developers.openai.com/api/docs/guides/function-calling>)
+///   group it with GPT-6.1 Sol as Responses-only. Treated as [`ChatTools::No`]
+///   and warned about softly.
+const OPENAI: &[(&str, Capabilities)] = {
+    use ChatTools::{No, WithoutReasoning as Off, Yes};
+    &[
+        ("gpt-6-astra", openai(1_050_000, No)),
+        ("gpt-6.1-sol", openai(1_050_000, No)),
+        ("gpt-6.1-terra", openai(1_050_000, No)),
+        ("gpt-6-sol", openai(1_050_000, Off)),
+        ("gpt-6-luna", openai(1_050_000, Off)),
+        ("gpt-5.6", openai(1_050_000, Off)),
+        ("gpt-5.6-sol", openai(1_050_000, Off)),
+        ("gpt-5.6-terra", openai(1_050_000, Off)),
+        ("gpt-5.6-luna", openai(1_050_000, Off)),
+        ("gpt-5.5", openai(1_050_000, Off)),
+        ("gpt-5.4", openai(1_050_000, Off)),
+        ("gpt-5.4-mini", openai(400_000, Off)),
+        ("gpt-5.4-nano", openai(400_000, Off)),
+        ("gpt-5.2", openai(400_000, Yes)),
+    ]
+};
+
+/// A model its provider is shutting down, and what to move to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retired {
+    /// The shutdown date, `YYYY-MM-DD`.
+    pub shutdown: &'static str,
+    /// A current model that calls tools on the same connection.
+    pub replacement: &'static str,
+}
+
+/// OpenAI's models shutting down, from
+/// <https://developers.openai.com/api/docs/deprecations> (checked
+/// 2026-11-15). OpenAI's own suggested replacements for gpt-5 and gpt-5-mini
+/// (GPT-6.1 Sol and Terra) call tools only on the Responses API, so these
+/// name the nearest ones that call tools over Chat Completions.
+const OPENAI_RETIRED: &[(&str, Retired)] = &[
+    ("gpt-5", Retired { shutdown: "2026-12-11", replacement: "gpt-6-sol" }),
+    ("gpt-5-mini", Retired { shutdown: "2026-12-11", replacement: "gpt-5.6-terra" }),
+    ("gpt-5-nano", Retired { shutdown: "2026-12-11", replacement: "gpt-6-luna" }),
+];
+
+/// The Anthropic table entry for `model`, also found by the name other
+/// endpoints give it: OpenRouter's `anthropic/claude-opus-4.6` or
 /// `anthropic/claude-sonnet-4.6:thinking` (vendor prefix and `:variant`
 /// dropped, dots read as dashes).
 fn find(model: &str) -> Option<&'static Model> {
@@ -192,9 +295,36 @@ fn find(model: &str) -> Option<&'static Model> {
     ANTHROPIC.iter().find(|m| m.id == model || m.id == bare)
 }
 
+/// The OpenAI entry for `model`: its id as OpenAI writes it, or a dated
+/// snapshot of it (`gpt-5.2-2025-12-11`). Not OpenRouter's `openai/...`,
+/// which OpenRouter serves its own way.
+fn find_openai(model: &str) -> Option<Capabilities> {
+    let undated = undated(model);
+    OPENAI.iter().find(|(id, _)| *id == model || *id == undated).map(|(_, c)| *c)
+}
+
+/// If OpenAI is shutting `model` down (an id as OpenAI writes it, or a
+/// dated snapshot of it): when, and what to use instead.
+pub fn openai_retired(model: &str) -> Option<Retired> {
+    let undated = undated(model);
+    OPENAI_RETIRED.iter().find(|(id, _)| *id == model || *id == undated).map(|(_, r)| *r)
+}
+
+/// `model` without a `-YYYY-MM-DD` snapshot date.
+fn undated(model: &str) -> &str {
+    let is_date = |d: &[u8]| {
+        d.len() == 11
+            && d.iter().enumerate().all(|(i, b)| if matches!(i, 0 | 5 | 8) { *b == b'-' } else { b.is_ascii_digit() })
+    };
+    match model.len().checked_sub(11) {
+        Some(i) if is_date(&model.as_bytes()[i..]) => &model[..i],
+        _ => model,
+    }
+}
+
 /// What `model` accepts, if it's a model we know.
 pub fn capabilities(model: &str) -> Option<Capabilities> {
-    find(model).map(|m| m.caps)
+    find(model).map(|m| m.caps).or_else(|| find_openai(model))
 }
 
 /// Anthropic's first-party price for `model` (exact id: other endpoints
@@ -224,6 +354,17 @@ mod tests {
         assert_eq!(capabilities("anthropic/claude-sonnet-4.6:thinking").unwrap().efforts, NO_XHIGH);
         assert_eq!(capabilities("anthropic/claude-haiku-4.5").unwrap().max_output, 64_000);
         assert_eq!(capabilities("openai/gpt-5"), None);
+        assert_eq!(capabilities("gpt-5.2-2025-12-11"), capabilities("gpt-5.2"));
+        assert_eq!(capabilities("gpt-5.4-mini").unwrap().chat_tools, ChatTools::WithoutReasoning);
+        assert_eq!(capabilities("gpt-6.1-sol").unwrap().chat_tools, ChatTools::No);
+        assert_eq!(capabilities("openai/gpt-6.1-sol"), None, "OpenRouter's");
+        assert_eq!(capabilities("gpt-5.2-x"), None);
+        assert_eq!(openai_retired("gpt-5-2025-08-07").unwrap().replacement, "gpt-6-sol");
+        assert_eq!(openai_retired("gpt-5-mini").unwrap().shutdown, "2026-12-11");
+        assert_eq!(openai_retired("gpt-5.2"), None);
+        for (_, r) in OPENAI_RETIRED {
+            assert_eq!(capabilities(r.replacement).unwrap().chat_tools, ChatTools::WithoutReasoning);
+        }
         assert_eq!(capabilities("claude-haiku-4-5").unwrap().context_window, 200_000);
         assert_eq!(capabilities("gpt-5"), None);
         let opus_price = anthropic_price("claude-opus-5-5").unwrap();
@@ -235,12 +376,36 @@ mod tests {
     }
 
     #[test]
+    fn openai_presets_call_tools() {
+        for id in crate::presets::OPENAI.models {
+            assert_ne!(capabilities(id).map(|c| c.chat_tools), Some(ChatTools::No), "{id}");
+            assert!(capabilities(id).is_some(), "{id} isn't in the table");
+        }
+    }
+
+    #[test]
+    fn openrouter_presets_find_the_table() {
+        for id in crate::presets::OPENROUTER.models {
+            let m = find(id).unwrap_or_else(|| panic!("{id} has no table entry"));
+            assert!(anthropic_price(m.id).is_some(), "{id}");
+            assert_eq!(find(&format!("{id}:batch")).map(|b| b.id), Some(m.id), "{id}:batch");
+        }
+        assert_eq!(find("anthropic/claude-fable-5.2").unwrap().id, "claude-fable-5-2");
+    }
+
+    #[test]
     fn effort_is_lowered_to_what_the_model_takes() {
         let sonnet46 = capabilities("claude-sonnet-4-6").unwrap();
         assert_eq!(sonnet46.effort(Effort::XHigh), Some(Effort::High));
         assert_eq!(sonnet46.effort(Effort::Max), Some(Effort::Max));
         assert_eq!(capabilities("claude-haiku-4-5").unwrap().effort(Effort::Low), None);
-        let odd = Capabilities { context_window: 1, max_output: 1, adaptive_thinking: false, efforts: &[Effort::High] };
+        let odd = Capabilities {
+            context_window: 1,
+            max_output: 1,
+            adaptive_thinking: false,
+            efforts: &[Effort::High],
+            chat_tools: ChatTools::Yes,
+        };
         assert_eq!(odd.effort(Effort::Low), Some(Effort::High), "nothing below: the lowest accepted");
     }
 

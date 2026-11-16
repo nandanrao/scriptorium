@@ -131,6 +131,10 @@ pub trait Ui {
     /// Not called after each tool call (results so far go to
     /// [`Self::tool_finished`]). The app shows the thread from this.
     fn saved(&mut self, _file: &ThreadFile) {}
+    /// A new thread ([`Which::New`]) was created and first saved as `id`.
+    /// Called once, before anything is sent, so a run that then fails
+    /// ([`HostError`] carries no id) still names its thread.
+    fn thread_created(&mut self, _id: &str) {}
     /// The first-use disclosure ([`disclosure_text`]): send (true) or not.
     /// The CLI: true with `--yes`, else asks on a terminal, else false.
     fn disclose(&mut self, text: &str) -> bool;
@@ -436,6 +440,9 @@ fn run_inner(
             break (existing, resolved, key);
         }
     };
+    for w in resolved.warnings() {
+        ui.notice(&w);
+    }
     let created = existing.is_none();
     let (lock, mut file) = match existing {
         Some((lock, mut file)) => {
@@ -472,6 +479,9 @@ fn run_inner(
         Ok(())
     };
     save(&mut file)?;
+    if created {
+        ui.thread_created(&file.id);
+    }
     ui.saved(&file);
 
     // 4. The loop.

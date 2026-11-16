@@ -30,7 +30,8 @@ const MAX_ERROR_BODY: u64 = 1024 * 1024;
 #[derive(Debug)]
 pub struct Http {
     config: ureq::config::Config,
-    recorder: Option<Mutex<File>>,
+    /// The recording; `None` inside once [`Transport::finish`] closed it.
+    recorder: Option<Mutex<Option<File>>>,
 }
 
 impl Default for Http {
@@ -70,7 +71,7 @@ impl Http {
             .append(true)
             .open(path)
             .map_err(|e| Failure::File(format!("can't record to {}: {e}", path.display())).to_error())?;
-        self.recorder = Some(Mutex::new(file));
+        self.recorder = Some(Mutex::new(Some(file)));
         Ok(self)
     }
 
@@ -152,6 +153,7 @@ impl Http {
             rec.status = None;
         }
         let mut file = recorder.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(file) = file.as_mut() else { return Ok(()) };
         file.write_all(rec.to_text().as_bytes())?;
         file.flush()
     }
@@ -179,6 +181,19 @@ impl Transport for Http {
             return Err(Failure::File(format!("can't write the recording: {e}")).to_error());
         }
         result.map_err(|f| f.to_error())
+    }
+
+    /// Closes the recording, if any: waits for an exchange being written
+    /// to be written whole, syncs the file, and records nothing after. A
+    /// program quitting at once (a second Ctrl+C) calls this first, so the
+    /// cassette never ends in half an exchange.
+    fn finish(&self) -> Result<(), AgentError> {
+        let Some(recorder) = &self.recorder else { return Ok(()) };
+        let file = recorder.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match file.map(|f| f.sync_all()) {
+            Some(Err(e)) => Err(Failure::File(format!("can't write the recording: {e}")).to_error()),
+            _ => Ok(()),
+        }
     }
 }
 

@@ -748,7 +748,8 @@ impl Chat {
 
     /// The accounts, and the disclosure check (the UI shows it before any
     /// run, so no run waits on it).
-    fn ready(&mut self) -> Result<(AccountsFile, PathBuf), SendError> {
+    /// Also the model's warnings (`Resolved::warnings`: no tools here, retiring…).
+    fn ready(&mut self) -> Result<(AccountsFile, PathBuf, Vec<String>), SendError> {
         let accounts = load_accounts()?;
         let (account, model) = self.chosen();
         let resolved = host::settle_account(&accounts, self.thread(), account, model)
@@ -760,14 +761,15 @@ impl Chat {
             self.offered.insert(key.clone(), text.clone());
             return Err(SendError::Disclose { key, text });
         }
-        Ok((accounts, seen_path))
+        let warnings = resolved.warnings();
+        Ok((accounts, seen_path, warnings))
     }
 
     fn start(&mut self, message: Option<String>, cx: &mut Context<Self>) -> Result<(), SendError> {
         if self.run.is_some() {
             return Err(SendError::Running);
         }
-        let (accounts, seen) = self.ready()?;
+        let (accounts, seen, warnings) = self.ready()?;
         let transport = shared_transport().map_err(|e| SendError::Setup(e.to_string()))?;
         let job = Job {
             script: self.script_path.clone(),
@@ -779,7 +781,10 @@ impl Chat {
             seen,
             accepted: self.accepted.values().cloned().collect(),
         };
-        self.launch(job, transport, Keys::system(), cx)
+        self.launch(job, transport, Keys::system(), cx)?;
+        // The model may not use tools here, is retiring…: say so for this run.
+        self.notices.extend(warnings);
+        Ok(())
     }
 
     /// The open thread, or a new one.

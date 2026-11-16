@@ -11,12 +11,15 @@
 //!   [`fsio::SessionLock`] from opening the session to saving it.
 //! - [`structure`]: insert, remove, split, join and retype, as typed functions.
 //! - [`commands`]: each command, returning the text it prints.
+//! - [`chat`]: `chat`, `threads` and `accounts`, the built-in agent.
 
+#[cfg(feature = "chat")]
+pub mod chat;
 pub mod commands;
 /// Moved to the `scriptorium-fsio` crate; re-exported so `scriptorium_cli::fsio`
 /// paths keep working. New code depends on `scriptorium-fsio` directly.
 pub use scriptorium_fsio as fsio;
 pub mod structure;
 
-pub use commands::{Choice, SuggestionRef, USAGE, run, tool, tool_specs};
+pub use commands::{Choice, Failed, SuggestionRef, USAGE, run, run_command, tool, tool_specs};
 pub use fsio::{SessionLock, write_atomic};

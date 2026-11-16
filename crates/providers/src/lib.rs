@@ -34,7 +34,7 @@ pub mod shell;
 pub use account::{Account, AccountsFile, Provider};
 pub use cost::{PriceBook, ThreadCost, reply_cost, thread_cost};
 pub use failure::Failure;
-pub use models::{Capabilities, Price, PriceTier, capabilities};
+pub use models::{Capabilities, ChatTools, Price, PriceTier, Retired, capabilities};
 pub use presets::{PRESETS, Preset};
 pub use resolve::{DEFAULT_MAX_TOKENS, Resolved, build_request, models_request, resolve};
 

@@ -131,14 +131,142 @@ AGENT TOOLS
   scriptorium tool [<script.fdx>] --list [--json]
         the tools with a one-line description each; --json prints their
         full specs (name, description, JSON schema of the arguments)
+CHAT (the built-in agent; the same threads and accounts as the app's panel)
+  As everywhere, the script comes first, then the subcommand.
+  scriptorium chat <script.fdx> [--thread <id> | --new] [--account <id>] [--model <model>]
+                   [--yes] [--allow-whole-script] [--record <cassette>] [--json] (<message> | -)
+  scriptorium chat <script.fdx> --thread <id> --retry [same options]
+        send a message on a new thread (the default) or thread <id>; `-`
+        reads the message from stdin, to its end. --retry sends the thread
+        again as it is (after an error, Ctrl+C or a round limit). --account
+        and --model stick: the thread keeps them for later messages (change
+        them with `threads set-model`). The reply streams to stdout; tool
+        rows, notes and a closing `thread <id> (<title>) · <tokens> · <cost>`
+        line go to stderr. The agent only suggests: its suggestions go to the
+        thread's own review (`<title>.review.txt`, attached to the script).
+        The first send about a script to a provider shows what gets sent and
+        needs --yes (or \"y\" on a terminal); reading a long script whole
+        needs --allow-whole-script (or \"y\"). Ctrl+C stops (the thread is
+        saved at every step); twice quits at once.
+        --json prints one object on stdout however the run ends:
+          {outcome, thread, title, created, account, model, review_path,
+           added, text, usage, usage_text, error, retry}
+        outcome: finished | stopped | error | round_limit | withdrawn |
+        declined | busy; error: {kind, message, retryable} or null; retry:
+        the command to run to try again, or null; usage: {input_tokens,
+        output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+        cost_complete}.
+        Exit status: 0 finished, 1 other failure (error, round_limit,
+        withdrawn), 2 wrong arguments, 3 the thread is busy in another
+        program, 4 disclosure not accepted (nothing sent), 130 stopped.
+        --record writes each request and reply to a cassette (no headers, so
+        no keys), but cassettes DO contain snippets of the script's text, tool
+        results and error bodies: keep them private like the script.
+        With SCRIPTORIUM_REPLAY=<cassette> nothing is sent: replies come from
+        the cassette, and exchanges left over fail the run.
+  scriptorium threads <script.fdx> [--json]
+        the script's threads (<script>.threads/), newest first
+  scriptorium threads <script.fdx> show <id> [--json]
+        the transcript, the thread's review file and its suggestion counts
+  scriptorium threads <script.fdx> set-model <id> <account> <model> [--json]
+  scriptorium threads <script.fdx> remove <id> [--json]
+        (the review file, its decisions and the lock file stay)
+  Running or changing a thread another program is running waits 2 s, then
+  is refused (\"this thread is running in another program\", exit status 3).
+
+ACCOUNTS
+  Accounts live in $XDG_CONFIG_HOME/scriptorium/accounts.json (macOS:
+  Application Support); keys in the OS keyring, else from
+  SCRIPTORIUM_<ACCOUNT>_KEY or SCRIPTORIUM_<PROVIDER>_KEY (a set variable
+  wins). SCRIPTORIUM_KEYRING=off never touches the keyring (key set and key
+  delete then refuse). Keys are read from stdin (one line), never from
+  arguments, and never printed. An account without a model uses its
+  provider's default model (custom endpoints need one).
+  scriptorium accounts [list] [--json]
+  scriptorium accounts add [<id>] --provider anthropic|openai|openrouter|custom
+                    [--base-url <url> --protocol anthropic|openai_chat] [--name <name>]
+                    [--model <model>] [--effort low|medium|high|xhigh|max]
+                    [--max-tokens <n>] [--default] [--key-stdin] [--json]
+  scriptorium accounts set <id> [--name <name>] [--model <model>] [--effort <e>]
+                    [--max-tokens <n>] [--base-url <url>] [--json]
+        change an account (--base-url: custom ones only; '' clears a setting)
+  scriptorium accounts remove <id> [--json]      (also deletes its keyring entry)
+  scriptorium accounts default <id> [--json]
+  scriptorium accounts key set <id>              (the key on stdin)
+  scriptorium accounts key delete <id>           (the account stays)
+  scriptorium accounts key status <id> [--json]
+  scriptorium accounts check <id> [--json]
+        list the account's models: a cheap request (no tokens, no script
+        text) that tells whether the key and address work
+  add, set and check warn about an address that sends the key unencrypted.
 ";
 
 /// Review commands, dispatched by [`run`].
 const REVIEW_COMMANDS: &[&str] =
     &["review", "reviews", "suggestions", "decide", "edit", "undo", "redo", "suggest", "progress", "apply", "tool"];
 
-/// Run the command line `args` (without the program name).
+/// `chat`, `threads` and `accounts` (feature `chat`).
+const CHAT_COMMANDS: &[&str] = &["chat", "threads", "accounts"];
+
+/// Exit statuses besides 0 (success). Every command fails with
+/// [`EXIT_ERROR`]; `chat`, `threads` and `accounts` also use the others.
+pub const EXIT_ERROR: u8 = 1;
+/// Wrong arguments.
+pub const EXIT_USAGE: u8 = 2;
+/// The thread is running in another program.
+pub const EXIT_BUSY: u8 = 3;
+/// The first-use disclosure wasn't accepted: nothing was sent.
+pub const EXIT_DECLINED: u8 = 4;
+/// Stopped with Ctrl+C (the thread is saved).
+pub const EXIT_STOPPED: u8 = 130;
+
+/// A command that failed: the message for stderr, what to print on stdout
+/// anyway (`chat --json` prints its result object whatever happened), and
+/// the exit status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failed {
+    pub message: String,
+    pub stdout: String,
+    pub code: u8,
+}
+
+impl Failed {
+    pub fn new(code: u8, message: impl Into<String>) -> Self {
+        Failed { message: message.into(), stdout: String::new(), code }
+    }
+}
+
+impl From<String> for Failed {
+    fn from(message: String) -> Self {
+        Failed::new(EXIT_ERROR, message)
+    }
+}
+
+/// Run the command line `args` (without the program name). Failures are
+/// their message; [`run_command`] has the rest.
 pub fn run(args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
+    run_command(args, notes).map_err(|f| f.message)
+}
+
+/// [`run`], with what a failure prints on stdout and its exit status.
+pub fn run_command(args: &[&str], notes: &mut Vec<String>) -> Result<String, Failed> {
+    match args {
+        [cmd, rest @ ..] if CHAT_COMMANDS.contains(cmd) => chat_command(cmd, rest, notes),
+        _ => run_other(args, notes).map_err(Failed::from),
+    }
+}
+
+#[cfg(feature = "chat")]
+fn chat_command(cmd: &str, args: &[&str], notes: &mut Vec<String>) -> Result<String, Failed> {
+    crate::chat::command(cmd, args, notes)
+}
+
+#[cfg(not(feature = "chat"))]
+fn chat_command(cmd: &str, _args: &[&str], _notes: &mut Vec<String>) -> Result<String, Failed> {
+    Err(Failed::new(EXIT_USAGE, format!("`{cmd}` isn't in this build (built without the `chat` feature)")))
+}
+
+fn run_other(args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     match args {
         ["info", path] => info(path, notes),
         ["dump", path] => dump(path, false, notes),
