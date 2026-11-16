@@ -54,7 +54,10 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StoreError::Busy => write!(f, "this thread is running in another program; try again when it finishes"),
+            StoreError::Busy => write!(
+                f,
+                "this conversation is running in another Scriptorium window or an AI agent; try again when it finishes"
+            ),
             StoreError::RunningHere => write!(f, "this thread is already running"),
             StoreError::NotFound(id) => write!(f, "no thread {id}"),
             StoreError::BadId(id) => write!(f, "{id:?} is not a thread id"),

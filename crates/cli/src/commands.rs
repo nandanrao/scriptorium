@@ -181,7 +181,8 @@ CHAT (the built-in agent; the same threads and accounts as the app's panel)
   scriptorium threads <script.fdx> remove <id> [--json]
         (the review file, its decisions and the lock file stay)
   Running or changing a thread another program is running waits 2 s, then
-  is refused (\"this thread is running in another program\", exit status 3).
+  is refused (\"this conversation is running in another Scriptorium window
+  or an AI agent\", exit status 3).
 
 ACCOUNTS
   Accounts live in $XDG_CONFIG_HOME/scriptorium/accounts.json (macOS:

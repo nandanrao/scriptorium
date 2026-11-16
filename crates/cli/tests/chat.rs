@@ -276,10 +276,10 @@ fn a_thread_running_elsewhere_is_refused() {
     let start = Instant::now();
     let run = f.run(&["chat", "film.fdx", "--thread", "t0001", "More"], Some(&cassette)).expect_err();
     assert!(start.elapsed() >= Duration::from_secs(2), "waited CLI_WAIT first");
-    assert!(run.stderr().contains("running in another program"), "{}", run.all());
+    assert!(run.stderr().contains("running in another Scriptorium window or an AI agent"), "{}", run.all());
     assert_eq!(run.code(), Some(3), "busy");
     let run = f.run(&["threads", "film.fdx", "remove", "t0001"], None).expect_err();
-    assert!(run.stderr().contains("running in another program"), "{}", run.all());
+    assert!(run.stderr().contains("running in another Scriptorium window or an AI agent"), "{}", run.all());
     assert_eq!(run.code(), Some(3));
     // As JSON: the busy outcome, and the same command to try again.
     let run = f.run(&["chat", "film.fdx", "--thread", "t0001", "--json", "More"], Some(&cassette)).expect_err();
@@ -289,7 +289,7 @@ fn a_thread_running_elsewhere_is_refused() {
     assert_eq!(out["error"]["retryable"], true);
     assert_eq!(out["retry"], "scriptorium chat film.fdx --thread t0001 --json More");
     let run = f.run(&["threads", "film.fdx", "set-model", "t0001", "work", "claude-haiku-4-5"], None).expect_err();
-    assert!(run.stderr().contains("running in another program"), "{}", run.all());
+    assert!(run.stderr().contains("running in another Scriptorium window or an AI agent"), "{}", run.all());
     // Reading isn't refused, and the list says it's busy (text and JSON).
     f.run(&["threads", "film.fdx", "show", "t0001"], None).expect_ok();
     let list = f.run(&["threads", "film.fdx", "--json"], None).expect_ok().json();
