@@ -1675,6 +1675,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_reload_that_lost_changes_stays_up(cx: &mut TestAppContext) {
+        let f = Folder::new("notice-reload");
+        let (_window, view) = workspace(cx, &f);
+        let notice = |cx: &mut TestAppContext| view.read_with(cx, |v, _| v.notice_text().to_string());
+        let summary = crate::disk::Summary { lost: vec!["\"Laura grins.\"".into()], ..Default::default() };
+        view.update(cx, |v, cx| v.say_reloaded_for_test(summary, cx));
+        cx.run_until_parked();
+        let said = notice(cx);
+        assert!(!said.is_empty());
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(notice(cx), said);
+        // News alone passes (after the writer's next action, so it isn't
+        // merged into the line above).
+        view.update(cx, |v, cx| v.set_notice("", cx));
+        let news = crate::disk::Summary { attached: vec!["notes review".into()], ..Default::default() };
+        view.update(cx, |v, cx| v.say_reloaded_for_test(news, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(notice(cx), "");
+    }
+
+    #[gpui::test]
     fn a_warning_notice_stays_until_replaced(cx: &mut TestAppContext) {
         let f = Folder::new("notice-stays");
         let (_window, view) = workspace(cx, &f);

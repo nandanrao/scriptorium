@@ -423,6 +423,20 @@ enum NoticeLife {
     UntilPanelOpen,
 }
 
+/// How long the notice said on opening stays: "Picked up where you left
+/// off" alone is a greeting that passes; anything else (a review taken off,
+/// a fresh start) stays until the writer acts.
+fn startup_life(notices: &[String]) -> NoticeLife {
+    if notices.len() == 1 && notices[0] == RESUMED { NoticeLife::Passing } else { NoticeLife::UntilNext }
+}
+
+/// How long a reload's notice stays: news passes, but changes of the
+/// writer's that couldn't be applied, or notes about review files (one taken
+/// off), stay until the writer acts.
+fn reload_life(summary: &disk::Summary) -> NoticeLife {
+    if summary.lost.is_empty() && summary.notes.is_empty() { NoticeLife::Passing } else { NoticeLife::UntilNext }
+}
+
 /// Said when a rewrite is undone because its line went away.
 const REWRITE_LOST: &str = "The line you were rewriting was removed, so the rewrite was undone.";
 
@@ -476,11 +490,7 @@ impl ScriptView {
             // "Picked up where you left off" alone is only a greeting;
             // anything else said on opening (a review taken off, a fresh
             // start) stays until the writer acts.
-            notice_life: if notices.len() == 1 && notices[0] == RESUMED {
-                NoticeLife::Passing
-            } else {
-                NoticeLife::UntilNext
-            },
+            notice_life: startup_life(&notices),
             notice_timer: None,
             error: "".into(),
             reload_note: None,
@@ -626,7 +636,7 @@ impl ScriptView {
             _ => summary,
         };
         if let Some(text) = summary.render() {
-            self.set_notice_line(text.into(), NoticeLife::Passing);
+            self.set_notice_line(text.into(), reload_life(&summary));
             self.reload_note = Some((Instant::now(), summary));
         }
     }
@@ -1582,6 +1592,13 @@ impl ScriptView {
             let composer = panel.read(cx).composer().clone();
             composer.update(cx, |c, cx| c.stop(cx));
         }
+    }
+
+    /// [`Self::say_reloaded`], for tests of the notice's lifetime.
+    #[cfg(test)]
+    pub(crate) fn say_reloaded_for_test(&mut self, summary: disk::Summary, cx: &mut Context<Self>) {
+        self.say_reloaded(summary);
+        cx.notify();
     }
 
     /// [`Self::say_briefly`], for tests of the notice's lifetime.
@@ -3266,6 +3283,20 @@ mod tests {
         assert_eq!(dot_paras(&session, &d, 0, 0), vec![ParaId(0)]);
         assert_eq!(items_by_para(&session, &d, 0).get(&ParaId(0)), Some(&0));
         assert_eq!(item_text(&session, &d, 0, 0), "Cut: ANA");
+    }
+
+    #[test]
+    fn startup_and_reload_notices_pass_only_when_they_are_news() {
+        assert_eq!(startup_life(&[RESUMED.to_string()]), NoticeLife::Passing);
+        let warned = [RESUMED.to_string(), "notes.review.txt was taken off this script's reviews.".to_string()];
+        assert_eq!(startup_life(&warned), NoticeLife::UntilNext);
+        assert_eq!(startup_life(&["Started fresh: unreadable.".to_string()]), NoticeLife::UntilNext);
+        let news = disk::Summary { attached: vec!["notes".into()], ..Default::default() };
+        assert_eq!(reload_life(&news), NoticeLife::Passing);
+        let lost = disk::Summary { lost: vec!["\"Laura…\"".into()], ..news.clone() };
+        assert_eq!(reload_life(&lost), NoticeLife::UntilNext);
+        let noted = disk::Summary { notes: vec!["x was taken off".into()], ..news };
+        assert_eq!(reload_life(&noted), NoticeLife::UntilNext);
     }
 
     #[test]
