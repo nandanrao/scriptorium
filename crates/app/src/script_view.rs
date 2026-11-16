@@ -2188,7 +2188,7 @@ impl ScriptView {
             .collect();
         div()
             .flex_none()
-            .w(px(44.))
+            .w(px(agent_panel::RAIL_WIDTH))
             .h_full()
             .flex()
             .flex_col()

@@ -78,18 +78,20 @@ S1() {
     ctrl l
     shot 04-review-1700-no-rail
     ctrl l
-    # A narrow window with the panel open: the page shrinks or is cropped,
-    # but never paints over the rail or the columns beside it.
-    resolution 750x1000
+    # The window's minimum width (agent_panel::window_min_size, ~1197 px):
+    # rail, card, panel and the script at 0.6 zoom all fit. Sway tiles the
+    # window to the output, so the clamp itself isn't seen here; the layout
+    # at the minimum is.
+    resolution 1198x1000
     ctrl l
-    check "opens at 750 px" wait_for 10 file_has config/scriptorium/agent-panel open
-    shot 05-review-750-panel
+    check "opens at the minimum width" wait_for 10 file_has config/scriptorium/agent-panel open
+    shot 05-review-min-width
     ctrl 0
-    shot 06-script-750-panel
+    shot 06-script-min-width
     resolution 1500x1000
     visual "02: the sidebar is a rail at 1500 px in the review view; the composer shows its focus ring"
     visual "04: no rail at 1700 px"
-    visual "05/06: at 750 px the page stays inside its column (not over the rail, card or panel)"
+    visual "05/06: at the minimum width every column fits and the page stays inside its own"
     app_quit 0
 }
 

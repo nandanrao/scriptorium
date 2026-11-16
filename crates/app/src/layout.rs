@@ -23,6 +23,19 @@ pub fn zoom() -> f32 {
 pub const VISIBLE_LEFT: f32 = 1.1;
 pub const VISIBLE_RIGHT: f32 = 8.0;
 
+/// The smallest zoom the page ever takes.
+pub const MIN_ZOOM: f32 = 0.5;
+
+/// The smallest zoom the window's minimum width keeps the script at (about
+/// 7 pt Courier: small, but still readable on a laptop screen).
+pub const READABLE_ZOOM: f32 = 0.6;
+
+/// The list width that shows the text column with its marks at zoom `z`
+/// (the inverse of [`zoom_for`]'s column fit).
+pub fn column_width_at(z: f32) -> f32 {
+    (VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0 * z + 16.0
+}
+
 /// The zoom for `available_width`: the whole page up to [`MAX_ZOOM`], but never
 /// smaller than 1.0 while the text column with its marks still fits (the page's
 /// outer margins are cropped instead, see [`page_left`]); below that, the
@@ -31,7 +44,7 @@ pub fn zoom_for(available_width: f32) -> f32 {
     let room = available_width - 16.0;
     let page = room / (8.5 * 96.0);
     let column = room / ((VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0);
-    page.max(column.min(1.0)).clamp(0.5, MAX_ZOOM)
+    page.max(column.min(1.0)).clamp(MIN_ZOOM, MAX_ZOOM)
 }
 
 /// Fit the page to `available_width` (see [`zoom_for`]). Returns true if the zoom changed.
@@ -148,6 +161,11 @@ mod tests {
         // Too narrow even for the column: shrink, but never below 0.5.
         assert!(zoom_for(500.0) < 1.0);
         assert_eq!(zoom_for(100.0), 0.5);
+    }
+
+    #[test]
+    fn column_width_is_zoom_for_inverted() {
+        assert!((zoom_for(column_width_at(READABLE_ZOOM)) - READABLE_ZOOM).abs() < 1e-4);
     }
 
     #[test]

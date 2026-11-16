@@ -83,6 +83,16 @@ pub const WIDTH: f32 = 360.;
 pub const SIDEBAR_WIDTH: f32 = 270.;
 pub const CARD_WIDTH: f32 = 380.;
 
+/// The sidebar's width when it is a rail (letters for the views).
+pub const RAIL_WIDTH: f32 = 44.;
+
+/// The window's minimum size: the widest the columns ever get beside the
+/// script (rail, review card, panel), plus a script column that keeps the
+/// text at [`crate::layout::READABLE_ZOOM`]. About 1197 × 600 px.
+pub fn window_min_size() -> (f32, f32) {
+    (RAIL_WIDTH + CARD_WIDTH + WIDTH + crate::layout::column_width_at(crate::layout::READABLE_ZOOM), 600.)
+}
+
 /// The narrowest the editor gets before the sidebar gives way (the page at
 /// about 70 % zoom; its fit-to-width zoom absorbs the rest).
 pub const EDITOR_MIN: f32 = 600.;
@@ -629,6 +639,15 @@ fn apply_view_ops(m: &mut MessageView, ops: Vec<ViewOp>, cx: &mut Context<Messag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_minimum_window_fits_everything_on_a_small_laptop() {
+        let (w, h) = window_min_size();
+        // A 13" MacBook Air's default window is about 1280 × 800 logical px.
+        assert!(w < 1280. && h <= 800., "{w} × {h}");
+        // At that width every column is showing: the rail, card and panel.
+        assert!(sidebar_collapsed(true, true, w));
+    }
 
     #[test]
     fn sidebar_collapses_when_the_editor_would_be_too_narrow() {

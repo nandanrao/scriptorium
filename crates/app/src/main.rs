@@ -169,6 +169,10 @@ fn main() {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some({
+                        let (w, h) = agent_panel::window_min_size();
+                        size(px(w), px(h))
+                    }),
                     titlebar: Some(TitlebarOptions { title: Some("Scriptorium".into()), ..Default::default() }),
                     ..Default::default()
                 },
