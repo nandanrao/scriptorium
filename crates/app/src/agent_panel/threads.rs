@@ -99,6 +99,16 @@ impl Row {
         }
     }
 
+    /// The first line: the conversation's title, or for a file that can't be
+    /// opened what it is (its file name means nothing to the writer).
+    pub fn title(&self) -> String {
+        match &self.entry.problem {
+            Some(Problem::Unreadable(_)) => "Damaged conversation".into(),
+            Some(Problem::Newer(_)) => "Conversation from a newer Scriptorium".into(),
+            None => self.entry.title.clone(),
+        }
+    }
+
     /// The second line: why it can't be opened, else model · time · cost.
     pub fn detail(&self, now: u64) -> String {
         // Plain words for the writer (the raw reason is for the CLI and logs).
@@ -109,7 +119,9 @@ impl Row {
         }
         let mut parts = Vec::new();
         if !self.entry.model.is_empty() {
-            parts.push(self.entry.model.clone());
+            // The model's name as the footer shows it ("Claude Opus 5.5").
+            let m = &self.entry.model;
+            parts.push(scriptorium_providers::model_name(m).map_or_else(|| m.clone(), String::from));
         }
         parts.push(ago(now, self.entry.updated));
         if let Some(n) = self.entry.suggestions {
@@ -444,8 +456,31 @@ impl ThreadList {
                             .truncate()
                             .font_weight(if current { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
                             .when(greyed, |d| d.text_color(INK_3))
-                            .child(row.entry.title.clone()),
+                            .child(row.title()),
                     )
+                    // Remove first, so the markers line up at the right
+                    // edge (Remove is invisible until the row is hovered).
+                    .when(!asking, |d| {
+                        d.child(
+                            div()
+                                .id(("thread-remove", i))
+                                .flex_none()
+                                .px_1()
+                                .rounded_sm()
+                                .text_size(px(11.5))
+                                .text_color(if highlighted { INK_3 } else { gpui::transparent_black().into() })
+                                .group_hover(group, |s| s.text_color(INK_3))
+                                .hover(|s| s.bg(WARN_SOFT).text_color(WARN))
+                                .child("Remove")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.selected = ix;
+                                    this.confirming = Some(id.clone());
+                                    this.note = None;
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .children(marker.map(|m| {
                         let problem = greyed;
                         div()
@@ -468,28 +503,7 @@ impl ThreadList {
                                 OK
                             })
                             .child(m)
-                    }))
-                    .when(!asking, |d| {
-                        d.child(
-                            div()
-                                .id(("thread-remove", i))
-                                .flex_none()
-                                .px_1()
-                                .rounded_sm()
-                                .text_size(px(11.5))
-                                .text_color(if highlighted { INK_3 } else { gpui::transparent_black().into() })
-                                .group_hover(group, |s| s.text_color(INK_3))
-                                .hover(|s| s.bg(WARN_SOFT).text_color(WARN))
-                                .child("Remove")
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.selected = ix;
-                                    this.confirming = Some(id.clone());
-                                    this.note = None;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
+                    })),
             )
             .child(
                 div()
@@ -754,10 +768,10 @@ mod tests {
         );
         // 10k in and 1k out on Opus: a few cents.
         let d = rows[0].detail(now);
-        assert!(d.starts_with("claude-opus-5-5 · 5 min ago · 3 suggestions · 11.0k tokens · $0."), "{d}");
+        assert!(d.starts_with("Claude Opus 5.5 · 5 min ago · 3 suggestions · 11.0k tokens · $0."), "{d}");
         assert_eq!(rows[0].review.as_deref(), Some("Tighten the dialogue"));
         // No replies and no review yet.
-        assert_eq!(rows[1].detail(now), "claude-opus-5-5 · 1 day ago");
+        assert_eq!(rows[1].detail(now), "Claude Opus 5.5 · 1 day ago");
         assert_eq!(rows[1].review, None);
         let bad = rows_of_one(broken("x", StoreError::Newer { id: "x".into(), message: "v9".into() }));
         assert_eq!(bad[0].detail(now), "Made by a newer Scriptorium. Update Scriptorium to open it.");
