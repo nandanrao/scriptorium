@@ -1661,14 +1661,36 @@ mod tests {
         let f = Folder::new("notice-expires");
         let (_window, view) = workspace(cx, &f);
         let notice = |cx: &mut TestAppContext| view.read_with(cx, |v, _| v.notice_text().to_string());
-        view.update(cx, |v, cx| v.set_notice("Undid the decision on #1.", cx));
+        let wait = |cx: &mut TestAppContext, secs| {
+            cx.executor().advance_clock(Duration::from_secs(secs));
+            cx.run_until_parked();
+        };
+        view.update(cx, |v, cx| v.say_briefly_for_test("Undid the decision on #1.", cx));
         cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_secs(5));
-        cx.run_until_parked();
+        wait(cx, 6);
         assert_eq!(notice(cx), "Undid the decision on #1.");
-        cx.executor().advance_clock(Duration::from_secs(6));
+        // A newer notice starts its own 10 s.
+        view.update(cx, |v, cx| v.say_briefly_for_test("Redid the decision on #1.", cx));
         cx.run_until_parked();
+        wait(cx, 6);
+        assert_eq!(notice(cx), "Redid the decision on #1.");
+        wait(cx, 5);
         assert_eq!(notice(cx), "");
+    }
+
+    #[gpui::test]
+    fn a_warning_notice_stays_until_replaced(cx: &mut TestAppContext) {
+        let f = Folder::new("notice-stays");
+        let (_window, view) = workspace(cx, &f);
+        let notice = |cx: &mut TestAppContext| view.read_with(cx, |v, _| v.notice_text().to_string());
+        view.update(cx, |v, cx| v.say_briefly_for_test("Undid the decision on #1.", cx));
+        cx.run_until_parked();
+        // Replaced by a notice that must stay: the earlier timer doesn't take it.
+        view.update(cx, |v, cx| v.set_notice("notes.review.txt was taken off this script's reviews.", cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        assert_eq!(notice(cx), "notes.review.txt was taken off this script's reviews.");
     }
 
     #[gpui::test]

@@ -122,7 +122,7 @@ impl Opened {
             .collect();
         match &opened.how {
             Resumed::Fresh => {}
-            Resumed::Resumed { .. } => notices.insert(0, "Picked up where you left off.".into()),
+            Resumed::Resumed { .. } => notices.insert(0, RESUMED.into()),
             Resumed::Discarded(why) => {
                 let aside = disk::set_aside_path(&dir, &file_name(&script_path));
                 let kept = match std::fs::rename(&session_path, &aside) {
@@ -360,13 +360,12 @@ pub struct ScriptView {
     numbers: Vec<Vec<usize>>,
     item_by_para: Vec<HashMap<ParaId, usize>>,
     queue_scroll: UniformListScrollHandle,
-    /// The status bar's message: cleared by the writer's next action, or
-    /// after [`NOTICE_FOR`] unless it is sticky.
+    /// The status bar's message: it stays until replaced or the writer's
+    /// next action, except as `notice_life` says.
     notice: SharedString,
-    /// When `notice` was set, and whether it stays until taken back (the
-    /// agent's lines while the panel is closed: they go when seen).
+    /// When `notice` was set, and how long it stays.
     notice_at: Instant,
-    notice_sticky: bool,
+    notice_life: NoticeLife,
     /// Clears the notice set at that time once [`NOTICE_FOR`] is up.
     notice_timer: Option<(Instant, Task<()>)>,
     /// An error the writer may not have seen yet: shown beside `notice`, and
@@ -403,11 +402,27 @@ pub struct ScriptView {
     _subscription: Subscription,
 }
 
-/// Said when a rewrite is undone because its line went away.
 /// How long a passing notice ("Undid the decision on #1.", what a reload
 /// brought in) stays in the status bar.
 const NOTICE_FOR: Duration = Duration::from_secs(10);
 
+/// The notice when a saved session is picked up (it passes, see [`NoticeLife`]).
+const RESUMED: &str = "Picked up where you left off.";
+
+/// How long the status bar's notice stays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeLife {
+    /// Until another notice replaces it or the writer's next action clears
+    /// it: warnings, refusals, instructions.
+    UntilNext,
+    /// Also goes by itself after [`NOTICE_FOR`]: undo/redo results, what a
+    /// reload brought in (reviews attached or detached from outside).
+    Passing,
+    /// The agent's line for a closed panel: goes when the panel opens.
+    UntilPanelOpen,
+}
+
+/// Said when a rewrite is undone because its line went away.
 const REWRITE_LOST: &str = "The line you were rewriting was removed, so the rewrite was undone.";
 
 /// How often the app looks for changes another program made to its files.
@@ -457,7 +472,14 @@ impl ScriptView {
             queue_scroll: UniformListScrollHandle::new(),
             notice: notices.join("  ").into(),
             notice_at: Instant::now(),
-            notice_sticky: false,
+            // "Picked up where you left off" alone is only a greeting;
+            // anything else said on opening (a review taken off, a fresh
+            // start) stays until the writer acts.
+            notice_life: if notices.len() == 1 && notices[0] == RESUMED {
+                NoticeLife::Passing
+            } else {
+                NoticeLife::UntilNext
+            },
             notice_timer: None,
             error: "".into(),
             reload_note: None,
@@ -540,21 +562,28 @@ impl ScriptView {
     /// A message in answer to something the writer did: it replaces any
     /// other (the writer has been looking at the screen).
     fn say(&mut self, text: impl Into<SharedString>) {
-        self.set_notice_line(text.into(), false);
+        self.set_notice_line(text.into(), NoticeLife::UntilNext);
         self.error = "".into();
         self.reload_note = None;
     }
 
-    fn set_notice_line(&mut self, text: SharedString, sticky: bool) {
-        self.notice = text;
-        self.notice_at = Instant::now();
-        self.notice_sticky = sticky;
+    /// Like [`Self::say`], for news that needs no answer (what an undo took
+    /// back): it also goes by itself after [`NOTICE_FOR`].
+    fn say_briefly(&mut self, text: impl Into<SharedString>) {
+        self.say(text);
+        self.notice_life = NoticeLife::Passing;
     }
 
-    /// A passing notice goes after [`NOTICE_FOR`] (errors stay until the
-    /// writer's next action). Called on render, where the notice shows.
+    fn set_notice_line(&mut self, text: SharedString, life: NoticeLife) {
+        self.notice = text;
+        self.notice_at = Instant::now();
+        self.notice_life = life;
+    }
+
+    /// A passing notice goes [`NOTICE_FOR`] after it was set. Called on
+    /// render, where the notice shows.
     fn expire_notice(&mut self, cx: &mut Context<Self>) {
-        if self.notice.is_empty() || self.notice_sticky {
+        if self.notice.is_empty() || self.notice_life != NoticeLife::Passing {
             self.notice_timer = None;
             return;
         }
@@ -562,10 +591,11 @@ impl ScriptView {
         if self.notice_timer.as_ref().is_some_and(|(t, _)| *t == at) {
             return;
         }
+        let left = NOTICE_FOR.saturating_sub(at.elapsed());
         let task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(NOTICE_FOR).await;
+            cx.background_executor().timer(left).await;
             this.update(cx, |this, cx| {
-                if this.notice_at == at && !this.notice_sticky {
+                if this.notice_at == at && this.notice_life == NoticeLife::Passing {
                     this.notice = "".into();
                     this.reload_note = None;
                     cx.notify();
@@ -595,7 +625,7 @@ impl ScriptView {
             _ => summary,
         };
         if let Some(text) = summary.render() {
-            self.set_notice_line(text.into(), false);
+            self.set_notice_line(text.into(), NoticeLife::Passing);
             self.reload_note = Some((Instant::now(), summary));
         }
     }
@@ -1514,8 +1544,8 @@ impl ScriptView {
             }
             AgentPanelEvent::Say(text) => {
                 this.say(text.clone());
-                // It goes when the writer sees it (Unsay), not on a timer.
-                this.notice_sticky = true;
+                // It goes when the writer sees it (opens the panel, or Unsay).
+                this.notice_life = NoticeLife::UntilPanelOpen;
                 cx.notify();
             }
             // Only that line: a newer notice or an error stays.
@@ -1553,6 +1583,13 @@ impl ScriptView {
         }
     }
 
+    /// [`Self::say_briefly`], for tests of the notice's lifetime.
+    #[cfg(test)]
+    pub(crate) fn say_briefly_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.say_briefly(text.to_string());
+        cx.notify();
+    }
+
     /// The status bar's notice line.
     #[cfg(test)]
     pub(crate) fn notice_text(&self) -> SharedString {
@@ -1576,9 +1613,9 @@ impl ScriptView {
         }
         self.agent_open = open;
         // The agent's lines for a closed panel ("…Ctrl+L to see") are seen now.
-        if open && self.notice_sticky {
+        if open && self.notice_life == NoticeLife::UntilPanelOpen {
             self.notice = "".into();
-            self.notice_sticky = false;
+            self.notice_life = NoticeLife::UntilNext;
         }
         crate::settings::set_agent_panel_open(open);
         cx.notify();
@@ -1856,7 +1893,7 @@ impl ScriptView {
     fn undo_redo(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.rewriting = None;
         let said = self.describe_step(redo, cx);
-        self.say(said.unwrap_or_default());
+        self.say_briefly(said.unwrap_or_default());
         // The suggestion the undo will touch: by its decision, else by its paragraph.
         let target = self.review().and_then(|r| {
             let doc = self.doc(cx);
@@ -1874,7 +1911,7 @@ impl ScriptView {
             })
         });
         if !did {
-            self.say(if redo { "Nothing to redo." } else { "Nothing to undo." });
+            self.say_briefly(if redo { "Nothing to redo." } else { "Nothing to undo." });
         }
         // Go to the suggestion the undo touched, as script-review does.
         if let (Some(r), Some(i)) = (self.review(), target) {
@@ -1893,7 +1930,7 @@ impl ScriptView {
             self.rewriting = None;
             // Typing undoes quietly; a decision (maybe the CLI's) is named.
             let said = self.describe_step(redo, cx).filter(|s| s.contains("decision"));
-            self.say(said.unwrap_or_default());
+            self.say_briefly(said.unwrap_or_default());
             self.editor.update(cx, |e, cx| {
                 e.run(cx, |doc, sel| Ok(if redo { doc.redo() } else { doc.undo() }.unwrap_or(sel)))
             });
