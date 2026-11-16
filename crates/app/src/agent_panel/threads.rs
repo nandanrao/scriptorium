@@ -12,14 +12,15 @@
 //! rest is the entity.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyBinding, ScrollHandle, SharedString, Window, actions,
-    deferred, div, prelude::*, px,
+    App, ClickEvent, Context, Entity, FocusHandle, FontWeight, KeyBinding, ScrollHandle, SharedString, Task, Window,
+    actions, deferred, div, prelude::*, px,
 };
 use scriptorium_chat::core::labels::usage_text;
 use scriptorium_chat::core::model::{Entry, Problem, ago, sorted};
+use scriptorium_chat::naming;
 use scriptorium_chat::store::{Listed, StoreError};
 use scriptorium_providers::shell::config;
 use scriptorium_providers::{PriceBook, thread_cost};
@@ -79,6 +80,8 @@ pub enum Hold {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub entry: Entry,
+    /// The name of its review in this script, if it has one there.
+    pub review: Option<String>,
     /// "18.2k tokens · $0.24"; `None` for a conversation with no replies yet.
     pub usage: Option<String>,
     pub hold: Hold,
@@ -109,35 +112,48 @@ impl Row {
             parts.push(self.entry.model.clone());
         }
         parts.push(ago(now, self.entry.updated));
+        if let Some(n) = self.entry.suggestions {
+            parts.push(format!("{n} {}", if n == 1 { "suggestion" } else { "suggestions" }));
+        }
         parts.extend(self.usage.clone());
         parts.join(" · ")
     }
 }
 
-/// The rows for what `list` found, newest first. `probe` says whether a
-/// readable thread is free (the panel passes `Chat::probe`); `book` prices
-/// the cost.
-pub fn build_rows(listed: Vec<Listed>, probe: impl Fn(&str) -> Result<(), StoreError>, book: &PriceBook) -> Vec<Row> {
-    let entries = sorted(listed.iter().map(|l| Entry::from_listed(l, None)).collect());
-    let mut by_id: HashMap<String, Listed> = listed.into_iter().map(|l| (l.id.clone(), l)).collect();
+/// The rows for what the folder held, newest first: each file with whether
+/// it is free to run now (`Chat::probe`'s answer; only asked of readable
+/// ones). `reviews` (id: name, suggestions) is the open script's; `book`
+/// prices the cost.
+pub fn build_rows(
+    listed: Vec<(Listed, Result<(), StoreError>)>,
+    reviews: &HashMap<String, (String, usize)>,
+    book: &PriceBook,
+) -> Vec<Row> {
+    let review_of = |l: &Listed| {
+        let f = l.file.as_ref().ok()?;
+        let id = f.review_id.clone().unwrap_or_else(|| naming::review_id(&f.id));
+        reviews.get(&id).cloned()
+    };
+    let entries = sorted(listed.iter().map(|(l, _)| Entry::from_listed(l, review_of(l).map(|(_, n)| n))).collect());
+    let mut by_id: HashMap<String, (Listed, Result<(), StoreError>)> =
+        listed.into_iter().map(|l| (l.0.id.clone(), l)).collect();
     entries
         .into_iter()
         .map(|entry| {
-            let file = by_id.remove(&entry.id).and_then(|l| l.file.ok());
+            let (listed, held) = by_id.remove(&entry.id).expect("an entry per listing");
+            let review = review_of(&listed).map(|(name, _)| name);
+            let file = listed.file.ok();
             let usage = file.as_ref().filter(|f| f.thread.messages.iter().any(|m| m.usage.is_some())).map(|f| {
                 let cost = thread_cost(book, &f.thread);
                 usage_text(&f.thread.usage(), cost.complete.then_some(cost.usd))
             });
-            let hold = if file.is_none() {
-                Hold::Free
-            } else {
-                match probe(&entry.id) {
-                    Err(StoreError::RunningHere) => Hold::Running,
-                    Err(StoreError::Busy) => Hold::Busy,
-                    _ => Hold::Free,
-                }
+            let hold = match held {
+                _ if file.is_none() => Hold::Free,
+                Err(StoreError::RunningHere) => Hold::Running,
+                Err(StoreError::Busy) => Hold::Busy,
+                _ => Hold::Free,
             };
-            Row { entry, usage, hold }
+            Row { entry, review, usage, hold }
         })
         .collect()
 }
@@ -148,8 +164,23 @@ pub fn step(selected: usize, len: usize, down: bool) -> usize {
     if down { (selected + 1).min(len.saturating_sub(1)) } else { selected.saturating_sub(1) }
 }
 
-const BUSY_NOTE: &str = "Another program is using this conversation right now, so you can read it but not add to it. \
-                         It will work again once the other program is done.";
+/// The title's tooltip.
+struct TitleTip(SharedString);
+
+impl Render for TitleTip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(PAPER)
+            .border_1()
+            .border_color(RULE)
+            .text_size(px(12.))
+            .text_color(INK)
+            .child(self.0.clone())
+    }
+}
 
 pub struct ThreadList {
     /// The title (the list's trigger).
@@ -161,6 +192,11 @@ pub struct ThreadList {
     /// The open thread's title (the panel keeps it current from the chat).
     title: SharedString,
     open: bool,
+    /// The folder is being read (off the UI thread).
+    loading: bool,
+    /// Bumped by each read; a result from an older one is dropped.
+    generation: u64,
+    _load: Option<Task<()>>,
     rows: Vec<Row>,
     /// When the list was read, Unix seconds.
     read_at: u64,
@@ -174,14 +210,16 @@ pub struct ThreadList {
 
 impl ThreadList {
     pub fn new(chat: Entity<Chat>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let list_focus = cx.focus_handle();
         Self {
             focus: cx.focus_handle(),
-            list_focus,
+            list_focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             chat,
             title: "New conversation".into(),
             open: false,
+            loading: false,
+            generation: 0,
+            _load: None,
             rows: Vec::new(),
             read_at: 0,
             selected: 0,
@@ -202,43 +240,71 @@ impl ThreadList {
         self.focus.clone()
     }
 
-    /// Reads the folder and opens the list on the open conversation.
+    /// Opens the list on the open conversation and reads the folder.
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh(cx);
-        let open_id = self.chat.read(cx).thread().map(|t| t.id.clone());
-        self.selected = open_id.and_then(|id| self.rows.iter().position(|r| r.entry.id == id)).map_or(0, |i| i + 1);
         self.confirming = None;
+        self.note = None;
         self.open = true;
+        self.selected = 0;
+        self.load(true, cx);
         let list = self.list_focus.clone();
         window.defer(cx, move |window, cx| list.focus(window, cx));
         cx.notify();
     }
 
-    fn refresh(&mut self, cx: &mut Context<Self>) {
-        let chat = self.chat.read(cx);
-        let store = chat.store();
-        let book = config::default_path()
-            .and_then(|p| config::load(&p).ok())
-            .map_or_else(PriceBook::builtin, |a| PriceBook::from_accounts(&a));
-        match store.list() {
-            Ok(listed) => {
-                self.rows = build_rows(listed, |id| chat.probe(id), &book);
-                self.note = None;
-            }
-            Err(e) => {
-                crate::log::warn(&format!("thread list: {e}"));
-                self.rows.clear();
-                self.note = Some("Couldn't read the conversations for this script.".into());
-            }
-        }
-        self.read_at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    /// Reads the folder and probes the threads on a background thread. The
+    /// script's reviews are read here: they live on the UI thread.
+    fn load(&mut self, select_open: bool, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let generation = self.generation;
+        self.loading = true;
+        let (lister, reviews, open_id) = {
+            let chat = self.chat.read(cx);
+            (chat.lister(), chat.reviews(cx), chat.thread().map(|t| t.id.clone()))
+        };
+        let work = cx.background_spawn(async move {
+            let book = config::default_path()
+                .and_then(|p| config::load(&p).ok())
+                .map_or_else(PriceBook::builtin, |a| PriceBook::from_accounts(&a));
+            lister.read().map(|listed| build_rows(listed, &reviews, &book))
+        });
+        self._load = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.loading = false;
+                match result {
+                    Ok(rows) => this.rows = rows,
+                    Err(e) => {
+                        crate::log::warn(&format!("thread list: {e}"));
+                        this.rows.clear();
+                        this.note = Some("Couldn't read the conversations for this script.".into());
+                    }
+                }
+                this.read_at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                if select_open {
+                    this.selected =
+                        open_id.and_then(|id| this.rows.iter().position(|r| r.entry.id == id)).map_or(0, |i| i + 1);
+                } else {
+                    this.selected = this.selected.min(this.rows.len());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
-    /// Closes the list without moving focus (it was lost or clicked away).
+    /// Closes the list without moving focus (it was clicked away).
     fn close(&mut self, cx: &mut Context<Self>) {
         if self.open {
             self.open = false;
             self.confirming = None;
+            self.generation += 1;
+            self.loading = false;
+            self._load = None;
             cx.notify();
         }
     }
@@ -298,13 +364,9 @@ impl ThreadList {
         if chat.read(cx).thread().is_some_and(|t| t.id == id) {
             return self.dismiss(window, cx);
         }
+        // A busy conversation opens read-only, with its note (the chat does both).
         match chat.update(cx, |c, cx| c.open_thread(&id, cx)) {
-            Ok(()) => {
-                if row.hold == Hold::Busy {
-                    chat.update(cx, |c, cx| c.notice(BUSY_NOTE, cx));
-                }
-                self.dismiss(window, cx);
-            }
+            Ok(()) => self.dismiss(window, cx),
             Err(e) => {
                 self.note = Some(e);
                 cx.notify();
@@ -323,31 +385,15 @@ impl ThreadList {
         window.dispatch_action(Box::new(super::NewThread), cx);
     }
 
-    /// Deletes the conversation's file. Its lock file stays (lock files are
-    /// never deleted), and so does its review file with the suggestions.
+    /// Removes the conversation (`Chat::remove_thread`: its file only).
     fn remove(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.confirming = None;
-        let chat = self.chat.clone();
-        if chat.read(cx).running_thread() == Some(id) {
-            self.note = Some("Stop the agent before removing this conversation.".into());
-            return cx.notify();
-        }
-        let store = chat.read(cx).store();
-        let removed = store.lock(id, Duration::ZERO).and_then(|lock| store.delete(&lock));
-        match removed {
-            Ok(()) | Err(StoreError::NotFound(_)) => {
-                if chat.read(cx).thread().is_some_and(|t| t.id == id) {
-                    // The open conversation is gone: show a fresh one.
-                    chat.update(cx, |c, cx| c.new_thread(cx)).ok();
-                }
-                self.refresh(cx);
-                self.selected = self.selected.min(self.rows.len());
-                self.note = Some("Removed. Any suggestions it made stay in the review.".into());
+        match self.chat.update(cx, |c, cx| c.remove_thread(id, cx)) {
+            Ok(()) => {
+                self.note = Some("Removed.".into());
+                self.load(false, cx);
             }
-            Err(StoreError::Busy) => {
-                self.note = Some("Another program is using this conversation. Try again when it's done.".into());
-            }
-            Err(e) => self.note = Some(format!("Couldn't remove it: {e}")),
+            Err(e) => self.note = Some(e),
         }
         window.focus(&self.list_focus, cx);
         cx.notify();
@@ -360,13 +406,21 @@ impl ThreadList {
         let greyed = row.entry.greyed();
         let id = row.entry.id.clone();
         let marker = row.marker();
+        let group: SharedString = format!("thread-g{i}").into();
+        let highlighted = ix == self.selected;
         let detail = if asking {
-            "Remove this conversation? Suggestions it made stay in the review.".to_string()
+            match &row.review {
+                Some(name) => format!(
+                    "Its suggestions stay in the review '{name}' under Reviews, and you can still decide them there."
+                ),
+                None => "Remove this conversation?".to_string(),
+            }
         } else {
             row.detail(self.read_at)
         };
         div()
             .id(("thread-row", i))
+            .group(group.clone())
             .px_2()
             .py(px(5.))
             .cursor_pointer()
@@ -423,7 +477,8 @@ impl ThreadList {
                                 .px_1()
                                 .rounded_sm()
                                 .text_size(px(11.5))
-                                .text_color(INK_3)
+                                .text_color(if highlighted { INK_3 } else { gpui::transparent_black().into() })
+                                .group_hover(group, |s| s.text_color(INK_3))
                                 .hover(|s| s.bg(WARN_SOFT).text_color(WARN))
                                 .child("Remove")
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -536,7 +591,10 @@ impl ThreadList {
                         .track_scroll(&self.scroll)
                         .child(new_row)
                         .children(rows)
-                        .when(self.rows.is_empty(), |d| {
+                        .when(self.loading && self.rows.is_empty(), |d| {
+                            d.child(div().px_2().py_1().text_color(INK_3).child("Reading…"))
+                        })
+                        .when(!self.loading && self.rows.is_empty(), |d| {
                             d.child(div().px_2().py_1().text_color(INK_3).child("No earlier conversations yet."))
                         }),
                 )
@@ -558,7 +616,7 @@ impl ThreadList {
                         .pt_1()
                         .text_size(px(10.5))
                         .text_color(INK_3)
-                        .child("Up/Down to choose · Enter to open · Delete to remove · Esc to close"),
+                        .child("↑↓ · Enter open · Del remove"),
                 ),
         )
         .with_priority(2)
@@ -591,6 +649,10 @@ impl Render for ThreadList {
                             if this.open { this.dismiss(window, cx) } else { this.open(window, cx) }
                         },
                     ))
+                    .tooltip({
+                        let tip: SharedString = format!("Conversations ({})", crate::menus::shortcut("t")).into();
+                        move |_, cx| cx.new(|_| TitleTip(tip.clone())).into()
+                    })
                     .child(div().min_w_0().truncate().child(self.title.clone()))
                     .child(div().flex_none().text_color(INK_3).child("▾")),
             )
@@ -603,7 +665,6 @@ mod tests {
     use super::*;
     use scriptorium_agent::file::{ThreadFile, VERSION, tools_hash};
     use scriptorium_agent::{Block, Message, Origin, Thread, Usage};
-    use scriptorium_chat::store::ThreadStore;
 
     fn file(id: &str, title: &str, updated: &str) -> ThreadFile {
         let mut thread = Thread::default();
@@ -634,29 +695,33 @@ mod tests {
         f
     }
 
-    fn ok(f: ThreadFile) -> Listed {
-        Listed { id: f.id.clone(), file: Ok(f) }
+    fn ok(f: ThreadFile) -> (Listed, Result<(), StoreError>) {
+        (Listed { id: f.id.clone(), file: Ok(f) }, Ok(()))
     }
 
-    fn free(_: &str) -> Result<(), StoreError> {
-        Ok(())
+    fn held(mut l: (Listed, Result<(), StoreError>), e: StoreError) -> (Listed, Result<(), StoreError>) {
+        l.1 = Err(e);
+        l
+    }
+
+    fn broken(id: &str, e: StoreError) -> (Listed, Result<(), StoreError>) {
+        (Listed { id: id.into(), file: Err(e) }, Ok(()))
+    }
+
+    fn rows(listed: Vec<(Listed, Result<(), StoreError>)>) -> Vec<Row> {
+        build_rows(listed, &HashMap::new(), &PriceBook::builtin())
     }
 
     #[test]
     fn newest_first_with_markers() {
         let listed = vec![
-            ok(file("a", "Old one", "2026-11-10T09:00:00Z")),
-            ok(with_reply(file("b", "Newest", "2026-11-15T09:00:00Z"))),
+            held(ok(file("a", "Old one", "2026-11-10T09:00:00Z")), StoreError::Busy),
+            held(ok(with_reply(file("b", "Newest", "2026-11-15T09:00:00Z"))), StoreError::RunningHere),
             ok(file("c", "Middle", "2026-11-12T09:00:00Z")),
-            Listed { id: "d".into(), file: Err(StoreError::Newer { id: "d".into(), message: "version 9".into() }) },
-            Listed { id: "e".into(), file: Err(StoreError::File { id: "e".into(), message: "not JSON".into() }) },
+            broken("d", StoreError::Newer { id: "d".into(), message: "version 9".into() }),
+            broken("e", StoreError::File { id: "e".into(), message: "not JSON".into() }),
         ];
-        let probe = |id: &str| match id {
-            "a" => Err(StoreError::Busy),
-            "b" => Err(StoreError::RunningHere),
-            _ => Ok(()),
-        };
-        let rows = build_rows(listed, probe, &PriceBook::builtin());
+        let rows = rows(listed);
         let ids: Vec<_> = rows.iter().map(|r| r.entry.id.as_str()).collect();
         assert_eq!(ids, ["b", "c", "a", "e", "d"], "unreadable ones sort last");
         let markers: Vec<_> = rows.iter().map(Row::marker).collect();
@@ -669,32 +734,28 @@ mod tests {
     }
 
     #[test]
-    fn probe_skips_unreadable_files() {
-        let listed =
-            vec![Listed { id: "x".into(), file: Err(StoreError::File { id: "x".into(), message: "bad".into() }) }];
-        let rows = build_rows(listed, |_| panic!("no probe for a file that can't be read"), &PriceBook::builtin());
-        assert_eq!(rows[0].hold, Hold::Free);
-    }
-
-    #[test]
-    fn detail_line_shows_model_time_and_cost() {
+    fn detail_line_shows_model_time_suggestions_and_cost() {
         let now = scriptorium_chat::core::model::parse_rfc3339("2026-11-15T09:05:00Z").unwrap();
+        let mut reviews = HashMap::new();
+        reviews.insert(naming::review_id("b"), ("Tighten the dialogue".to_string(), 3));
         let rows = build_rows(
             vec![ok(with_reply(file("b", "T", "2026-11-15T09:00:00Z"))), ok(file("c", "U", "2026-11-14T09:05:00Z"))],
-            free,
+            &reviews,
             &PriceBook::builtin(),
         );
         // 10k in and 1k out on Opus: a few cents.
         let d = rows[0].detail(now);
-        assert!(d.starts_with("claude-opus-5-5 · 5 min ago · 11.0k tokens · $0."), "{d}");
-        // No replies yet: no usage part.
+        assert!(d.starts_with("claude-opus-5-5 · 5 min ago · 3 suggestions · 11.0k tokens · $0."), "{d}");
+        assert_eq!(rows[0].review.as_deref(), Some("Tighten the dialogue"));
+        // No replies and no review yet.
         assert_eq!(rows[1].detail(now), "claude-opus-5-5 · 1 day ago");
-        let bad = build_rows(
-            vec![Listed { id: "x".into(), file: Err(StoreError::Newer { id: "x".into(), message: "v9".into() }) }],
-            free,
-            &PriceBook::builtin(),
-        );
+        assert_eq!(rows[1].review, None);
+        let bad = rows_of_one(broken("x", StoreError::Newer { id: "x".into(), message: "v9".into() }));
         assert_eq!(bad[0].detail(now), "Made by a newer Scriptorium. Update Scriptorium to open it.");
+    }
+
+    fn rows_of_one(l: (Listed, Result<(), StoreError>)) -> Vec<Row> {
+        rows(vec![l])
     }
 
     #[test]
@@ -704,24 +765,5 @@ mod tests {
         assert_eq!(step(2, 3, true), 2);
         assert_eq!(step(2, 3, false), 1);
         assert_eq!(step(0, 1, true), 0, "just the new-conversation item");
-    }
-
-    #[test]
-    fn removing_deletes_the_file_and_keeps_the_lock_file() {
-        let dir = std::env::temp_dir().join(format!("scriptorium-u7-remove-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let store = ThreadStore::for_script(&dir.join("film.fdx"));
-        let lock = store.create(&mut scriptorium_chat::clock::SequentialIds::default()).unwrap();
-        store.write(&lock, &file(lock.id(), "Gone", "2026-11-15T09:00:00Z")).unwrap();
-        let id = lock.id().to_string();
-        drop(lock);
-        // What `ThreadList::remove` does.
-        let l = store.lock(&id, Duration::ZERO).unwrap();
-        store.delete(&l).unwrap();
-        drop(l);
-        assert!(store.list().unwrap().is_empty());
-        assert!(store.lock_path(&id).unwrap().exists(), "lock files are never deleted");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

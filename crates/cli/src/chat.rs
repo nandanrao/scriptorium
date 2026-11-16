@@ -33,7 +33,7 @@ use scriptorium_chat::labels;
 use scriptorium_chat::lock::CLI_WAIT;
 use scriptorium_chat::model::{Entry, parse_rfc3339};
 use scriptorium_chat::seen::{self, Seen};
-use scriptorium_chat::store::{StoreError, ThreadStore};
+use scriptorium_chat::store::{Listed, StoreError, ThreadStore};
 use scriptorium_chat::{clock, naming};
 use scriptorium_fsio::opened::Opened;
 use scriptorium_providers::shell::{self, CancelToken, Flow, KeyStatus, Keys, REPLAY_ENV, Transport, config};
@@ -784,23 +784,27 @@ fn list_threads(script: &str, json: bool, notes: &mut Vec<String>) -> Result<Str
     let listed = store.list().map_err(store_failed)?;
     let opened = if listed.is_empty() { None } else { open_session(script, notes) };
     let accounts = load_accounts().map(|(_, a)| a).unwrap_or_default();
-    let mut rows: Vec<(Entry, Option<&ThreadFile>, Option<ReviewState>)> = listed
+    // As the panel's list: another program is running the thread (readable
+    // threads only; this program runs none).
+    let busy = |l: &Listed| l.file.is_ok() && store.probe(&l.id) == Err(StoreError::Busy);
+    let mut rows: Vec<(Entry, Option<&ThreadFile>, Option<ReviewState>, bool)> = listed
         .iter()
         .map(|l| {
             let file = l.file.as_ref().ok();
             let state = file.and_then(|f| review_state(script, f, opened.as_ref()));
             let total = state.as_ref().and_then(|s| s.counts.as_ref()).map(|p| p.total);
-            (Entry::from_listed(l, total), file, state)
+            (Entry::from_listed(l, total), file, state, busy(l))
         })
         .collect();
     // Newest first, as the panel lists them.
-    rows.sort_by(|a, b| b.0.updated.cmp(&a.0.updated).then(a.0.id.cmp(&b.0.id)));
+    rows.sort_by(|a, b| b.0.updated.cmp(&a.0.updated).then(b.0.id.cmp(&a.0.id)));
     if json {
         let out: Vec<Value> = rows
             .iter()
-            .map(|(e, f, s)| {
+            .map(|(e, f, s, busy)| {
                 json!({
                     "id": e.id,
+                    "busy": busy,
                     "title": e.title,
                     "account": f.map(|f| f.account.as_str()),
                     "model": f.map(|f| f.model.as_str()),
@@ -820,9 +824,9 @@ fn list_threads(script: &str, json: bool, notes: &mut Vec<String>) -> Result<Str
     let now = now_secs()?;
     let mut out = String::new();
     let width = rows.iter().map(|r| r.0.id.len()).max().unwrap_or(0);
-    for (e, _, _) in &rows {
+    for (e, _, _, busy) in &rows {
         let _ = writeln!(out, "{:<width$}  {}", e.id, e.title);
-        let _ = writeln!(out, "{:<width$}  {}", "", e.detail(now));
+        let _ = writeln!(out, "{:<width$}  {} · busy: {}", "", e.detail(now), if *busy { "yes" } else { "no" });
     }
     Ok(out)
 }
