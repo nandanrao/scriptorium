@@ -12,9 +12,12 @@ be rough. Everything you notice helps, including the small things.
 - **You bring your own API key.** See section 9 for getting one, setting it
   up and the Mac's Keychain questions.
 - **Agents only write into review files in the script's folder.** A review
-  you attached from another folder, or one whose first line isn't
-  `SCRIPT REVIEW v1`, is read-only for the AI: it can read it but adds its
+  you attached from another folder, or one that doesn't start with
+  `SCRIPT REVIEW`, is read-only for the AI: it can read it but adds its
   suggestions to its own review instead.
+- **The AI's "write the script" replaces `MY SCRIPT (scriptorium).fdx`
+  without warning** (it never touches your original or any other `.fdx`),
+  so don't keep editing that file: copy it to another name first.
 
 Please do section 9 on a copy of your script.
 

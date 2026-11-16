@@ -165,8 +165,8 @@ pub fn list() -> Vec<Value> {
         tool(
             "write_script",
             "Write the script with every decision and edit so far to a new .fdx (default: \"<name> (scriptorium).fdx\" \
-             next to the original, replaced if it exists). The original, and any other existing .fdx, is never \
-             overwritten: give a new file name.",
+             next to the original, replaced without warning if it exists, so the writer shouldn't keep editing \
+             that file). The original, and any other existing .fdx, is never overwritten: give a new file name.",
             json!({
                 "script": script,
                 "output": { "type": "string", "description": "Where to write, instead of the default: a .fdx in the script's folder (relative to it, or absolute)." },
@@ -257,25 +257,25 @@ pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
         "write_script" => {
             let script = a.str("script")?;
             let dir = script_dir(&script)?;
-            // The default beside the script, in its folder (the target's,
-            // when the script is a link).
-            let default =
-                commands::output_path(Path::new(&script)).file_name().map(|n| n.to_owned()).unwrap_or_default();
+            // The default output of the script itself (through a link, the
+            // file it points at: its name, in its folder).
+            let canonical = Path::new(&script).canonicalize().map_err(|e| format!("{script}: {e}"))?;
+            let own = dir.join(commands::output_path(&canonical).file_name().unwrap_or_default());
             // Always a .fdx inside the script's folder, never through a link
             // (the default name too: a link planted there is refused).
             let output = match a.opt_str("output") {
                 Some(o) => expand_home(&o),
-                None => dir.join(&default).to_string_lossy().into_owned(),
+                None => own.to_string_lossy().into_owned(),
             };
             let out = scriptorium_fsio::agent_file_in_folder(&dir, &output, ".fdx", Folders::MustExist)?;
             // The model never replaces another screenplay: an existing .fdx
-            // is replaced only if it is this script's own output.
-            if out.exists() && out.file_name() != Some(default.as_os_str()) {
+            // is replaced only if it is exactly this script's own output.
+            if out.exists() && out != own {
                 let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 return Err(format!(
                     "{name} already exists and isn't this script's own output (\"{}\"): give an output with \
                      another name",
-                    default.to_string_lossy()
+                    own.file_name().unwrap_or_default().to_string_lossy()
                 )
                 .into());
             }

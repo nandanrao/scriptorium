@@ -971,8 +971,7 @@ fn progress(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<Stri
         [] => Ok(out),
         ["-o", file] => {
             let own = o.review_path(r);
-            let over_itself =
-                own.canonicalize().ok().is_some_and(|own| Path::new(file).canonicalize().ok() == Some(own));
+            let over_itself = scriptorium_fsio::same_file(&own, Path::new(file));
             if over_itself {
                 // Through the session, which records the file's new text, so
                 // its STATUS lines aren't taken for a change made elsewhere.

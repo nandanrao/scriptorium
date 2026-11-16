@@ -492,7 +492,7 @@ fn a_planted_session_never_aims_writes_at_other_files() {
     let script_before = std::fs::read_to_string(&script).unwrap();
     let outside = s.dir.join("outside.review.txt").to_string_lossy().into_owned();
     for (target, says, remedy) in [
-        ("run.sh", "doesn't start with SCRIPT REVIEW", Some("add `SCRIPT REVIEW v1` as its first line")),
+        ("run.sh", "doesn't start with SCRIPT REVIEW", None),
         ("film.fdx", "a script or one of its own files", None),
         (outside.as_str(), "is outside the script's folder", Some("copy it into that folder")),
     ] {
@@ -569,4 +569,23 @@ fn write_script_follows_a_linked_script_to_its_folder() {
     assert!(!s.dir.join("elsewhere/film (scriptorium).fdx").exists());
     // Written again: its own default output is replaced.
     s.ok("write_script", json!({ "script": link }));
+}
+
+#[cfg(unix)]
+#[test]
+fn write_script_never_replaces_a_file_named_after_the_link() {
+    // film/linked.fdx is a link to other/real.fdx: the script's own output
+    // is other/real (scriptorium).fdx; other/linked (scriptorium).fdx is
+    // someone else's and stays untouched.
+    let mut s = Server::start_in("linkname", "other", "film");
+    let other = s.dir.join("other");
+    std::fs::rename(other.join("film.fdx"), other.join("real.fdx")).unwrap();
+    std::os::unix::fs::symlink(other.join("real.fdx"), s.dir.join("film/linked.fdx")).unwrap();
+    std::fs::write(other.join("linked (scriptorium).fdx"), "keep me").unwrap();
+    let link = s.dir.join("film/linked.fdx").to_string_lossy().into_owned();
+    s.ok("write_script", json!({ "script": link }));
+    assert!(other.join("real (scriptorium).fdx").is_file());
+    let (text, err) = s.call("write_script", json!({ "script": link, "output": "linked (scriptorium).fdx" }));
+    assert!(err && text.contains("another name"), "{text}");
+    assert_eq!(std::fs::read_to_string(other.join("linked (scriptorium).fdx")).unwrap(), "keep me");
 }

@@ -38,7 +38,9 @@ Living notes on direction. Update this when a decision is made or reversed.
   `accounts`, providers Anthropic, OpenAI and OpenRouter plus custom endpoints.
   Agents (the chat agent, the CLI `tool`, MCP) only write into review files
   inside the script's folder that start with `SCRIPT REVIEW`; other attached
-  reviews are read-only for them (AGENTS.md rule 6).
+  reviews are read-only for them (AGENTS.md rule 6). The agent's (MCP)
+  `write_script` replaces `<name> (scriptorium).fdx` without warning and no
+  other existing `.fdx`.
   Plan: [plans/chat-panel.md](plans/chat-panel.md).
 - **Built-in agent** (2026-11-14), plan in
   [plans/built-in-agent.md](plans/built-in-agent.md). Status (2026-11-15):
