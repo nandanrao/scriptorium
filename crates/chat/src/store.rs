@@ -58,7 +58,9 @@ impl fmt::Display for StoreError {
                 f,
                 "this conversation is running in another Scriptorium window or an AI agent; try again when it finishes"
             ),
-            StoreError::RunningHere => write!(f, "this thread is already running"),
+            StoreError::RunningHere => {
+                write!(f, "this conversation is already running here; try again when it finishes")
+            }
             StoreError::NotFound(id) => write!(f, "no thread {id}"),
             StoreError::BadId(id) => write!(f, "{id:?} is not a thread id"),
             StoreError::File { id, message } | StoreError::Newer { id, message } => {
