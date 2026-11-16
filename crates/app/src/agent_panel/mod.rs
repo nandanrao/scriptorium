@@ -173,6 +173,9 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(sec!("l"), ToggleAgentPanel, Some("Workspace")),
         KeyBinding::new("escape", ReturnFocus, panel),
         KeyBinding::new(sec!("."), Stop, panel),
+        // Stop works from the script too (editor, review card) while a run
+        // goes on, with the panel open or closed: ScriptView forwards it.
+        KeyBinding::new(sec!("."), Stop, Some("ScriptView")),
         KeyBinding::new(sec!("n"), NewThread, panel),
         KeyBinding::new("tab", FocusNext, panel),
         KeyBinding::new("shift-tab", FocusPrev, panel),
@@ -211,6 +214,9 @@ pub enum AgentPanelEvent {
     /// A notice for the status bar: how a run ended, or that it needs the
     /// writer, while the panel was closed.
     Say(SharedString),
+    /// Take back a [`Say`](Self::Say) line if the status bar still shows it:
+    /// the question it pointed to is on screen or answered.
+    Unsay(SharedString),
 }
 
 pub struct AgentPanel {
@@ -223,6 +229,9 @@ pub struct AgentPanel {
     composer: Entity<Composer>,
     /// The conversation and its runs (driver.rs).
     chat: Entity<Chat>,
+    /// The status bar shows [`say_asking`] (taken back once the question
+    /// shows in the open panel, or is answered).
+    said_asking: bool,
     _chat: Vec<gpui::Subscription>,
 }
 
@@ -242,6 +251,9 @@ impl AgentPanel {
             let (ops, title) = chat.update(cx, |c, _| (c.take_view_ops(), c.title()));
             this.messages.update(cx, |m, cx| apply_view_ops(m, ops, cx));
             this.threads.update(cx, |t, cx| t.set_title(title, cx));
+            if chat.read(cx).question().is_none() {
+                this.unsay_asking(cx);
+            }
             cx.notify();
         });
         let events = cx.subscribe_in(&chat, window, Self::on_chat_event);
@@ -258,8 +270,11 @@ impl AgentPanel {
                     this.composer.update(cx, |c, cx| c.reset(cx));
                     // Closed with a question showing: the run still waits for it.
                     if this.chat.read(cx).question().is_some() {
-                        cx.emit(AgentPanelEvent::Say(say_asking()));
+                        this.say_asking(cx);
                     }
+                } else if open && !was_open {
+                    // The question card is on screen now.
+                    this.unsay_asking(cx);
                 }
                 was_open = open;
             }));
@@ -272,6 +287,7 @@ impl AgentPanel {
             messages,
             composer,
             chat,
+            said_asking: false,
             _chat: subs,
         }
     }
@@ -329,12 +345,23 @@ impl AgentPanel {
         match e {
             // The composer handles the draft (MessageSaved, Withdrawn).
             ChatEvent::Asking if !self.is_open(cx) => {
-                cx.emit(AgentPanelEvent::Say(say_asking()));
+                self.say_asking(cx);
             }
             ChatEvent::Ended { say: Some(text) } if !self.is_open(cx) => {
                 cx.emit(AgentPanelEvent::Say(say_closed(text)));
             }
             _ => {}
+        }
+    }
+
+    fn say_asking(&mut self, cx: &mut Context<Self>) {
+        self.said_asking = true;
+        cx.emit(AgentPanelEvent::Say(say_asking()));
+    }
+
+    fn unsay_asking(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.said_asking) {
+            cx.emit(AgentPanelEvent::Unsay(say_asking()));
         }
     }
 

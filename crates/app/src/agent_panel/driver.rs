@@ -82,12 +82,6 @@ const CLOSED: &str = "The script was closed.";
 pub const READ_ONLY_NOTE: &str =
     "This conversation is open in another Scriptorium window or an agent. You can read it here.";
 
-/// Shown on opening a thread started with other tools: the host's line
-/// ([`host::TOOLS_CHANGED`]), plus what the writer can do about it.
-pub fn tools_changed_note() -> String {
-    format!("{} {} starts a new conversation.", host::TOOLS_CHANGED, crate::menus::shortcut("n"))
-}
-
 pub const BUSY_THREAD: &str = "This thread is running in another program.";
 
 /// What a run asks the writer, blocking until [`Chat::answer`].
@@ -507,6 +501,13 @@ pub struct Chat {
     own: OwnRuns,
     /// The open conversation is in use by another program: readable, not sendable.
     read_only: bool,
+    /// The open conversation was started with other tools: the composer
+    /// shows a card ([New conversation] [Continue]) until the writer
+    /// answers it or sends.
+    tools_changed: bool,
+    /// The writer was told about the tools on open, so the run's own
+    /// notice ([`host::TOOLS_CHANGED`]) isn't repeated.
+    tools_told: bool,
 }
 
 /// What the thread list reads off the UI thread: the folder and the process's runs.
@@ -557,6 +558,8 @@ impl Chat {
             view_id: None,
             own: OwnRuns::default(),
             read_only: false,
+            tools_changed: false,
+            tools_told: false,
         }
     }
 
@@ -655,7 +658,10 @@ impl Chat {
         if message.trim().is_empty() {
             return Err(SendError::Blank);
         }
-        self.start(Some(message.to_string()), cx)
+        self.start(Some(message.to_string()), cx)?;
+        // Sending is continuing.
+        self.tools_changed = false;
+        Ok(())
     }
 
     /// Sends the thread again as it is ([Retry], [Continue]).
@@ -723,8 +729,9 @@ impl Chat {
             cx.notify();
         } else if changed {
             // Said on open, before the writer decides to continue; the run's
-            // own notice (host::prepare) is then the same line, not repeated.
-            self.notices.push(tools_changed_note());
+            // own notice (host::prepare) isn't repeated.
+            self.tools_changed = true;
+            self.tools_told = true;
             cx.notify();
         }
         Ok(())
@@ -781,6 +788,17 @@ impl Chat {
         Ok(())
     }
 
+    /// Whether to show the older-tools card ([`host::TOOLS_CHANGED`]).
+    pub fn tools_changed(&self) -> bool {
+        self.tools_changed
+    }
+
+    /// The older-tools card's Continue: keep this conversation.
+    pub fn keep_older_tools(&mut self, cx: &mut Context<Self>) {
+        self.tools_changed = false;
+        cx.notify();
+    }
+
     /// A sticky line for the writer: for the composer's (U6's) refusals to
     /// send (blank, still running, no account…). Runs report through their
     /// own notices.
@@ -811,6 +829,8 @@ impl Chat {
         // A choice was for the thread it was made on.
         self.choice = None;
         self.read_only = false;
+        self.tools_changed = false;
+        self.tools_told = false;
         self.ops.push(ViewOp::Stream(StreamOp::Clear));
         self.show(false);
         self.sync_review(cx);
@@ -1018,11 +1038,8 @@ impl Chat {
                     self.added.insert(call.id.clone(), a);
                 }
             }
-            ToUi::Notice(text) => {
-                if !self.notices.iter().any(|n| n.starts_with(&text)) {
-                    self.notices.push(text);
-                }
-            }
+            ToUi::Notice(text) if self.tools_told && text == host::TOOLS_CHANGED => {}
+            ToUi::Notice(text) => self.notices.push(text),
             ToUi::Saved(file) => {
                 let run = self.run.as_mut().expect("not stopped, so running");
                 run.thread_id = Some(file.id.clone());
@@ -1511,7 +1528,7 @@ mod tests {
         chat.update(cx, |c, cx| c.new_thread(cx)).unwrap();
         // Same tools: nothing to say.
         chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
-        assert!(chat.read_with(cx, |c, _| c.notices().is_empty()));
+        assert!(chat.read_with(cx, |c, _| c.notices().is_empty() && !c.tools_changed()));
         // Started with other tools.
         let store = ThreadStore::for_script(&f.0.join("film.fdx"));
         let lock = store.lock(&id, Duration::ZERO).unwrap();
@@ -1520,7 +1537,12 @@ mod tests {
         store.write(&lock, &file).unwrap();
         drop(lock);
         chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
-        assert_eq!(chat.read_with(cx, |c, _| c.notices().to_vec()), [tools_changed_note()]);
+        assert!(chat.read_with(cx, |c, _| c.tools_changed() && c.notices().is_empty()));
+        chat.update(cx, |c, cx| c.keep_older_tools(cx));
+        assert!(!chat.read_with(cx, |c, _| c.tools_changed()));
+        // Shown again on the next open, until a run records the new tools.
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        assert!(chat.read_with(cx, |c, _| c.tools_changed()));
     }
 
     #[gpui::test]

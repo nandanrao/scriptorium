@@ -1471,6 +1471,13 @@ impl ScriptView {
                 this.say(text.clone());
                 cx.notify();
             }
+            // Only that line: a newer notice or an error stays.
+            AgentPanelEvent::Unsay(text) => {
+                if this.notice == *text {
+                    this.notice = "".into();
+                    cx.notify();
+                }
+            }
         });
         self.agent = Some((panel.clone(), sub));
         panel
@@ -1491,6 +1498,15 @@ impl ScriptView {
     }
 
     /// Whether the agent panel is showing.
+    /// Cmd/Ctrl+. outside the panel: stops the agent's run (or answers its
+    /// question "no"), whether or not the panel is showing.
+    fn on_agent_stop(&mut self, _: &crate::agent_panel::Stop, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((panel, _)) = &self.agent {
+            let composer = panel.read(cx).composer().clone();
+            composer.update(cx, |c, cx| c.stop(cx));
+        }
+    }
+
     pub(crate) fn agent_open(&self) -> bool {
         self.agent_open
     }
@@ -2962,6 +2978,7 @@ impl Render for ScriptView {
             .text_color(INK)
             .text_size(px(13.))
             .on_action(cx.listener(Self::apply_to_fdx))
+            .on_action(cx.listener(Self::on_agent_stop))
             .on_action(cx.listener(Self::on_undo_any))
             .on_action(cx.listener(Self::on_redo_any))
             .on_action(cx.listener(Self::on_accept))

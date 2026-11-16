@@ -145,7 +145,9 @@ impl Composer {
     pub fn tab_stops(&self, cx: &App) -> Vec<FocusHandle> {
         let mut stops = vec![self.focus_handle(cx)];
         match self.card(cx) {
-            Card::Question(_) | Card::Disclose(_) => stops.extend([self.focus.no.clone(), self.focus.yes.clone()]),
+            Card::Question(_) | Card::Disclose(_) | Card::ToolsChanged => {
+                stops.extend([self.focus.no.clone(), self.focus.yes.clone()])
+            }
             Card::Setup => stops.push(self.focus.setup.clone()),
             Card::None => {}
         }
@@ -435,6 +437,8 @@ impl Composer {
             Card::Question(q.clone())
         } else if let Some((_, text)) = &self.disclosure {
             Card::Disclose(text.clone())
+        } else if chat.tools_changed() && !chat.is_running() {
+            Card::ToolsChanged
         } else if (matches!(self.chip(cx), Chip::Setup) || self.accounts.is_err()) && !chat.is_running() {
             Card::Setup
         } else {
@@ -502,6 +506,7 @@ impl Composer {
                 let (title, body) = split_title(q.text());
                 (title, body, "Agree and send", "Not now", ACCENT)
             }
+            Card::ToolsChanged => (None, host::TOOLS_CHANGED.to_string(), "Continue", "New conversation", OWN),
             Card::Question(q @ Question::WholeScript(_)) => (
                 None,
                 format!("{} Reading scene by scene costs less, but the agent may miss things.", q.text()),
@@ -581,7 +586,14 @@ impl Composer {
     }
 
     fn card_answer(&mut self, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.chat.read(cx).question().is_some() {
+        if matches!(self.card(cx), Card::ToolsChanged) {
+            crate::log::info(&format!("agent composer: older tools: {}", if yes { "continue" } else { "new" }));
+            if yes {
+                self.chat.update(cx, |c, cx| c.keep_older_tools(cx));
+            } else if let Err(e) = self.chat.update(cx, |c, cx| c.new_thread(cx)) {
+                self.chat.update(cx, |c, cx| c.notice(e, cx));
+            }
+        } else if self.chat.read(cx).question().is_some() {
             crate::log::info(&format!("agent composer: answered {}", if yes { "yes" } else { "no" }));
             self.chat.update(cx, |c, cx| c.answer(yes, cx));
         } else if yes {
@@ -941,6 +953,8 @@ enum Card {
     Question(Question),
     /// The first-use disclosure, before sending.
     Disclose(String),
+    /// The conversation was started with other tools ([`host::TOOLS_CHANGED`]).
+    ToolsChanged,
     /// No AI account yet.
     Setup,
 }
