@@ -70,7 +70,8 @@ actions!(
 const SCRIPT_FONT: &str = "Courier Prime";
 
 /// The key that finishes a line rewrite (Enter splits the line).
-const COMMIT_KEY: &str = if cfg!(target_os = "macos") { "Cmd+Enter" } else { "Ctrl+Enter" };
+/// Written as the menus write shortcuts (`menus::shortcut`): ⌘ on macOS.
+const COMMIT_KEY: &str = if cfg!(target_os = "macos") { "⌘Return" } else { "Ctrl+Enter" };
 
 /// Everything read from disk to open a script.
 pub struct Opened {
@@ -2617,34 +2618,30 @@ impl ScriptView {
                     .into_any_element(),
             );
         }
-        if typing != Typing::ReviewKeys {
-            let into = if typing == Typing::Chat { "the chat" } else { "the script" };
-            body.push(small(format!("Typing goes to {into}. Esc or click here for review keys.")).into_any_element());
+        // While rewriting, the card's own line says what keys do.
+        let into = match typing {
+            Typing::ReviewKeys | Typing::Rewrite => None,
+            Typing::Chat => Some("Typing goes to the chat"),
+            Typing::ChatReadOnly => Some("This conversation is read only"),
+            Typing::Script => Some("Typing goes to the script"),
+        };
+        if let Some(into) = into {
+            body.push(small(format!("{into}. Esc or click here for review keys.")).into_any_element());
         }
     }
 
     /// Where keys typed now go, for the hints on the card and the status bar.
     fn typing(&self, window: &Window, cx: &App) -> Typing {
-        if self.agent_open && self.agent.as_ref().is_some_and(|(p, _)| p.read(cx).has_focus(window, cx)) {
-            Typing::Chat
-        } else if self.review().is_some() && self.focus.is_focused(window) {
-            Typing::ReviewKeys
-        } else {
-            Typing::Script
-        }
+        let panel = self.agent.as_ref().filter(|_| self.agent_open).map(|(p, _)| p.read(cx));
+        let chat = panel.filter(|p| p.has_focus(window, cx)).map(|p| p.chat().read(cx).read_only());
+        typing_for(chat, self.review().is_some() && self.focus.is_focused(window), self.rewriting.is_some())
     }
 
     fn render_status(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let mut left = div().flex().items_center().gap_3();
         let typing = self.typing(window, cx);
-        let script_hints = || {
-            format!(
-                "Enter new line · Tab line type · {} undo · {} write .fdx",
-                crate::menus::shortcut("z"),
-                crate::menus::shortcut("s")
-            )
-        };
-        let hints = match self.view {
+        let hints = status_hints(typing, self.review().is_some(), self.rewriting.is_some());
+        match self.view {
             View::Review(r) => {
                 let p = self.session.progress(self.doc(cx), r);
                 let pct = if p.total == 0 { 1.0 } else { p.done() as f32 / p.total as f32 };
@@ -2658,23 +2655,11 @@ impl ScriptView {
                             .bg(RULE)
                             .child(div().h_full().rounded_sm().bg(ACCENT).w(px(120. * pct))),
                     );
-                match typing {
-                    Typing::ReviewKeys => {
-                        "A accept · 1 2 3 option · Tab next option · R keep mine · E rewrite · J/K next/prev · U undo"
-                            .to_string()
-                    }
-                    Typing::Script => format!("Typing edits the script · Esc review keys · {}", script_hints()),
-                    Typing::Chat => chat_hints("review keys"),
-                }
             }
             View::Script => {
                 left = left.child(format!("Script · {} paragraphs", self.doc(cx).paragraphs().len()));
-                match typing {
-                    Typing::Chat => chat_hints("the script"),
-                    _ => script_hints(),
-                }
             }
-        };
+        }
         let said: Vec<&str> =
             [self.error.as_ref(), self.notice.as_ref()].into_iter().filter(|s| !s.is_empty()).collect();
         let right: SharedString = if said.is_empty() { hints.into() } else { said.join("  \u{b7}  ").into() };
@@ -2723,13 +2708,56 @@ enum Typing {
     Script,
     /// The review card's single keys (A, R, E, J/K…).
     ReviewKeys,
+    /// The editor, rewriting the line under review (E).
+    Rewrite,
     /// The chat panel (its message box, list or buttons).
     Chat,
+    /// The chat panel, on a conversation another program has open: its
+    /// message box is off.
+    ChatReadOnly,
 }
 
-/// The status bar's hints while the chat panel has focus; Esc goes to `back`.
-fn chat_hints(back: &str) -> String {
-    format!("Typing goes to the chat · Esc {back} · {} close the chat", crate::menus::shortcut("l"))
+/// [`Typing`] from where focus is: in the chat panel (`Some(read_only)`), on
+/// the review card, or else in the editor (rewriting or not).
+fn typing_for(chat: Option<bool>, card: bool, rewriting: bool) -> Typing {
+    match chat {
+        Some(true) => Typing::ChatReadOnly,
+        Some(false) => Typing::Chat,
+        None if card => Typing::ReviewKeys,
+        None if rewriting => Typing::Rewrite,
+        None => Typing::Script,
+    }
+}
+
+/// The status bar's hints for `typing`, in a review or the script view.
+/// Esc from the chat goes where `focus_main` sends it: the card in a review,
+/// the editor while rewriting or in the script view.
+fn status_hints(typing: Typing, review: bool, rewriting: bool) -> String {
+    let script = || {
+        format!(
+            "Enter new line · Tab line type · {} undo · {} write .fdx",
+            crate::menus::shortcut("z"),
+            crate::menus::shortcut("s")
+        )
+    };
+    let back = if rewriting {
+        "back to the rewrite"
+    } else if review {
+        "review keys"
+    } else {
+        "the script"
+    };
+    let close = format!("{} close the chat", crate::menus::shortcut("l"));
+    match typing {
+        Typing::ReviewKeys => {
+            "A accept · 1 2 3 option · Tab next option · R keep mine · E rewrite · J/K next/prev · U undo".to_string()
+        }
+        Typing::Rewrite => format!("Rewriting the line · {COMMIT_KEY} saves and moves on · Esc puts it back"),
+        Typing::Script if review => format!("Typing edits the script · Esc review keys · {}", script()),
+        Typing::Script => script(),
+        Typing::Chat => format!("Typing goes to the chat · Esc {back} · {close}"),
+        Typing::ChatReadOnly => format!("This conversation is read only here · Esc {back} · {close}"),
+    }
 }
 
 /// Indexes into `items` in script order (by their numbers).
@@ -2779,7 +2807,7 @@ const REWRITE_HINT: &str = "press E to rewrite this line";
 /// How the app tells the writer to rewrite a block it can't accept.
 /// Ends with [`COMMIT_KEY`].
 const BLOCK_HINT: &str = if cfg!(target_os = "macos") {
-    "edit the lines in the script, then press Cmd+Enter"
+    "edit the lines in the script, then press ⌘Return"
 } else {
     "edit the lines in the script, then press Ctrl+Enter"
 };
@@ -3238,6 +3266,30 @@ mod tests {
         assert_eq!(dot_paras(&session, &d, 0, 0), vec![ParaId(0)]);
         assert_eq!(items_by_para(&session, &d, 0).get(&ParaId(0)), Some(&0));
         assert_eq!(item_text(&session, &d, 0, 0), "Cut: ANA");
+    }
+
+    #[test]
+    fn typing_follows_focus() {
+        assert_eq!(typing_for(Some(false), true, false), Typing::Chat);
+        assert_eq!(typing_for(Some(true), false, false), Typing::ChatReadOnly);
+        assert_eq!(typing_for(None, true, false), Typing::ReviewKeys);
+        assert_eq!(typing_for(None, false, true), Typing::Rewrite);
+        assert_eq!(typing_for(None, false, false), Typing::Script);
+    }
+
+    #[test]
+    fn status_hints_say_what_keys_do_now() {
+        assert!(status_hints(Typing::ReviewKeys, true, false).starts_with("A accept"));
+        let rw = status_hints(Typing::Rewrite, true, true);
+        assert!(rw.contains(COMMIT_KEY) && rw.contains("Esc puts it back"), "{rw}");
+        // Esc from the chat goes where focus_main sends it.
+        assert!(status_hints(Typing::Chat, true, false).contains("Esc review keys"));
+        assert!(status_hints(Typing::Chat, true, true).contains("Esc back to the rewrite"));
+        assert!(status_hints(Typing::Chat, false, false).contains("Esc the script"));
+        let ro = status_hints(Typing::ChatReadOnly, false, false);
+        assert!(!ro.contains("Typing goes to the chat") && ro.contains("read only"), "{ro}");
+        assert!(status_hints(Typing::Script, true, false).starts_with("Typing edits the script"));
+        assert!(status_hints(Typing::Script, false, false).starts_with("Enter new line"));
     }
 
     #[test]

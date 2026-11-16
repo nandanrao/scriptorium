@@ -66,6 +66,14 @@ pub fn bindings() -> Vec<KeyBinding> {
     ]
 }
 
+/// The list's key line. The key Remove takes is labelled "delete" on a Mac
+/// keyboard (it is Backspace elsewhere, and both work).
+const LIST_KEYS: &str = if cfg!(target_os = "macos") {
+    "↑↓ · Return open · Delete remove"
+} else {
+    "↑↓ · Enter open · Del remove"
+};
+
 /// Whether a conversation can be run now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hold {
@@ -623,15 +631,7 @@ impl ThreadList {
                         .text_color(INK_2)
                         .child(n)
                 }))
-                .child(
-                    div()
-                        .flex_none()
-                        .px_2()
-                        .pt_1()
-                        .text_size(px(10.5))
-                        .text_color(INK_3)
-                        .child("↑↓ · Enter open · Del remove"),
-                ),
+                .child(div().flex_none().px_2().pt_1().text_size(px(10.5)).text_color(INK_3).child(LIST_KEYS)),
         )
         .with_priority(2)
     }
