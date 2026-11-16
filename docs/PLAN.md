@@ -46,8 +46,9 @@ Living notes on direction. Update this when a decision is made or reversed.
   on gpui-base; threads list, composer, streaming view, tool rows,
   suggestions into the thread's review, accounts sheet): built for v0.4.0.
   **Step 4** (cost display, stop, retry, errors as notices, first-use
-  disclosure): built for v0.4.0; prompt tuning for review quality (porting
-  the `script-review` language-review prompt) is not done.
+  disclosure): built for v0.4.0. The `script-review` language-review prompt
+  is ported into `tools::prompt::SYSTEM`; tuning it against live models for
+  review quality is still open.
 
 - **Chat panel decisions** (decided 2026-11-15, user may revisit; from
   [plans/chat-panel.md](plans/chat-panel.md)):

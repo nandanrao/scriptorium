@@ -83,7 +83,8 @@ window. Ask the agent about your script or ask it to improve something. It
 reads the script, and any change it wants goes in as a **suggestion** on a
 review card for that conversation. Nothing changes in your script until you
 accept it. Each conversation (thread) is saved next to the script, in
-`MY SCRIPT.threads/`.
+`MY SCRIPT.threads/`. `Ctrl+T` (`Cmd+T`) lists the conversations and
+`Ctrl+N` (`Cmd+N`) starts a new one while the chat column has focus.
 
 **Set up.** You bring your own API key from Anthropic, OpenAI or OpenRouter
 (or a custom endpoint, such as a local model server). Open **AI accounts…**
@@ -97,7 +98,10 @@ rather not use the keychain, set `SCRIPTORIUM_ANTHROPIC_KEY` (or
 **Privacy.** Nothing is sent until you press Send. The first time you send on
 a script, a card tells you what goes out: your messages, and the parts of the
 script the agent reads (scenes, search results, sometimes the whole script),
-to your provider's server with your key. Scriptorium has no server of its own.
+to your provider's server with your key. The review files attached to the
+script can go too, including collaborators' notes, and the agent writes its
+suggestions to a review file next to the script. Scriptorium has no server of
+its own.
 The saved conversation next to the script contains excerpts of it, so keep that
 folder as private as the script. If the agent wants to read the whole script,
 it asks first, with an estimated cost. Your provider's own terms apply to

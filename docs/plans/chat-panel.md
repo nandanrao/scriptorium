@@ -281,7 +281,8 @@ From "Manage accounts…" or Scriptorium › AI accounts….
 - Remove (deletes the keyring entry), edit.
 - No keyring available: the sheet says so and names the env var. Never a
   plain-text key file.
-- CLI: `scriptorium accounts list|add|remove|check|default` on the same file
+- CLI: `scriptorium accounts list|add|set|remove|check|default` and
+  `scriptorium accounts key set|delete|status <id>` on the same file
   (`$XDG_CONFIG_HOME/scriptorium/accounts.json`; macOS Application Support).
   Keys from stdin (`--key-stdin`), never an argument.
 
@@ -371,7 +372,7 @@ start answers stranded calls as cancelled.
 
 **Thread commands**: `scriptorium threads <script>` (list), `threads show
 <id>` (transcript, the review path, its suggestion counts: pending / decided),
-`threads delete <id>`, `threads set-model <id> <account> <model>`, `--json`
+`threads remove <id>`, `threads set-model <id> <account> <model>`, `--json`
 on each.
 
 ### Applying suggestions: one path, two stores
@@ -608,7 +609,7 @@ design-heavy (strongest model to build and review), **M** = mechanical
 | C3a | chat store + lock: thread files, ids, `clock`, per-thread lock, own-run tracking, `review_path` and whole-script fields in `ThreadFile` | `crates/chat/src/{store,clock}.rs`, `crates/agent/src/file.rs` (additive fields) | C1 | D |
 | C3b | chat core: `labels`, `naming`, `model` (pure) | `crates/chat/src/core/` | C1 | M |
 | C3c | chat exec + loop: `ReviewStore`, `apply_append`, `FileStore`, blocking `host`, `seen` | `crates/chat/src/{exec,host,seen}.rs` | C2, C3a, C3b | D |
-| C4 | CLI: `chat`, `threads [show/delete/set-model]`, `accounts`; cassette tests | `crates/cli/src/commands.rs`, `crates/cli/tests` | C3c | M |
+| C4 | CLI: `chat`, `threads [show/remove/set-model]`, `accounts`; cassette tests | `crates/cli/src/commands.rs`, `crates/cli/tests` | C3c | M |
 | U0 | spike: gpui-base in the app, Textarea + streaming TextView, Select/Sheet vs Root, `AgentComposer > Input` precedence, click-to-focus with a virtual-pointer helper | throwaway branch; the helper kept in `crates/app/tests/tools/` | C1 | D |
 | U1 | **the only task touching** `main.rs`, `workspace.rs`, `script_view.rs`; plus `menus.rs` (panel + AI accounts items): toggle, empty fixed column, persistence, sidebar rail, the four `pub(crate)` methods, Linux-menu focus memory, keymap tests | those files, `agent_panel/mod.rs` | U0, v0.3.0 merged | D |
 | U2 | view model | `agent_panel/view_model.rs` | C3b | M |

@@ -294,12 +294,15 @@ Copy the key when it is shown (you can't see it again). Keep it private.
    **may ask again after every update**, and sometimes more than once in a
    row. Choose **Always Allow** each time. If you press "Deny", the key
    isn't saved: open AI accounts and paste it again.
+4. The command-line tool and the app are signed separately, so macOS sees
+   them as two programs. When one reads a key the other saved, the Keychain
+   may ask again; choose **Always Allow** there too.
 
 **If the Keychain keeps misbehaving (fallback).** Quit Scriptorium. In
 Terminal run `launchctl setenv SCRIPTORIUM_ANTHROPIC_KEY ` followed by your key
 (use `SCRIPTORIUM_OPENAI_KEY` or `SCRIPTORIUM_OPENROUTER_KEY` for the others),
-then open Scriptorium again. Scriptorium reads that variable when no Keychain
-key is found. This lasts until you restart the Mac; to clear it sooner run
+then open Scriptorium again. Scriptorium checks that variable first, before
+the Keychain, so while it is set it is the key used. This lasts until you restart the Mac; to clear it sooner run
 `launchctl unsetenv SCRIPTORIUM_ANTHROPIC_KEY`. Anyone who can read your
 Terminal history can see the key, so use the Keychain when you can.
 
@@ -309,12 +312,15 @@ Terminal history can see the key, so use the Keychain when you can.
       composer have the cursor? `Cmd+L` again closes it; your draft stays.
 - [ ] Type a question ("Who is the most active character in scene 3?")
       and press Return. A card appears first explaining what is sent to the
-      provider. Read it, then press **Send**. (**Not now** keeps your draft.)
+      provider. Read it, then press **Agree and send**. (**Not now** keeps
+      your draft.)
 - [ ] Watch the reply stream in. Do the "tool rows" (what the agent read)
       make sense?
 - [ ] Ask for a change ("Make MARA's lines in scene 3 shorter").
       Suggestions appear in the sidebar as a review named after the chat.
       Open it, accept one, rewrite one, undo one.
+- [ ] With the chat focused, press `Cmd+T`: does the list of conversations
+      open? Press `Cmd+N`: does a new, empty conversation start?
 - [ ] Press `Cmd+.` while it is working: it should stop, and your
       conversation stays.
 - [ ] Quit and reopen: is the conversation still in the thread list? (It is

@@ -249,7 +249,8 @@ reviewers) → **1.** agent core (tests, turn loop) → **2.** providers + CLI c
    step 2's CLI chat.
    Status (v4/polish): cost, cancel, retry, error rows and the disclosure
    were built with the panel; the script-review language prompt is ported
-   into `tools::prompt::SYSTEM` (~900 tokens, new threads only); a
+   into `tools::prompt::SYSTEM` (~900 tokens, new threads only; tuning it
+   against live models is still open); a
    mid-run question with the panel closed says so in the status bar (taken
    back when the card shows or is answered); a thread opened on older tools
    shows a card [New conversation] [Continue]; Cmd/Ctrl+. stops a run from
