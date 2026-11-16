@@ -130,7 +130,13 @@ impl ThreadStore {
     /// would send thread files, which hold excerpts of the script, elsewhere.
     fn check_dir(&self) -> Result<(), StoreError> {
         let Ok(meta) = fs::symlink_metadata(&self.dir) else { return Ok(()) };
-        let refuse = |why: &str| Err(StoreError::Io(format!("{} {why}; not using it", self.dir.display())));
+        let refuse = |why: &str| {
+            Err(StoreError::Io(format!(
+                "{} {why}; not using it. Move it aside (or replace it with a real folder) to keep conversations \
+                 next to the script.",
+                self.dir.display()
+            )))
+        };
         if meta.file_type().is_symlink() {
             return refuse("is a link");
         }
@@ -150,6 +156,7 @@ impl ThreadStore {
     /// temporary files from a write in progress, and anything else that
     /// isn't `<id>.json` are skipped.
     pub fn list(&self) -> Result<Vec<Listed>, StoreError> {
+        self.check_dir()?;
         let entries = match fs::read_dir(&self.dir) {
             Ok(e) => e,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -330,7 +337,8 @@ pub(crate) mod tests {
         let store = ThreadStore::for_script(&dir.join("film.fdx"));
         let e = store.create(&mut SequentialIds::default()).unwrap_err();
         assert!(e.to_string().contains("is a link"), "{e}");
-        assert!(store.path("t0001").is_err() && store.lock_path("t0001").is_err());
+        assert!(store.path("t0001").is_err() && store.lock_path("t0001").is_err() && store.list().is_err());
+        assert!(e.to_string().contains("Move it aside"), "{e}");
         assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&elsewhere);

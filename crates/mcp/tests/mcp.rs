@@ -387,6 +387,15 @@ fn paths_are_relative_to_the_script_not_the_server() {
     assert_eq!(std::fs::read_to_string(s.dir.join("profile")).unwrap(), "keep me\n");
     assert!(!s.dir.join("out.fdx").exists());
     assert_eq!(std::fs::read_to_string(scripts.join("notes.txt")).unwrap(), "keep me\n");
+    // Never another screenplay: an existing .fdx other than the default
+    // output is refused (on a case-insensitive disk, `FILM.fdx` is the
+    // script itself: `same_file` compares the file, not the name).
+    std::fs::write(scripts.join("sibling.fdx"), "<FinalDraft/>").unwrap();
+    for other in ["sibling.fdx", "final.fdx"] {
+        let (text, err) = s.call("write_script", json!({ "script": script, "output": other }));
+        assert!(err && text.contains("another name"), "{other}: {text}");
+    }
+    assert_eq!(std::fs::read_to_string(scripts.join("sibling.fdx")).unwrap(), "<FinalDraft/>");
     // The default name too: a link planted there is refused.
     #[cfg(unix)]
     {
@@ -482,10 +491,10 @@ fn a_planted_session_never_aims_writes_at_other_files() {
     let original: Value = serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
     let script_before = std::fs::read_to_string(&script).unwrap();
     let outside = s.dir.join("outside.review.txt").to_string_lossy().into_owned();
-    for (target, says) in [
-        ("run.sh", "doesn't start with SCRIPT REVIEW"),
-        ("film.fdx", "a script or one of its own files"),
-        (outside.as_str(), "is outside the script's folder"),
+    for (target, says, remedy) in [
+        ("run.sh", "doesn't start with SCRIPT REVIEW", Some("add `SCRIPT REVIEW v1` as its first line")),
+        ("film.fdx", "a script or one of its own files", None),
+        (outside.as_str(), "is outside the script's folder", Some("copy it into that folder")),
     ] {
         let mut planted = original.clone();
         planted["reviews"] = json!([{ "path": target, "id": "zz", "text_hash": "0" }]);
@@ -495,7 +504,11 @@ fn a_planted_session_never_aims_writes_at_other_files() {
             "suggest_change",
             json!({ "script": script, "paragraph_id": 1, "options": ["$(echo INJECTED >&2)"] }),
         );
-        assert!(err && text.contains(says) && text.contains("File › Add review"), "{target}: {text}");
+        assert!(err && text.contains(says), "{target}: {text}");
+        match remedy {
+            Some(r) => assert!(text.contains(r), "{target}: {text}"),
+            None => assert!(!text.contains("The writer can"), "{target}: {text}"),
+        }
         // Named by its path, too.
         let (text, err) = s.call(
             "suggest_change",
@@ -540,4 +553,20 @@ fn a_planted_session_never_aims_writes_at_other_files() {
         !names.iter().any(|n| n.to_string_lossy().starts_with(".bashrc.") || n == ".scriptorium.lock"),
         "{names:?}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn write_script_follows_a_linked_script_to_its_folder() {
+    // The script is a link into another folder: its folder is the target's,
+    // and the default output goes there.
+    let mut s = Server::start_in("linked", "real", "elsewhere");
+    let real = s.dir.join("real");
+    std::os::unix::fs::symlink(real.join("film.fdx"), s.dir.join("elsewhere/film.fdx")).unwrap();
+    let link = s.dir.join("elsewhere/film.fdx").to_string_lossy().into_owned();
+    let out = s.ok("write_script", json!({ "script": link }));
+    assert!(real.join("film (scriptorium).fdx").is_file(), "{out}");
+    assert!(!s.dir.join("elsewhere/film (scriptorium).fdx").exists());
+    // Written again: its own default output is replaced.
+    s.ok("write_script", json!({ "script": link }));
 }

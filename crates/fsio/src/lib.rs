@@ -256,7 +256,8 @@ pub fn review_in_folder(dir: &Path, path: &str) -> Result<PathBuf, String> {
 /// without touching the disk: a `*.review.txt`, no folder part, not
 /// starting with `.`.
 pub fn plain_review_name(name: &str) -> bool {
-    !name.contains(['/', '\\']) && !name.starts_with('.') && name.to_lowercase().ends_with(".review.txt")
+    // `:` too: a drive-relative path or an alternate data stream on Windows.
+    !name.contains(['/', '\\', ':']) && !name.starts_with('.') && name.to_lowercase().ends_with(".review.txt")
 }
 
 /// Whether `name` is one of a script's own files, never a review whatever
@@ -273,27 +274,53 @@ pub fn is_script_file(name: &str) -> bool {
 /// canonical path, or the writer-facing reason.
 pub fn agent_write_place(dir: &Path, path: &Path) -> Result<PathBuf, String> {
     let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
-    let why = match place(&dir, path) {
+    const COPY_IN: &str = "The writer can copy it into that folder and attach the copy with File › Add review.";
+    let (why, remedy) = match place(&dir, path) {
         Place::Inside(at) if at.file_name().is_some_and(|n| is_script_file(&n.to_string_lossy())) => {
-            "is a script or one of its own files, not a review"
+            ("is a script or one of its own files, not a review", None)
         }
         Place::Inside(at) => return Ok(at),
-        Place::Hidden => "is in a hidden folder or has a hidden name (starting with `.`)",
-        Place::Outside => "is outside the script's folder",
-        Place::NoFolder => "is in a folder that doesn't exist",
+        Place::Hidden => ("is in a hidden folder or has a hidden name (starting with `.`)", Some(COPY_IN)),
+        Place::Outside => ("is outside the script's folder", Some(COPY_IN)),
+        Place::NoFolder => ("is in a folder that doesn't exist", Some(COPY_IN)),
     };
-    Err(not_writable(path, why, &dir))
+    Err(not_writable(path, why, remedy, &dir))
 }
 
 /// The refusal for an attached file an agent may not write into: what's
-/// wrong, and what the writer can do about it in the app.
-pub fn not_writable(path: &Path, why: &str, dir: &Path) -> String {
-    format!(
-        "{} {why}: agents only add suggestions to review files inside the script's folder ({}). The writer can \
-         copy it into that folder and attach the copy with File › Add review",
+/// wrong and, where the writer can do something about it, what.
+pub fn not_writable(path: &Path, why: &str, remedy: Option<&str>, dir: &Path) -> String {
+    let mut out = format!(
+        "{} {why}: agents only add suggestions to review files inside the script's folder ({}).",
         path.display(),
         dir.display()
-    )
+    );
+    if let Some(r) = remedy {
+        out.push(' ');
+        out.push_str(r);
+    }
+    out
+}
+
+/// Whether `a` and `b` are the same file on disk (device and inode on
+/// Unix, so a different spelling on a case-insensitive disk, or a hard
+/// link, still counts); `false` if either doesn't exist.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (a.canonicalize(), b.canonicalize()) {
+            (Ok(x), Ok(y)) => x.to_string_lossy().to_lowercase() == y.to_string_lossy().to_lowercase(),
+            _ => false,
+        }
+    }
 }
 
 /// A script path as given (by a person or a model), before anything is
@@ -545,7 +572,8 @@ mod tests {
             (canon.join("film.scriptorium.lock"), "a script or one of its own files"),
         ] {
             let e = agent_write_place(&dir, &path).unwrap_err();
-            assert!(e.contains(says) && e.contains("File › Add review") && !e.contains("name a new"), "{e}");
+            let own = says.contains("own files");
+            assert!(e.contains(says) && e.contains("File › Add review") != own && !e.contains("name a new"), "{e}");
         }
         #[cfg(unix)]
         {
@@ -554,7 +582,16 @@ mod tests {
             assert!(e.contains("outside"), "{e}");
         }
         assert!(plain_review_name("Dialogue pass.review.txt"));
-        for bad in ["Makefile", ".zshenv", ".x.review.txt", "a/b.review.txt", "a\\b.review.txt", "run.sh"] {
+        for bad in [
+            "Makefile",
+            ".zshenv",
+            ".x.review.txt",
+            "a/b.review.txt",
+            "a\\b.review.txt",
+            "run.sh",
+            "C:x.review.txt",
+            "a.review.txt:s",
+        ] {
             assert!(!plain_review_name(bad), "{bad}");
         }
         let _ = fs::remove_dir_all(&base);

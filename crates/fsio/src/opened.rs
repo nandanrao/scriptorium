@@ -337,7 +337,12 @@ pub fn agent_may_write(dir: &Path, path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(&at).unwrap_or_default();
     if !scriptorium_review::file::is_review_text(&text) {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        return Err(crate::not_writable(path, "doesn't start with SCRIPT REVIEW, so it isn't a review", &dir));
+        return Err(crate::not_writable(
+            path,
+            "doesn't start with SCRIPT REVIEW, so agents treat it as read-only",
+            Some("The writer can add `SCRIPT REVIEW v1` as its first line, or let the assistant start its own review."),
+            &dir,
+        ));
     }
     Ok(())
 }

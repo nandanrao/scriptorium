@@ -1056,7 +1056,7 @@ pub fn apply(
     }
     let input = Path::new(script);
     let out = output.map(Path::to_path_buf).unwrap_or_else(|| output_path(input));
-    if out.canonicalize().ok() == input.canonicalize().ok() {
+    if scriptorium_fsio::same_file(&out, input) {
         return Err("refusing to overwrite the original script; give an output with another name".into());
     }
     let raw = o.fdx.write_script(o.doc.script()).map_err(|e| e.to_string())?;

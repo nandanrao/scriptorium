@@ -333,13 +333,15 @@ fn own_review(store: &mut dyn ReviewStore, file: &mut ThreadFile) -> Result<(usi
     // edited (or planted) to name a file elsewhere never re-attaches it.
     if let Some(stored) = &file.review_path
         && let Ok(at) = scriptorium_fsio::review_in_folder(store.dir(), stored)
-        && store.disk_text(&at).is_some_and(|text| is_ours(&text, &id, file))
+        && store.disk_text(&at).is_some_and(|text| is_review_text(&text) && is_ours(&text, &id, file))
     {
         found = Some(at);
     }
     if found.is_none() {
         found = find_by_id(store, &id)?;
     }
+    // Only a review is ever re-attached (attaching pins an `Id:` into the
+    // file at once, in the app before any write check): checked above.
     if let Some(at) = found {
         let r = store.attach(&at)?;
         record(store, file, r);
@@ -390,7 +392,10 @@ fn find_by_id(store: &dyn ReviewStore, id: &str) -> Result<Option<PathBuf>, Revi
     names.sort();
     for name in names.iter().filter(|n| n.to_lowercase().ends_with(".review.txt")) {
         let at = store.dir().join(name);
-        if store.disk_text(&at).is_some_and(|text| ReviewFile::parse(&text).id.as_deref() == Some(id)) {
+        if store
+            .disk_text(&at)
+            .is_some_and(|text| is_review_text(&text) && ReviewFile::parse(&text).id.as_deref() == Some(id))
+        {
             return Ok(Some(at));
         }
     }

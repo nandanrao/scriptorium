@@ -722,6 +722,33 @@ fn a_review_file_found_by_its_id_is_reattached() {
 }
 
 #[test]
+fn a_planted_file_that_isnt_a_review_is_never_reattached() {
+    // A thread file pointing at an in-folder `*.review.txt` that isn't a
+    // review, and a file carrying the thread's `Id:` without the format
+    // line: neither is attached (which would pin an `Id:` into it) nor written.
+    let f = Folder::new("planted-reattach");
+    let mut ui = TestUi::new();
+    run(&f, Which::New, "Tighten the smile", &cassette("own_review.jsonl"), &mut ui).unwrap();
+    std::fs::remove_file(f.0.join("Tighten the smile.review.txt")).unwrap();
+    std::fs::remove_file(f.0.join("film.scriptorium.json")).unwrap();
+    std::fs::write(f.0.join("notes.review.txt"), "export X=1\n").unwrap();
+    std::fs::write(f.0.join("evil.review.txt"), "Id: thread-t0001\nexport Y=1\n").unwrap();
+    let threads = ThreadStore::for_script(&f.script());
+    let (lock, mut file) = threads.lock_and_read("t0001", Duration::ZERO).unwrap();
+    file.review_path = Some("notes.review.txt".into());
+    threads.write(&lock, &file).unwrap();
+    drop(lock);
+
+    let mut ui = TestUi::new();
+    let done = run(&f, Which::Thread("t0001".into()), "And Cesar's line", &second_change(), &mut ui).unwrap();
+    assert_eq!(f.read("notes.review.txt"), "export X=1\n");
+    assert_eq!(f.read("evil.review.txt"), "Id: thread-t0001\nexport Y=1\n");
+    let path = done.thread.review_path.clone().unwrap();
+    assert!(path != "notes.review.txt" && path != "evil.review.txt", "{path}");
+    assert!(f.read(&path).starts_with("SCRIPT REVIEW") && f.read(&path).contains("going to town"));
+}
+
+#[test]
 fn a_crash_mid_round_never_runs_a_finished_call_again() {
     let f = Folder::new("crash-round");
     let script = f.script();

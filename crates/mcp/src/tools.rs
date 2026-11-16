@@ -10,15 +10,22 @@
 //!
 //! Every tool here is the model's choice, so every path it names is
 //! confined to the script's folder ([`scriptorium_fsio::agent_file_in_folder`]:
-//! no `..`, no dot-folders, no links out): `review_file` (an attached review,
-//! or else a `*.review.txt` there; an existing one must read as a review),
-//! `attach_reviews` files and a `decide_suggestion` review file
-//! (`*.review.txt` there; `detach_reviews` only matches what is attached), and `write_script`'s `output` (a `.fdx`
-//! there). Suggestions are only written into reviews inside the folder
-//! that start with `SCRIPT REVIEW`. A folder inside the script's folder that
-//! doesn't exist yet is created for a new review (e.g.
-//! `reviews/dialogue.review.txt`), only once there is something to write. The script itself is the
-//! model's choice too; through a link, its folder is the target's.
+//! no `..`, no dot-folders, no links out):
+//!
+//! - `review_file`: an attached review, or else a `*.review.txt` there; an
+//!   existing one must read as a review.
+//! - `attach_reviews` files and a `decide_suggestion` review file: a
+//!   `*.review.txt` there that reads as a review. `detach_reviews` only
+//!   matches what is attached.
+//! - `write_script`'s `output`: a `.fdx` there, never another existing
+//!   screenplay (only the script's own default output is replaced).
+//!
+//! Suggestions are only written into reviews inside the folder that start
+//! with `SCRIPT REVIEW`; attached reviews without it are read-only for
+//! agents. A folder inside the script's folder that doesn't exist yet is
+//! created for a new review (e.g. `reviews/dialogue.review.txt`), only once
+//! there is something to write. The script itself is the model's choice
+//! too; through a link, its folder is the target's.
 
 use std::path::Path;
 
@@ -158,7 +165,8 @@ pub fn list() -> Vec<Value> {
         tool(
             "write_script",
             "Write the script with every decision and edit so far to a new .fdx (default: \"<name> (scriptorium).fdx\" \
-             next to the original, replaced if it exists). The original is never overwritten.",
+             next to the original, replaced if it exists). The original, and any other existing .fdx, is never \
+             overwritten: give a new file name.",
             json!({
                 "script": script,
                 "output": { "type": "string", "description": "Where to write, instead of the default: a .fdx in the script's folder (relative to it, or absolute)." },
@@ -248,14 +256,29 @@ pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
         "undo" | "redo" => commands::undo_redo(&a.str("script")?, name == "redo", &[], &mut notes),
         "write_script" => {
             let script = a.str("script")?;
+            let dir = script_dir(&script)?;
+            // The default beside the script, in its folder (the target's,
+            // when the script is a link).
+            let default =
+                commands::output_path(Path::new(&script)).file_name().map(|n| n.to_owned()).unwrap_or_default();
             // Always a .fdx inside the script's folder, never through a link
             // (the default name too: a link planted there is refused).
             let output = match a.opt_str("output") {
                 Some(o) => expand_home(&o),
-                None => commands::output_path(Path::new(&script)).to_string_lossy().into_owned(),
+                None => dir.join(&default).to_string_lossy().into_owned(),
             };
-            let out =
-                scriptorium_fsio::agent_file_in_folder(&script_dir(&script)?, &output, ".fdx", Folders::MustExist)?;
+            let out = scriptorium_fsio::agent_file_in_folder(&dir, &output, ".fdx", Folders::MustExist)?;
+            // The model never replaces another screenplay: an existing .fdx
+            // is replaced only if it is this script's own output.
+            if out.exists() && out.file_name() != Some(default.as_os_str()) {
+                let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                return Err(format!(
+                    "{name} already exists and isn't this script's own output (\"{}\"): give an output with \
+                     another name",
+                    default.to_string_lossy()
+                )
+                .into());
+            }
             commands::apply(&script, &[], false, Some(&out), &mut notes)
         }
         _ if scriptorium_tools::catalogue().iter().any(|s| s.name == name) => {
