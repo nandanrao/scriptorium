@@ -650,9 +650,12 @@ impl Ui for TermUi {
         }
     }
 
-    fn waiting(&mut self, secs: u64) {
+    fn waiting(&mut self, secs: u64, error: Option<&AgentError>) {
         self.line_break();
-        eprintln!("the provider is busy; retrying in {secs} s…");
+        match error {
+            Some(e) => eprintln!("{e}; retrying in {secs} s…"),
+            None => eprintln!("the provider is busy; retrying in {secs} s…"),
+        }
     }
 
     fn tool_finished(&mut self, call: &ToolCall, done: &CallDone) {

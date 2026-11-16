@@ -334,6 +334,12 @@ button_center() {
         }'
 }
 
+# has_button "R G B": a fresh probe shows such a button.
+has_button() {
+    probe
+    [ -n "$(button_center "$1")" ]
+}
+
 # click_button "R G B" WHAT: clicks the last such button.
 click_button() {
     local at

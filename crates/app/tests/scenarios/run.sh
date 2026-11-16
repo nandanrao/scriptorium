@@ -253,6 +253,8 @@ S8() {
     click_retry
     check "Retry: offline through the retries" wait_run 5 20
     check "…kind Offline" log_has "run ended: Error(Api { status: None, kind: Offline"
+    # The log line is written just before the panel redraws: wait for the row.
+    check "the offline error row shows" wait_for 5 has_button "$WARN_RGB"
     shot 05-offline
     click_retry
     check "Retry succeeds" wait_run 6

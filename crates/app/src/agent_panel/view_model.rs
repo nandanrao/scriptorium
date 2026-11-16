@@ -157,9 +157,11 @@ pub enum Kind {
         /// The button the row offers, if any.
         action: Option<ErrorAction>,
     },
-    /// A retryable failure; sending again in `secs`.
+    /// A retryable failure (of `kind`, when the provider said); sending
+    /// again in `secs`.
     Waiting {
         secs: u64,
+        kind: Option<scriptorium_agent::ErrorKind>,
     },
 }
 
@@ -238,7 +240,7 @@ pub struct Stream {
     parts: Vec<Part>,
     usage: Option<Usage>,
     stopped: bool,
-    waiting: Option<u64>,
+    waiting: Option<(u64, Option<scriptorium_agent::ErrorKind>)>,
     failure: Option<Failure>,
 }
 
@@ -303,9 +305,9 @@ impl Stream {
 
     /// A retryable failure: the run waits `secs` before sending again. The
     /// half-streamed reply is dropped (the request is sent again from scratch).
-    pub fn wait(&mut self, secs: u64) {
+    pub fn wait(&mut self, secs: u64, kind: Option<scriptorium_agent::ErrorKind>) {
         self.clear();
-        self.waiting = Some(secs);
+        self.waiting = Some((secs, kind));
     }
 
     /// `Input::Failed` ended the request or the run: the buffer is cleared
@@ -369,6 +371,21 @@ pub fn plain_error(error: &AgentError) -> String {
         AgentError::File(_) => "A file the agent needs can't be used. See the details.",
     }
     .into()
+}
+
+/// The line shown while a failed request waits `secs` to be sent again,
+/// saying why (a failure of `kind`, when known).
+pub fn waiting_text(secs: u64, kind: Option<scriptorium_agent::ErrorKind>) -> String {
+    use scriptorium_agent::ErrorKind;
+    match kind {
+        Some(ErrorKind::Offline) => {
+            format!("Can't reach the service \u{2014} check your internet connection. Trying again in {secs}s…")
+        }
+        Some(ErrorKind::Overloaded | ErrorKind::RateLimit) | None => {
+            format!("The service is busy, trying again in {secs}s…")
+        }
+        Some(_) => format!("The service had a problem, trying again in {secs}s…"),
+    }
 }
 
 /// What the view model needs besides the thread and the stream.
@@ -554,8 +571,8 @@ fn stream_rows(message: usize, stream: &Stream, out: &mut Vec<Row>) {
             }
         }
     }
-    if let Some(secs) = stream.waiting {
-        out.push(Row { key: Key::Tail("waiting"), kind: Kind::Waiting { secs } });
+    if let Some((secs, kind)) = stream.waiting {
+        out.push(Row { key: Key::Tail("waiting"), kind: Kind::Waiting { secs, kind } });
     }
     if let Some(f) = &stream.failure {
         out.push(Row {
@@ -1034,12 +1051,21 @@ mod tests {
     }
 
     #[test]
+    fn waiting_says_why() {
+        use scriptorium_agent::ErrorKind;
+        let offline = waiting_text(4, Some(ErrorKind::Offline));
+        assert!(offline.contains("internet connection") && !offline.contains("busy"), "{offline}");
+        assert!(waiting_text(4, Some(ErrorKind::Overloaded)).contains("busy"));
+        assert!(waiting_text(4, Some(ErrorKind::Other)).contains("had a problem"));
+    }
+
+    #[test]
     fn wait_drops_the_partial_reply() {
         let mut s = Stream::new();
         s.event(ev_text(0, "partial"));
-        s.wait(4);
+        s.wait(4, None);
         let r = build(&Thread::default(), &s, true);
-        assert_eq!(kinds(&r), vec![&Kind::Waiting { secs: 4 }]);
+        assert_eq!(kinds(&r), vec![&Kind::Waiting { secs: 4, kind: None }]);
         s.event(ev_text(0, "fresh"));
         let r = build(&Thread::default(), &s, true);
         assert_eq!(kinds(&r), vec![&Kind::Text { text: "fresh".into(), streaming: true }]);

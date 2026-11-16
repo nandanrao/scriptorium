@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 use gpui::{App, AsyncApp, Context, EventEmitter, Task, WeakEntity};
 use scriptorium_agent::file::{ThreadFile, ToolsCheck, check_tools};
 use scriptorium_agent::turn::{self, Limits, Outcome};
-use scriptorium_agent::{AgentError, Event, Request as HttpRequest, Thread, ToolCall, Usage};
+use scriptorium_agent::{AgentError, ErrorKind, Event, Request as HttpRequest, Thread, ToolCall, Usage};
 use scriptorium_chat::exec::{self, Added, CallDone, Gate, ReviewError};
 use scriptorium_chat::host::{self, Env, Finished, HostError, Request, Which};
 use scriptorium_chat::lock::OwnRuns;
@@ -211,7 +211,8 @@ fn slim(file: &ThreadFile) -> ThreadFile {
 /// From the worker to the UI thread.
 enum ToUi {
     Event(Event),
-    Waiting(u64),
+    /// A retry in `secs`, after a failure of this kind.
+    Waiting(u64, Option<ErrorKind>),
     Busy(bool),
     ToolFinished(ToolCall, CallDone),
     Notice(String),
@@ -259,8 +260,12 @@ impl host::Ui for WorkerUi {
     fn event(&mut self, event: &Event) {
         let _ = self.tx.send(ToUi::Event(event.clone()));
     }
-    fn waiting(&mut self, secs: u64) {
-        let _ = self.tx.send(ToUi::Waiting(secs));
+    fn waiting(&mut self, secs: u64, error: Option<&AgentError>) {
+        let kind = match error {
+            Some(AgentError::Api { kind, .. }) => Some(*kind),
+            _ => None,
+        };
+        let _ = self.tx.send(ToUi::Waiting(secs, kind));
     }
     fn busy(&mut self, waiting: bool) {
         let _ = self.tx.send(ToUi::Busy(waiting));
@@ -429,7 +434,7 @@ pub enum ViewOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamOp {
-    Wait(u64),
+    Wait(u64, Option<ErrorKind>),
     Fail(AgentError),
     FailText { text: String, action: Option<ErrorAction> },
     Stop,
@@ -440,7 +445,7 @@ impl StreamOp {
     /// Applies it to a view model stream.
     pub fn apply(self, stream: &mut Stream) {
         match self {
-            StreamOp::Wait(secs) => stream.wait(secs),
+            StreamOp::Wait(secs, kind) => stream.wait(secs, kind),
             StreamOp::Fail(e) => stream.fail(&e),
             StreamOp::FailText { text, action } => stream.fail_with(text, action),
             StreamOp::Stop => stream.stop(),
@@ -1045,7 +1050,7 @@ impl Chat {
                     _ => self.ops.push(ViewOp::StreamEvents(vec![e])),
                 }
             }
-            ToUi::Waiting(secs) => self.ops.push(ViewOp::Stream(StreamOp::Wait(secs))),
+            ToUi::Waiting(secs, kind) => self.ops.push(ViewOp::Stream(StreamOp::Wait(secs, kind))),
             ToUi::Busy(waiting) => self.busy_files = waiting,
             // The round's results show when the round is saved (one push per
             // round, not a copy of the thread per call); the link is kept now.
@@ -1334,7 +1339,7 @@ mod tests {
                     seen.texts.push_str(&text);
                     on_text();
                 }
-                ToUi::Event(_) | ToUi::Waiting(_) | ToUi::Busy(_) | ToUi::Notice(_) | ToUi::Created(_) => {}
+                ToUi::Event(_) | ToUi::Waiting(..) | ToUi::Busy(_) | ToUi::Notice(_) | ToUi::Created(_) => {}
                 ToUi::ToolFinished(_, done) => seen.finished.push(done),
                 ToUi::Saved(_) => seen.saved += 1,
                 ToUi::Ask(q, reply) => {

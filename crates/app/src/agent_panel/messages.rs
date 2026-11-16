@@ -354,11 +354,11 @@ impl MessageView {
             Kind::Error { text, detail, retryable, action } => {
                 self.render_error(ix, &key, text, detail, retryable, action, cx)
             }
-            Kind::Waiting { secs } => div()
+            Kind::Waiting { secs, kind } => div()
                 .italic()
                 .text_size(px(12.))
                 .text_color(INK_2)
-                .child(format!("The service is busy, trying again in {secs}s…"))
+                .child(vm::waiting_text(secs, kind))
                 .into_any_element(),
         };
         div().w_full().px_3().py_1p5().child(body).into_any_element()

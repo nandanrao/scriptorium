@@ -132,8 +132,9 @@ impl<'a> Request<'a> {
 pub trait Ui {
     /// A streamed event (text, thinking, tool-call progress, usage).
     fn event(&mut self, _event: &Event) {}
-    /// A request failed and will be retried in `secs` seconds (before scaling).
-    fn waiting(&mut self, _secs: u64) {}
+    /// A request failed with `error` and will be retried in `secs` seconds
+    /// (before scaling).
+    fn waiting(&mut self, _secs: u64, _error: Option<&AgentError>) {}
     fn tool_started(&mut self, _call: &ToolCall) {}
     fn tool_finished(&mut self, _call: &ToolCall, _done: &exec::CallDone) {}
     /// Something to tell the writer (older tools, a review file left out…).
@@ -539,6 +540,8 @@ fn run_inner(
     let time = TimeScale::new(clock.scale(Duration::from_secs(1)).as_secs_f64());
     let mut run = Run::new(req.limits, resolved.protocol, resolved.origin());
     let mut action = run.start(&mut file.thread);
+    // The failure a wait retries, for saying why it waits.
+    let mut failed: Option<AgentError> = None;
     let outcome = loop {
         let input = match action {
             Action::Send => {
@@ -560,11 +563,15 @@ fn run_inner(
                 }
             }
             Action::Wait { secs } => {
-                ui.waiting(secs);
+                ui.waiting(secs, failed.as_ref());
                 if time.sleep_unless(secs, cancel) { Input::Retry } else { Input::Stop(vec![]) }
             }
             Action::RunTools(calls) => run_tools(&calls, tools, &mut file, &ctx, ui)?,
             Action::Done(outcome) => break outcome,
+        };
+        failed = match &input {
+            Input::Failed(e) => Some(e.clone()),
+            _ => None,
         };
         action = run.next(&mut file.thread, input);
         file.extra.remove(FINISHED_KEY);
