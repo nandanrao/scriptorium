@@ -12,6 +12,10 @@ use std::path::PathBuf;
 pub const ENTER_SPLITS: &str = "enter-splits";
 
 fn dir() -> Option<PathBuf> {
+    // Tests never read or write the user's settings.
+    if cfg!(test) {
+        return None;
+    }
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
     let dir = if cfg!(target_os = "macos") {
         home?.join("Library/Application Support/Scriptorium")

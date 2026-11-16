@@ -173,9 +173,10 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(sec!("l"), ToggleAgentPanel, Some("Workspace")),
         KeyBinding::new("escape", ReturnFocus, panel),
         KeyBinding::new(sec!("."), Stop, panel),
-        // Stop works from the script too (editor, review card) while a run
-        // goes on, with the panel open or closed: ScriptView forwards it.
-        KeyBinding::new(sec!("."), Stop, Some("ScriptView")),
+        // Stop works from anywhere in the window too (editor, review card,
+        // the accounts sheet) while a run goes on, panel open or closed:
+        // the workspace forwards it.
+        KeyBinding::new(sec!("."), Stop, Some("Workspace")),
         KeyBinding::new(sec!("n"), NewThread, panel),
         KeyBinding::new("tab", FocusNext, panel),
         KeyBinding::new("shift-tab", FocusPrev, panel),
@@ -191,6 +192,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-tab", FocusPrev, Some("AccountsSheet")),
         // gpui-base: Cmd/Ctrl+. is ToggleCodeActions inside `Input`.
         KeyBinding::new(sec!("."), Stop, composer),
+        KeyBinding::new(sec!("."), Stop, accounts_field),
         // gpui-base's search and replace have no UI here.
         KeyBinding::new(sec!("f"), gpui::NoAction, composer),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-shift-f" } else { "ctrl-h" }, gpui::NoAction, composer),
@@ -532,7 +534,6 @@ impl Render for AgentPanel {
     }
 }
 
-/// The status bar line for `text` while the panel is closed.
 /// The status bar's line when the run asks something (the whole-script
 /// read, a disclosure) while the panel is closed: the run waits until the
 /// writer opens the panel and answers the card.
@@ -540,6 +541,7 @@ fn say_asking() -> SharedString {
     format!("The agent has a question \u{2014} open the chat ({}).", crate::menus::shortcut("l")).into()
 }
 
+/// The status bar line for `text` while the panel is closed.
 fn say_closed(text: &str) -> SharedString {
     format!("{text} {} to see.", crate::menus::shortcut("l")).into()
 }

@@ -269,6 +269,8 @@ mod tests {
         for focus in ["ScriptEditor", "Review"] {
             assert_eq!(action_for(sec!("."), focus), name(&agent_panel::Stop));
         }
+        let sheet_field = ["Workspace", "AccountsSheet", "Input"];
+        assert_eq!(action_in(sec!("."), &sheet_field), name(&agent_panel::Stop));
         assert_eq!(action_for(sec!("o"), "ScriptEditor"), name(&Open));
         assert_ne!(action_in(sec!("."), &composer), name(&Open));
         assert_eq!(action_in(sec!("z"), &composer), name(&gpui_base::input::Undo));

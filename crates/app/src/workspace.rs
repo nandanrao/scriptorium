@@ -67,6 +67,11 @@ impl Workspace {
         this
     }
 
+    #[cfg(test)]
+    pub(crate) fn script_view(&self) -> Option<Entity<ScriptView>> {
+        self.view.clone()
+    }
+
     fn set_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let text = text.into();
         match &self.view {
@@ -490,6 +495,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_about))
             .on_action(cx.listener(Self::on_toggle_agent))
+            .on_action(
+                cx.listener(|this, _: &crate::agent_panel::Stop, _, cx| this.with_view(cx, |v, cx| v.stop_agent(cx))),
+            )
             .on_action(cx.listener(Self::on_open_accounts))
             .on_action(
                 cx.listener(|this, _: &UndoAny, window, cx| this.with_view(cx, |v, cx| v.undo_any(false, window, cx))),

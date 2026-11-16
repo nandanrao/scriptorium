@@ -588,9 +588,7 @@ impl Composer {
     fn card_answer(&mut self, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.card(cx), Card::ToolsChanged) {
             crate::log::info(&format!("agent composer: older tools: {}", if yes { "continue" } else { "new" }));
-            if yes {
-                self.chat.update(cx, |c, cx| c.keep_older_tools(cx));
-            } else if let Err(e) = self.chat.update(cx, |c, cx| c.new_thread(cx)) {
+            if let Err(e) = self.chat.update(cx, |c, cx| c.older_tools(yes, cx)) {
                 self.chat.update(cx, |c, cx| c.notice(e, cx));
             }
         } else if self.chat.read(cx).question().is_some() {
