@@ -263,11 +263,7 @@ impl host::Ui for WorkerUi {
         let _ = self.tx.send(ToUi::Event(event.clone()));
     }
     fn waiting(&mut self, secs: u64, error: Option<&AgentError>) {
-        let kind = match error {
-            Some(AgentError::Api { kind, .. }) => Some(*kind),
-            _ => None,
-        };
-        let _ = self.tx.send(ToUi::Waiting(secs, kind));
+        let _ = self.tx.send(ToUi::Waiting(secs, error.and_then(AgentError::kind)));
     }
     fn busy(&mut self, waiting: bool) {
         let _ = self.tx.send(ToUi::Busy(waiting));
