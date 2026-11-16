@@ -256,6 +256,10 @@ impl AgentPanel {
                 let open = view.read(cx).agent_open();
                 if was_open && !open {
                     this.composer.update(cx, |c, cx| c.reset(cx));
+                    // Closed with a question showing: the run still waits for it.
+                    if this.chat.read(cx).question().is_some() {
+                        cx.emit(AgentPanelEvent::Say(say_asking()));
+                    }
                 }
                 was_open = open;
             }));
@@ -325,7 +329,7 @@ impl AgentPanel {
         match e {
             // The composer handles the draft (MessageSaved, Withdrawn).
             ChatEvent::Asking if !self.is_open(cx) => {
-                cx.emit(AgentPanelEvent::Say(say_closed("The agent is waiting for you.")));
+                cx.emit(AgentPanelEvent::Say(say_asking()));
             }
             ChatEvent::Ended { say: Some(text) } if !self.is_open(cx) => {
                 cx.emit(AgentPanelEvent::Say(say_closed(text)));
@@ -502,6 +506,13 @@ impl Render for AgentPanel {
 }
 
 /// The status bar line for `text` while the panel is closed.
+/// The status bar's line when the run asks something (the whole-script
+/// read, a disclosure) while the panel is closed: the run waits until the
+/// writer opens the panel and answers the card.
+fn say_asking() -> SharedString {
+    format!("The agent has a question \u{2014} open the chat ({}).", crate::menus::shortcut("l")).into()
+}
+
 fn say_closed(text: &str) -> SharedString {
     format!("{text} {} to see.", crate::menus::shortcut("l")).into()
 }

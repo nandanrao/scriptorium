@@ -47,7 +47,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::{App, AsyncApp, Context, EventEmitter, Task, WeakEntity};
-use scriptorium_agent::file::ThreadFile;
+use scriptorium_agent::file::{ThreadFile, ToolsCheck, check_tools};
 use scriptorium_agent::turn::{self, Limits, Outcome};
 use scriptorium_agent::{AgentError, Event, Request as HttpRequest, Thread, ToolCall, Usage};
 use scriptorium_chat::exec::{self, Added, CallDone, Gate, ReviewError};
@@ -81,6 +81,12 @@ const CLOSED: &str = "The script was closed.";
 /// The note under a conversation opened while another program is running it.
 pub const READ_ONLY_NOTE: &str =
     "This conversation is open in another Scriptorium window or an agent. You can read it here.";
+
+/// Shown on opening a thread started with other tools: the host's line
+/// ([`host::TOOLS_CHANGED`]), plus what the writer can do about it.
+pub fn tools_changed_note() -> String {
+    format!("{} {} starts a new conversation.", host::TOOLS_CHANGED, crate::menus::shortcut("n"))
+}
 
 pub const BUSY_THREAD: &str = "This thread is running in another program.";
 
@@ -709,10 +715,16 @@ impl Chat {
         }
         let file = self.store().read(id).map_err(|e| e.to_string())?;
         let busy = matches!(self.own.probe(&self.store(), id), Err(StoreError::Busy));
+        let changed = check_tools(&file, &scriptorium_tools::catalogue()) == ToolsCheck::Changed;
         self.reset(Some(Arc::new(file)), cx);
         if busy {
             self.read_only = true;
             self.notices.push(READ_ONLY_NOTE.to_string());
+            cx.notify();
+        } else if changed {
+            // Said on open, before the writer decides to continue; the run's
+            // own notice (host::prepare) is then the same line, not repeated.
+            self.notices.push(tools_changed_note());
             cx.notify();
         }
         Ok(())
@@ -1006,7 +1018,11 @@ impl Chat {
                     self.added.insert(call.id.clone(), a);
                 }
             }
-            ToUi::Notice(text) => self.notices.push(text),
+            ToUi::Notice(text) => {
+                if !self.notices.iter().any(|n| n.starts_with(&text)) {
+                    self.notices.push(text);
+                }
+            }
             ToUi::Saved(file) => {
                 let run = self.run.as_mut().expect("not stopped, so running");
                 run.thread_id = Some(file.id.clone());
@@ -1483,6 +1499,28 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.session().reviews.iter().any(|r| r.id == id)));
         assert!(std::fs::read_to_string(f.0.join("Tighten the smile.review.txt")).unwrap().contains("Laura grins."));
         assert!(!chat.read_with(cx, |c, _| c.waiting_for_files()));
+    }
+
+    #[gpui::test]
+    fn a_conversation_started_with_other_tools_says_so_on_open(cx: &mut TestAppContext) {
+        let f = Folder::new("tools-changed");
+        seen_disclosure(&f);
+        let (_window, _view, chat) = live(cx, &f);
+        run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        let id = chat.read_with(cx, |c, _| c.thread().unwrap().id.clone());
+        chat.update(cx, |c, cx| c.new_thread(cx)).unwrap();
+        // Same tools: nothing to say.
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        assert!(chat.read_with(cx, |c, _| c.notices().is_empty()));
+        // Started with other tools.
+        let store = ThreadStore::for_script(&f.0.join("film.fdx"));
+        let lock = store.lock(&id, Duration::ZERO).unwrap();
+        let mut file = store.read(&id).unwrap();
+        file.tools_hash = "0000000000000000".into();
+        store.write(&lock, &file).unwrap();
+        drop(lock);
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        assert_eq!(chat.read_with(cx, |c, _| c.notices().to_vec()), [tools_changed_note()]);
     }
 
     #[gpui::test]
