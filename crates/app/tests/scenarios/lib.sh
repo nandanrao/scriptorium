@@ -150,7 +150,7 @@ fresh() {
     printf '%s\n' "$ACCOUNTS_JSON" > "$WORK/config/scriptorium/accounts.json"
     echo open > "$WORK/config/scriptorium/agent-panel"
     if [ "${2:-}" != nodisclosure ]; then
-        printf '{"version": 1, "disclosures": ["api.anthropic.com\\u001f%s"]}\n' "$WORK/film.fdx" \
+        printf '{"version": 1, "disclosures": ["https://api.anthropic.com:443\\u001f%s"]}\n' "$WORK/film.fdx" \
             > "$WORK/config/scriptorium/seen.json"
     fi
 }
