@@ -221,7 +221,13 @@ impl Transport for Http {
 /// names where it really pointed.
 fn resolve_location(url: &str, loc: &str) -> String {
     let loc = loc.trim();
-    if loc.contains("://") {
+    // Absolute only if it starts with a scheme (`/r?u=https://x` is a path).
+    let scheme_len = loc.find("://").filter(|&i| {
+        let s = &loc[..i];
+        s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if scheme_len.is_some() {
         return loc.to_string();
     }
     let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
@@ -529,6 +535,8 @@ mod tests {
         assert_eq!(resolve_location(url, "//evil.example/x"), "https://evil.example/x");
         assert_eq!(resolve_location(url, "/v2/messages"), "https://api.example.org/v2/messages");
         assert_eq!(resolve_location(url, "chat"), "https://api.example.org/v1/chat");
+        assert_eq!(resolve_location(url, "/r?u=https://x"), "https://api.example.org/r?u=https://x");
+        assert_eq!(resolve_location(url, "HTTP://x.example/"), "HTTP://x.example/");
         assert_eq!(resolve_location("http://localhost:8080", "x"), "http://localhost:8080/x");
     }
 

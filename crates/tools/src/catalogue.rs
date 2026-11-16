@@ -238,9 +238,7 @@ pub fn check_args(spec: &ToolSpec, args: &Value) -> Result<(), ToolError> {
         Some(Finding::Unoffered(at)) => {
             Err(ToolError::Args(format!("{name} doesn't take the argument `{at}`: use only the arguments it lists")))
         }
-        Some(Finding::Shape(at)) => {
-            Err(ToolError::Args(format!("{name}: `{at}` isn't any of the forms its schema allows")))
-        }
+        Some(Finding::Shape(at, allowed)) => Err(ToolError::Args(format!("{name}: `{at}` must be {allowed}"))),
     }
 }
 
@@ -248,8 +246,9 @@ pub fn check_args(spec: &ToolSpec, args: &Value) -> Result<(), ToolError> {
 enum Finding {
     /// An argument the schema doesn't offer.
     Unoffered(String),
-    /// A value none of an `anyOf`'s branches takes by type.
-    Shape(String),
+    /// A value none of an `anyOf`'s branches takes by type, with what they
+    /// take ("a string or a list of lines [{kind, text}]").
+    Shape(String, String),
 }
 
 /// The first argument in `value` that `schema` doesn't offer, if any.
@@ -259,7 +258,8 @@ fn unoffered(schema: &Value, value: &Value, at: &str) -> Option<Finding> {
         // type fits is refused; else the first finding.
         let fitting: Vec<&Value> = branches.iter().filter(|b| type_fits(b, value)).collect();
         if fitting.is_empty() {
-            return Some(Finding::Shape(at.to_string()));
+            let allowed: Vec<String> = branches.iter().map(form).collect();
+            return Some(Finding::Shape(at.to_string(), allowed.join(" or ")));
         }
         let mut found: Vec<Finding> = fitting.iter().filter_map(|b| unoffered(b, value, at)).collect();
         return if found.len() < fitting.len() { None } else { Some(found.remove(0)) };
@@ -287,6 +287,27 @@ fn unoffered(schema: &Value, value: &Value, at: &str) -> Option<Finding> {
             items.iter().enumerate().find_map(|(i, v)| unoffered(sub, v, &format!("{at}[{i}]")))
         }
         _ => None,
+    }
+}
+
+/// What a schema takes, for a person or a model: "a string", "a list of
+/// lines [{kind, text}]", "a whole number"...
+fn form(schema: &Value) -> String {
+    let fields = |s: &Value| {
+        s.get("properties").and_then(Value::as_object).map(|p| p.keys().cloned().collect::<Vec<_>>().join(", "))
+    };
+    match schema.get("type").and_then(Value::as_str) {
+        Some("string") => "a string".into(),
+        Some("integer") => "a whole number".into(),
+        Some("number") => "a number".into(),
+        Some("boolean") => "true or false".into(),
+        Some("object") => fields(schema).map_or("an object".into(), |f| format!("an object {{{f}}}")),
+        Some("array") => match schema.get("items").and_then(fields) {
+            Some(f) if f == "kind, text" => "a list of lines [{kind, text}]".into(),
+            Some(f) => format!("a list of {{{f}}}"),
+            None => "a list".into(),
+        },
+        _ => "a value of another form".into(),
     }
 }
 
