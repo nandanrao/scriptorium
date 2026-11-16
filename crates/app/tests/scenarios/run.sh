@@ -78,9 +78,18 @@ S1() {
     ctrl l
     shot 04-review-1700-no-rail
     ctrl l
+    # A narrow window with the panel open: the page shrinks or is cropped,
+    # but never paints over the rail or the columns beside it.
+    resolution 750x1000
+    ctrl l
+    check "opens at 750 px" wait_for 10 file_has config/scriptorium/agent-panel open
+    shot 05-review-750-panel
+    ctrl 0
+    shot 06-script-750-panel
     resolution 1500x1000
     visual "02: the sidebar is a rail at 1500 px in the review view; the composer shows its focus ring"
     visual "04: no rail at 1700 px"
+    visual "05/06: at 750 px the page stays inside its column (not over the rail, card or panel)"
     app_quit 0
 }
 
