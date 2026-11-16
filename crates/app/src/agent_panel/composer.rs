@@ -481,6 +481,9 @@ impl Composer {
                 .flex()
                 .flex_col()
                 .gap_1()
+                // The composer's padding is 8 px, the messages' 12: line the
+                // notes up with the messages above them.
+                .px_1()
                 .text_size(px(12.))
                 .children(lines.into_iter().map(|(text, busy)| {
                     div()
