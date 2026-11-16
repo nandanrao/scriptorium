@@ -276,7 +276,11 @@ impl Element for ParaElement {
             window.paint_quad(quad(block, px(4.), theme::ACCENT_SOFT, px(1.5), theme::ACCENT, BorderStyle::Solid));
         }
         if let Some(mark) = mark {
-            paint_mark(window, mark, point(page_left + layout::inch(1.5) - px(26.), text_origin.y + lh / 2.));
+            paint_mark(
+                window,
+                mark,
+                point(page_left + layout::inch(layout::COLUMN_LEFT) - px(layout::MARK_OFFSET), text_origin.y + lh / 2.),
+            );
         }
         if changed {
             let star = window.text_system().shape_line(

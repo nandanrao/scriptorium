@@ -17,19 +17,35 @@ pub fn zoom() -> f32 {
     f32::from_bits(ZOOM_BITS.load(Ordering::Relaxed))
 }
 
-/// The part of the page that must stay on screen when the page is wider than
-/// the space it has, in inches from the page's left edge: the review mark left
-/// of the text column (1.5 in), the column, and the revision `*` at 7.75 in.
-pub const VISIBLE_LEFT: f32 = 1.1;
+/// The text column's left edge (1.5 in), and how far left of it the review
+/// mark's centre sits (in screen px, whatever the zoom).
+pub const COLUMN_LEFT: f32 = 1.5;
+pub const MARK_OFFSET: f32 = 26.0;
+/// Room left of the mark's centre for the mark itself (radius 4.5, border).
+const MARK_ROOM: f32 = 7.0;
+/// The right edge of what must stay on screen, in inches: past the revision
+/// `*` at 7.75 in.
 pub const VISIBLE_RIGHT: f32 = 8.0;
+
+/// The part of the page that must stay on screen when the page is wider
+/// than the space it has, in px from the page's left edge at zoom `z`: the
+/// review mark, the text column and the revision `*`.
+fn visible_at(z: f32) -> (f32, f32) {
+    (COLUMN_LEFT * 96.0 * z - MARK_OFFSET - MARK_ROOM, VISIBLE_RIGHT * 96.0 * z)
+}
 
 /// The smallest zoom the page ever takes.
 pub const MIN_ZOOM: f32 = 0.5;
 
+/// The smallest zoom the script is shown at (about 7 pt Courier); a column
+/// too narrow for it gives way instead (`agent_panel::columns`).
+pub const READABLE_ZOOM: f32 = 0.6;
+
 /// The list width that shows the text column with its marks at zoom `z`
 /// (the inverse of [`zoom_for`]'s column fit).
 pub fn column_width_at(z: f32) -> f32 {
-    (VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0 * z + 16.0
+    let (l, r) = visible_at(z);
+    r - l + 16.0
 }
 
 /// The zoom for `available_width`: the whole page up to [`MAX_ZOOM`], but never
@@ -39,7 +55,7 @@ pub fn column_width_at(z: f32) -> f32 {
 pub fn zoom_for(available_width: f32) -> f32 {
     let room = available_width - 16.0;
     let page = room / (8.5 * 96.0);
-    let column = room / ((VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0);
+    let column = (room - MARK_OFFSET - MARK_ROOM) / ((VISIBLE_RIGHT - COLUMN_LEFT) * 96.0);
     page.max(column.min(1.0)).clamp(MIN_ZOOM, MAX_ZOOM)
 }
 
@@ -83,7 +99,8 @@ fn page_left_at(width: f32, z: f32) -> f32 {
     if width >= page {
         return (width - page) / 2.;
     }
-    let visible_mid = (VISIBLE_LEFT + VISIBLE_RIGHT) / 2. * 96.0 * z;
+    let (l, r) = visible_at(z);
+    let visible_mid = (l + r) / 2.;
     // Never leave a gap at the right edge of the list.
     (width / 2. - visible_mid).max(width - page).min(0.)
 }
@@ -161,14 +178,14 @@ mod tests {
 
     #[test]
     fn column_width_is_zoom_for_inverted() {
-        assert!((zoom_for(column_width_at(0.6)) - 0.6).abs() < 1e-4);
-        assert_eq!(zoom_for(column_width_at(MIN_ZOOM)), MIN_ZOOM);
+        for z in [MIN_ZOOM, READABLE_ZOOM, 0.8, 1.0] {
+            assert!((zoom_for(column_width_at(z)) - z).abs() < 1e-4, "{z}");
+        }
     }
 
     #[test]
     fn zoom_hands_over_from_cropping_to_shrinking() {
-        // The column with its marks is 6.9 in = 662.4 px at 1.0, plus 16 px.
-        let edge = (VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0 + 16.0;
+        let edge = column_width_at(1.0);
         assert_eq!(zoom_for(edge), 1.0);
         assert_eq!(zoom_for(edge + 50.0), 1.0);
         let below = zoom_for(edge - 20.0);
@@ -177,29 +194,33 @@ mod tests {
         assert!(zoom_for(8.5 * 96.0 + 16.0 + 50.0) > 1.0);
     }
 
+    /// The mark, column and `*` are inside a list `w` wide at zoom `z`.
+    fn all_visible(w: f32, z: f32) -> bool {
+        let left = page_left_at(w, z);
+        let (l, r) = visible_at(z);
+        left + l >= -0.01 && left + r <= w + 0.01
+    }
+
     #[test]
     fn page_left_centres_crops_and_never_leaves_a_gap() {
         let page = 8.5 * 96.0;
         // Room to spare: centred.
         assert_eq!(page_left_at(page + 100.0, 1.0), 50.0);
         assert_eq!(page_left_at(page, 1.0), 0.0);
-        // A little short: the visible part (1.1–8.0 in) is centred, the
-        // margins cropped, and the page's right edge stays at the list's.
-        let w = 700.0;
-        let left = page_left_at(w, 1.0);
-        assert!(left < 0.0);
-        assert!(left + VISIBLE_LEFT * 96.0 >= 0.0, "the left mark is cut: {left}");
-        assert!(left + VISIBLE_RIGHT * 96.0 <= w, "the * is cut: {left}");
-        assert!(left + page >= w, "a gap at the right: {left}");
+        // A little short: the margins are cropped, the marks stay, and the
+        // page's right edge stays at the list's.
+        let left = page_left_at(700.0, 1.0);
+        assert!(left < 0.0 && all_visible(700.0, 1.0) && left + page >= 700.0, "{left}");
         // Just short of the page: cropping is only what doesn't fit.
         let left = page_left_at(page - 10.0, 1.0);
         assert!((-10.0..0.0).contains(&left), "{left}");
-        // At the hand-over to shrinking the visible part fills the list.
-        let w = (VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0;
-        assert!((page_left_at(w, 1.0) + VISIBLE_LEFT * 96.0).abs() < 0.01);
-        let z = zoom_for(500.0);
-        let left = page_left_at(500.0 - 16.0, z);
-        assert!(left + VISIBLE_LEFT * 96.0 * z >= -0.01 && left + VISIBLE_RIGHT * 96.0 * z <= 484.01, "{left}");
+        // Whatever width the editor fits to, the review mark (a fixed 26 px
+        // left of the column) is never cut, down to the readable floor.
+        let mut w = column_width_at(READABLE_ZOOM);
+        while w < 1200.0 {
+            assert!(all_visible(w, zoom_for(w)), "{w}");
+            w += 3.0;
+        }
     }
 
     #[test]
