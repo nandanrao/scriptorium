@@ -145,6 +145,12 @@ impl Form {
         file.unused_id(&self.id_base())
     }
 
+    /// The name an account gets when the Name field is left empty (the
+    /// field's placeholder shows it): "Anthropic", "Custom (OpenAI-compatible)".
+    pub fn default_name(&self) -> String {
+        self.provider().name()
+    }
+
     /// The account as entered, without checking it. `base` is the account
     /// being edited, whose other settings (headers, prices) carry over.
     fn draft(&self, id: String, base: Option<&Account>) -> Account {
@@ -152,7 +158,7 @@ impl Form {
         let name = self.name.trim();
         let mut a = base.cloned().unwrap_or_else(|| Account::new(&id, "", provider.clone()));
         a.id = id;
-        a.name = if name.is_empty() { provider.name() } else { name.to_string() };
+        a.name = if name.is_empty() { self.default_name() } else { name.to_string() };
         a.provider = provider;
         let model = self.model.trim();
         a.model = (!model.is_empty()).then(|| model.to_string());
@@ -257,6 +263,14 @@ pub fn key_short(status: &KeyStatus, needs_key: bool) -> (String, Tone) {
         KeyStatus::Missing { .. } if needs_key => ("missing".into(), Tone::Bad),
         KeyStatus::Missing { .. } => ("no key".into(), Tone::Plain),
     }
+}
+
+/// The line under an account's name: its provider and model, leaving out
+/// the provider when the name already says it ("Custom (OpenAI-compatible)").
+pub fn account_detail(a: &Account) -> String {
+    let model = a.model.as_deref().map(model_label).unwrap_or_else(|| "no model".into());
+    let provider = a.provider.name();
+    if a.name.trim().eq_ignore_ascii_case(&provider) { model } else { format!("{provider} · {model}") }
 }
 
 /// The help under the key field, in plain words (no variable names: see
@@ -447,6 +461,20 @@ mod tests {
         assert!(key_long(&off, true, "A").0.contains("turned off"));
         let adv = key_advanced(&["SCRIPTORIUM_A_KEY".into()], Some(&off));
         assert!(adv.contains("turned off") && !adv.contains(KEYRING_OFF_REASON), "{adv}");
+    }
+
+    #[test]
+    fn account_detail_does_not_repeat_the_name() {
+        let mut f = Form::new(Kind::Custom);
+        f.base_url = "http://localhost:1234/v1".into();
+        f.model = "qwen3".into();
+        let a = f.draft("custom".into(), None);
+        // The empty Name field saves what its placeholder shows.
+        assert_eq!(a.name, f.default_name());
+        assert_eq!(account_detail(&a), "qwen3");
+        let mut named = a.clone();
+        named.name = "Home box".into();
+        assert_eq!(account_detail(&named), format!("{} · qwen3", a.provider.name()));
     }
 
     #[test]

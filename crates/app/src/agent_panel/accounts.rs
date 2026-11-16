@@ -378,7 +378,6 @@ impl AccountsSheet {
 
     fn open_form(&mut self, form: Form, base: Option<Account>, window: &mut Window, cx: &mut Context<Self>) {
         let editing = base.is_some();
-        let kind = form.kind;
         let field = |value: &str, placeholder: &str, masked: bool, window: &mut Window, cx: &mut Context<Self>| {
             let value = value.to_string();
             let placeholder = placeholder.to_string();
@@ -388,7 +387,7 @@ impl AccountsSheet {
                 s
             })
         };
-        let name = field(&form.name, kind.label(), false, window, cx);
+        let name = field(&form.name, &form.default_name(), false, window, cx);
         let base_url = field(&form.base_url, "http://localhost:11434/v1", false, window, cx);
         let model = field(&form.model, "model id", false, window, cx);
         let max_tokens = field(&form.max_tokens, "default", false, window, cx);
@@ -669,7 +668,12 @@ impl AccountsSheet {
                     }
                 }
                 Dd::Effort => f.form.effort = EFFORTS.get(ix).copied().flatten(),
-                Dd::Protocol => f.form.protocol = PROTOCOLS[ix.min(PROTOCOLS.len() - 1)],
+                Dd::Protocol => {
+                    f.form.protocol = PROTOCOLS[ix.min(PROTOCOLS.len() - 1)];
+                    // The default name says the protocol: keep the placeholder in step.
+                    let default = f.form.default_name();
+                    f.name.update(cx, |n, cx| n.set_placeholder(default, window, cx));
+                }
             }
         }
         let trigger = self.triggers[dd as usize].clone();
@@ -873,8 +877,7 @@ impl AccountsSheet {
         let name = if a.name.trim().is_empty() { a.id.clone() } else { a.name.clone() };
         let confirming = self.confirm_remove.as_deref() == Some(a.id.as_str());
         let many = snap.file.accounts.len() > 1;
-        let model = a.model.as_deref().map(form::model_label).unwrap_or_else(|| "no model".into());
-        let detail = format!("{} · {}", a.provider.name(), model);
+        let detail = form::account_detail(a);
         let (edit_acc, rm_id, def_id, ask_id) = (a.clone(), id.clone(), id.clone(), id.clone());
         div()
             .p_3()
