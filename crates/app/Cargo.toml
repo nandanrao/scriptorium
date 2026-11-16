@@ -27,7 +27,8 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features =
 # events in, rows out, with the shared chat core's tool-row labels.
 scriptorium-agent.workspace = true
 scriptorium-chat.workspace = true
-# Accounts, keys (keyring) and the "Check" request for the accounts sheet.
+# The run driver (agent_panel/driver.rs): transports, keys, accounts; the
+# accounts sheet: keys (keyring) and its "Check" request.
 scriptorium-providers.workspace = true
 serde_json.workspace = true
 # Unstyled behaviour layer of gpui-kit (Textarea, TextView markdown, Select,
@@ -40,6 +41,10 @@ unicode-segmentation.workspace = true
 name = "vpointer"
 path = "tests/tools/vpointer.rs"
 test = true
+
+[dev-dependencies]
+# TestAppContext for the run driver's tests over a live ScriptView.
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Already in the tree through gpui's Wayland backend; no new crates.

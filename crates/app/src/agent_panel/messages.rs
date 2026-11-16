@@ -52,7 +52,17 @@ enum Slot {
     Toggle,
     Link,
     All,
+    Action,
 }
+
+/// What the message view asks of the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageEvent {
+    /// The error row's button.
+    Action(vm::ErrorAction),
+}
+
+impl gpui::EventEmitter<MessageEvent> for MessageView {}
 
 type Act = Rc<dyn Fn(&mut MessageView, &mut Window, &mut Context<MessageView>)>;
 
@@ -134,7 +144,6 @@ impl MessageView {
     /// Shows `thread` (the thread with file id `id`). Another id than the last
     /// one switches threads: rows close and the view jumps to the end. The
     /// stream is left alone; feed it after switching.
-    #[allow(dead_code)] // The driver (U4).
     pub fn set_thread(&mut self, id: &str, thread: Thread, cx: &mut Context<Self>) {
         if self.thread_id.as_deref() != Some(id) {
             self.thread_id = Some(id.to_string());
@@ -153,7 +162,6 @@ impl MessageView {
 
     /// The reply was pushed to the thread: clears the stream and sets the
     /// thread together, so the streamed text rows carry over.
-    #[allow(dead_code)] // The driver (U4).
     pub fn push_turn(&mut self, thread: Thread, cx: &mut Context<Self>) {
         self.stream.clear();
         self.thread = thread;
@@ -161,14 +169,13 @@ impl MessageView {
     }
 
     /// One reply event for the streaming buffer.
-    #[allow(dead_code)] // The driver (U4).
+    #[allow(dead_code)] // The driver sends a frame's worth (stream_events).
     pub fn stream_event(&mut self, event: Event, cx: &mut Context<Self>) {
         self.stream.event(event);
         self.changed(cx);
     }
 
     /// Several events at once (a driver drains its channel once per frame).
-    #[allow(dead_code)] // The driver (U4).
     pub fn stream_events(&mut self, events: Vec<Event>, cx: &mut Context<Self>) {
         for e in events {
             self.stream.event(e);
@@ -177,14 +184,12 @@ impl MessageView {
     }
 
     /// Any other change to the stream: `wait`, `fail`, `stop`, `clear`.
-    #[allow(dead_code)] // The driver (U4).
     pub fn update_stream(&mut self, f: impl FnOnce(&mut Stream), cx: &mut Context<Self>) {
         f(&mut self.stream);
         self.changed(cx);
     }
 
     /// Whether a run is in progress (a call without a result then reads "running").
-    #[allow(dead_code)] // The driver (U4).
     pub fn set_run_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.run_active != active {
             self.run_active = active;
@@ -193,7 +198,6 @@ impl MessageView {
     }
 
     /// The thread's review, for labels and the suggestion links.
-    #[allow(dead_code)] // The driver (U4).
     pub fn set_review(&mut self, review: Option<ReviewRef>, cx: &mut Context<Self>) {
         if self.review != review {
             self.review = review;
@@ -347,7 +351,9 @@ impl MessageView {
             Kind::Reasoning { text, hidden, streaming } => self.render_reasoning(ix, &key, text, hidden, streaming, cx),
             Kind::Tool(tool) => self.render_tool(ix, &key, &tool, cx),
             Kind::Notice { text } => div().italic().text_size(px(12.)).text_color(INK_2).child(text).into_any_element(),
-            Kind::Error { text, detail, retryable } => self.render_error(ix, &key, text, detail, retryable, cx),
+            Kind::Error { text, detail, retryable, action } => {
+                self.render_error(ix, &key, text, detail, retryable, action, cx)
+            }
             Kind::Waiting { secs } => div()
                 .italic()
                 .text_size(px(12.))
@@ -358,6 +364,7 @@ impl MessageView {
         div().w_full().px_3().py_1p5().child(body).into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_error(
         &mut self,
         ix: usize,
@@ -365,15 +372,28 @@ impl MessageView {
         text: String,
         detail: String,
         retryable: bool,
+        action: Option<vm::ErrorAction>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self.open.contains(key);
+        let open = self.open.contains(key) && !detail.is_empty();
         let head = div().id(("error-detail", ix)).text_size(px(12.)).text_color(WARN).child(if open {
             "▾ Hide details"
         } else {
             "▸ Details"
         });
-        let head = self.toggler(head, key, cx);
+        let head = (!detail.is_empty()).then(|| self.toggler(head, key, cx));
+        let button = action.map(|a| {
+            let el = div()
+                .id(("error-action", ix))
+                .px_2()
+                .py_0p5()
+                .border_1()
+                .border_color(WARN)
+                .text_size(px(12.))
+                .child(a.label());
+            let act: Act = Rc::new(move |_, _, cx| cx.emit(MessageEvent::Action(a)));
+            self.control(el, key, Slot::Action, act, cx)
+        });
         div()
             .px_3()
             .py_2()
@@ -384,8 +404,11 @@ impl MessageView {
             .flex_col()
             .gap_1()
             .child(div().font_weight(FontWeight::SEMIBOLD).child(text))
-            .when(retryable, |d| d.child(div().text_color(INK_2).child("You can send your message again.")))
-            .child(div().flex().child(head))
+            .when(retryable && action.is_none(), |d| {
+                d.child(div().text_color(INK_2).child("You can send your message again."))
+            })
+            .children(button.map(|b| div().flex().child(b)))
+            .children(head.map(|h| div().flex().child(h)))
             .when(open, |d| d.child(div().font_family("monospace").text_size(px(11.)).text_color(INK_2).child(detail)))
             .into_any_element()
     }

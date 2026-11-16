@@ -26,7 +26,6 @@ impl Composer {
     }
 
     /// The text field: focus and undo route to it.
-    #[allow(dead_code)] // The composer (U6).
     pub fn input(&self) -> &Entity<TextareaState> {
         &self.input
     }

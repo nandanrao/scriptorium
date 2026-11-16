@@ -317,7 +317,6 @@ impl Render for RailTip {
 pub(crate) type SessionLease = Rc<Option<scriptorium_fsio::SessionLock>>;
 
 /// Why the live store can't do what a tool call asks.
-#[allow(dead_code)] // The live store (U5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LiveError {
     /// Busy: another program holds the lock, or changed the files while the
@@ -876,6 +875,19 @@ impl ScriptView {
     }
 
     // ---- rewriting in place ----------------------------------------------------
+
+    /// Tests: show review `id`'s suggestion `n` and start rewriting it (E).
+    #[cfg(test)]
+    pub(crate) fn rewrite_for_test(&mut self, id: &str, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_suggestion(id, n, window, cx);
+        self.start_rewrite(window, cx);
+    }
+
+    /// Tests: whether a rewrite is in progress.
+    #[cfg(test)]
+    pub(crate) fn is_rewriting(&self) -> bool {
+        self.rewriting.is_some()
+    }
 
     /// E: put the highlighted option into the line and edit it in the script.
     fn start_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1478,6 +1490,11 @@ impl ScriptView {
         }
     }
 
+    /// Whether the agent panel is showing.
+    pub(crate) fn agent_open(&self) -> bool {
+        self.agent_open
+    }
+
     fn set_agent_open(&mut self, open: bool, cx: &mut Context<Self>) {
         if self.agent_open != open {
             crate::log::info(&format!("agent panel {}", if open { "open" } else { "closed" }));
@@ -1488,7 +1505,7 @@ impl ScriptView {
     }
 }
 
-#[allow(dead_code)] // The live store (agent_panel/live.rs, U5).
+#[allow(dead_code)] // Helpers the live store (agent_panel/live.rs) doesn't use yet.
 impl ScriptView {
     // ---- for the live store (agent_panel/live.rs, U5) ---------------------------
     //
@@ -1581,10 +1598,19 @@ impl ScriptView {
         (Rc::make_mut(&mut self.session), &self.editor.read(cx).doc)
     }
 
-    /// The line the writer is rewriting right now, if any: proposals on it
-    /// are refused.
-    pub(crate) fn editing_para(&self) -> Option<ParaId> {
-        self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para)
+    /// The lines the writer is rewriting right now (every line of a block
+    /// being rewritten, as it stands now, and the line it was made on):
+    /// proposals touching any of them are refused.
+    pub(crate) fn editing_paras(&self, cx: &App) -> Vec<ParaId> {
+        let Some(rw) = &self.rewriting else { return vec![] };
+        let mut paras = self.session.live_run(self.doc(cx), rw.r, rw.i);
+        let item = self.session.item(rw.r, rw.i);
+        for p in std::iter::once(item.para).chain(item.paras.iter().copied()) {
+            if !paras.contains(&p) {
+                paras.push(p);
+            }
+        }
+        paras
     }
 
     /// After a tool call changed the session (attached a review, added
