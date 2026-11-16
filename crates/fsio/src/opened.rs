@@ -162,7 +162,9 @@ impl Opened {
     /// in the script's folder, when relative; an attached review's name or
     /// stored path; and, only with `from_cwd`, a file from the current folder
     /// (the command line's convention). The MCP server passes `from_cwd`
-    /// false, so it never attaches a file from its own folder.
+    /// false, so it never attaches a file from its own folder, and a file
+    /// it names is attached only if it is a review inside the script's
+    /// folder ([`crate::review_in_folder`], starting with `SCRIPT REVIEW`).
     pub fn open_one(
         script: &str,
         file: Option<&str>,
@@ -172,6 +174,15 @@ impl Opened {
     ) -> Result<(Self, usize), String> {
         let dir = script_dir(script)?;
         let in_dir = pick.and_then(|p| {
+            if !from_cwd {
+                // An agent's pick (MCP): a file is attached only if it is a
+                // review inside the script's folder; anything else can only
+                // name a review already attached.
+                return match agent_review(&dir, p) {
+                    Ok((at, true)) => Some(at.to_string_lossy().into_owned()),
+                    _ => None,
+                };
+            }
             let at = Path::new(p);
             let at = if at.is_absolute() { at.to_path_buf() } else { dir.join(at) };
             at.is_file().then(|| at.to_string_lossy().into_owned())
@@ -267,6 +278,32 @@ impl Opened {
     }
 }
 
+/// What a writer does to let agents use a review file that isn't one yet
+/// (or is elsewhere): told in every refusal, whichever program refused.
+pub const ASK_TO_ATTACH: &str =
+    "ask the writer to attach it (File › Add review in the app, or `scriptorium reviews <script> add <file>`)";
+
+/// A review file an agent names that isn't attached: where it is under the
+/// one rule ([`crate::review_in_folder`]: a `*.review.txt` inside the
+/// script's folder `dir`), and whether it exists; an existing file must
+/// start with `SCRIPT REVIEW` ([`scriptorium_review::file::is_review_text`]).
+/// The CLI `tool` and the MCP server use this; the chat agent applies the
+/// same checks through its store.
+pub fn agent_review(dir: &Path, path: &str) -> Result<(PathBuf, bool), String> {
+    let at = crate::review_in_folder(dir, path)?;
+    if !at.exists() {
+        return Ok((at, false));
+    }
+    let text = std::fs::read_to_string(&at).map_err(|e| format!("{path}: {e}"))?;
+    if !scriptorium_review::file::is_review_text(&text) {
+        return Err(format!(
+            "{path} isn't a review file yet (it doesn't start with {}); {ASK_TO_ATTACH}",
+            scriptorium_review::file::FORMAT_HEADER
+        ));
+    }
+    Ok((at, true))
+}
+
 /// Read and parse a Final Draft file.
 pub fn load(path: &str) -> Result<FdxFile, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -274,6 +311,8 @@ pub fn load(path: &str) -> Result<FdxFile, String> {
 }
 
 /// The script's folder, canonical (so review paths compare and relativize).
+/// A script opened through a link uses the folder of the file it points at:
+/// that is where its session, reviews and output go.
 pub fn script_dir(script: &str) -> Result<PathBuf, String> {
     let p = Path::new(script).canonicalize().map_err(|e| format!("{script}: {e}"))?;
     Ok(p.parent().map(Path::to_path_buf).unwrap_or_default())

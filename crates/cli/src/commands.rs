@@ -20,7 +20,7 @@ use scriptorium_core::outline::annotate;
 use scriptorium_core::text::looks_same;
 use scriptorium_core::{ElementKind, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
-use scriptorium_review::file::{Case, FORMAT_HEADER, append_block, insert_id, is_review_text, parse_typed_lines};
+use scriptorium_review::file::{Case, FORMAT_HEADER, append_block, insert_id, parse_typed_lines};
 use scriptorium_review::matching::{Para, match_entries};
 use scriptorium_review::sessionfile::{self, SessionFile};
 use scriptorium_review::{Decision, Entry, Line, Review, Session, Shape, Status, Unplaced};
@@ -29,7 +29,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::fsio::{LockError, SessionLock, write_atomic};
-use scriptorium_fsio::opened::{Opened, file_name, load, new_review_id, no_reviews, review_salt, script_dir};
+use scriptorium_fsio::opened::{
+    Opened, agent_review, file_name, load, new_review_id, no_reviews, review_salt, script_dir,
+};
 
 pub const USAGE: &str = "\
 scriptorium: screenplay tools
@@ -126,10 +128,12 @@ AGENT TOOLS
         list_suggestions, suggest_change, suggest_changes. Arguments are a
         JSON object, e.g. '{\"scene\": 2}'. Suggestions go to --review-file
         (created and attached if missing), else to the only attached review.
-        --review-file names an attached review, or else a *.review.txt inside
-        the script's folder (no .., no links out; an existing file must start
-        with SCRIPT REVIEW). Attach other files with `reviews add` first.
-        Arguments the tool doesn't list are refused.
+        --review-file is a path from the script's folder: an attached review,
+        or else a *.review.txt inside the folder (no .., no dot-folders, no
+        links out). An existing file that doesn't start with SCRIPT REVIEW
+        must be attached by the writer first (`reviews add`). Suggestions are
+        only written into reviews inside the script's folder. Arguments the
+        tool doesn't list are refused.
         The read-only tools (all but suggest_*) never write, and show the
         script as written if the saved session can't be used.
   scriptorium tool [<script.fdx>] --list [--json]
@@ -1093,17 +1097,18 @@ fn output_path(script: &Path) -> PathBuf {
     script.with_file_name(format!("{stem} (scriptorium).fdx"))
 }
 
-/// Where a review file named on the command line is (or will be): canonical,
-/// so its stored form matches the session's even before the file exists.
-fn review_location(file: &str) -> Result<PathBuf, String> {
-    let p = Path::new(file);
+/// Where a `review_file` is (or will be): relative to the script's folder
+/// `dir` (or absolute), canonical where it exists, so its stored form matches
+/// the session's even before the file exists.
+fn review_location(dir: &Path, file: &str) -> PathBuf {
+    let p = sessionfile::resolve_path(dir, file);
     if let Ok(at) = p.canonicalize() {
-        return Ok(at);
+        return at;
     }
-    let abs = std::path::absolute(p).map_err(|e| format!("{file}: {e}"))?;
-    let name = abs.file_name().ok_or(format!("{file}: not a file name"))?;
-    let parent = abs.parent().ok_or(format!("{file}: not a file name"))?;
-    Ok(parent.canonicalize().map_err(|e| format!("{file}: {e}"))?.join(name))
+    match (p.parent().map(Path::canonicalize), p.file_name()) {
+        (Some(Ok(folder)), Some(name)) => folder.join(name),
+        _ => p,
+    }
 }
 
 /// The tools that only read: run on a read-only open, so a session that
@@ -1179,8 +1184,11 @@ fn tool_command(args: &[&str], notes: &mut Vec<String>) -> Result<String, String
 /// carry out what it asks (the host contract: the tool never writes; here
 /// the review file is written first, then the session). `args` is the
 /// tool's JSON arguments; `review_file` (or `review_file` in `args`) is
-/// where suggestions go, as a path from the current folder, created and
-/// attached if missing; else they go to the only attached review. Read-only
+/// where suggestions go, as a path from the script's folder: an attached
+/// review, or else a `*.review.txt` inside the folder, created and attached
+/// if missing ([`scriptorium_fsio::review_in_folder`]); else they go to the
+/// only attached review. Suggestions are written only into files inside the
+/// script's folder ([`scriptorium_fsio::agent_may_write`]). Read-only
 /// tools never write, and a saved session that can't be used is a note for
 /// them rather than an error. Returns the tool result, ending in a newline.
 pub fn tool(
@@ -1202,19 +1210,16 @@ pub fn tool(
     } else {
         Opened::open(script, &[], notes)?
     };
-    // `review_file` (the parameter, or in the JSON): given as a path from
-    // here, passed on in the form the session stores, so `find_review` sees
-    // an attached file as attached.
+    // `review_file` (the parameter, or in the JSON): a path from the
+    // script's folder, passed on in the form the session stores, so
+    // `find_review` sees an attached file as attached.
     let from_json = args.get("review_file").and_then(Value::as_str).map(str::to_string);
-    let review_at = match review_file.map(str::to_string).or(from_json) {
-        Some(f) => {
-            let at = review_location(&f).map_err(|e| format!("review_file {e}"))?;
-            let map = args.as_object_mut().ok_or("the tool arguments must be a JSON object")?;
-            map.insert("review_file".into(), Value::String(sessionfile::stored_path(&o.dir, &at)));
-            Some(at)
-        }
-        None => None,
-    };
+    let review_named = review_file.map(str::to_string).or(from_json);
+    if let Some(f) = &review_named {
+        let at = review_location(&o.dir, f);
+        let map = args.as_object_mut().ok_or("the tool arguments must be a JSON object")?;
+        map.insert("review_file".into(), Value::String(sessionfile::stored_path(&o.dir, &at)));
+    }
     let outcome = {
         let fdx = &o.fdx;
         let caps = |k: &ElementKind| fdx.is_caps(k.name());
@@ -1251,20 +1256,9 @@ pub fn tool(
             None => {
                 // Not attached: the agent may only name a review in the
                 // script's folder (the rule the chat agent follows too), and
-                // an existing file there only if it reads as a review. A
-                // review the user attached is found above, wherever it is.
-                let named = review_at.clone().expect("a file target comes from review_file");
-                let at = scriptorium_fsio::review_in_folder(&o.dir, &named.to_string_lossy())
-                    .map_err(|e| format!("review_file {e}"))?;
-                if at.exists() {
-                    let text = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-                    if !is_review_text(&text) {
-                        return Err(format!(
-                            "review_file {stored} isn't a review file (it doesn't start with {FORMAT_HEADER}); \
-                             attach it with `reviews add` first if it is one"
-                        ));
-                    }
-                }
+                // an existing file there only if it reads as a review.
+                let named = review_named.as_deref().expect("a file target comes from review_file");
+                let (at, _) = agent_review(&o.dir, named).map_err(|e| format!("review_file {e}"))?;
                 if at.exists() {
                     // Attached the way `reviews add` does (its saved
                     // decisions applied, its `Id:` pinned).
@@ -1299,6 +1293,9 @@ pub fn tool(
                 .ok_or(format!("{stored} was detached meanwhile; run the tool again"))?;
         }
     }
+    // Wherever the review came from (a session file may list any path),
+    // an agent writes only inside the script's folder.
+    scriptorium_fsio::agent_may_write(&o.dir, &o.review_path(r))?;
     let fdx = &o.fdx;
     let caps = |k: &ElementKind| fdx.is_caps(k.name());
     let applied = scriptorium_tools::apply(&mut o.session, &o.doc, r, append, &caps).map_err(|e| e.to_string())?;

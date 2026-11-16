@@ -265,7 +265,8 @@ fn paths_are_relative_to_the_script_not_the_server() {
     assert!(err && text.contains("..") && text.contains("review_file"), "{text}");
     assert!(!s.dir.join("nowhere").exists());
     // Not attached: only a review inside the script's folder. Nothing
-    // outside is created, attached or written, and no folder is made.
+    // outside is created, attached or written, and no folder is made. Each
+    // refusal says why.
     std::fs::write(scripts.join("notes.txt"), "keep me\n").unwrap();
     std::fs::write(scripts.join("config.review.txt"), "export PATH=/tmp\n").unwrap();
     std::fs::write(s.dir.join("outside.review.txt"), "SCRIPT REVIEW v1\n").unwrap();
@@ -273,44 +274,63 @@ fn paths_are_relative_to_the_script_not_the_server() {
     std::os::unix::fs::symlink(&s.dir, scripts.join("up")).unwrap();
     let abs_new = s.dir.join("new.review.txt").to_string_lossy().into_owned();
     let abs_old = s.dir.join("outside.review.txt").to_string_lossy().into_owned();
+    let inside = "inside the script's folder";
     let mut bad = vec![
-        "notes.txt",
-        "made/x.txt",
-        "config.review.txt",
-        "../outside.review.txt",
-        "reviews/../../outside.review.txt",
-        "~/scriptorium-mcp-test-never.review.txt",
-        abs_new.as_str(),
-        abs_old.as_str(),
+        ("notes.txt", "end in .review.txt"),
+        ("made/x.txt", "end in .review.txt"),
+        ("config.review.txt", "ask the writer to attach it"),
+        ("../outside.review.txt", "`..`"),
+        ("reviews/../../outside.review.txt", "`..`"),
+        ("~/scriptorium-mcp-test-never.review.txt", inside),
+        (".bashrc.d/x.review.txt", "starting with `.`"),
+        (abs_new.as_str(), inside),
+        (abs_old.as_str(), inside),
     ];
     if cfg!(unix) {
-        bad.extend(["up/new.review.txt", "up/made/new.review.txt"]);
+        bad.extend([("up/new.review.txt", inside), ("up/made/new.review.txt", "doesn't exist")]);
     }
-    for bad in bad {
+    for (bad, says) in bad {
         let (text, err) = s.call(
             "suggest_change",
             json!({ "script": script, "review_file": bad, "paragraph_id": id, "options": ["x y z"] }),
         );
-        assert!(err && text.contains("review"), "{bad}: {text}");
+        assert!(err && text.contains(says), "{bad}: {text}");
     }
     assert_eq!(std::fs::read_to_string(scripts.join("notes.txt")).unwrap(), "keep me\n");
     assert_eq!(std::fs::read_to_string(scripts.join("config.review.txt")).unwrap(), "export PATH=/tmp\n");
     assert_eq!(std::fs::read_to_string(s.dir.join("outside.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
     assert!(!scripts.join("made").exists() && !s.dir.join("made").exists() && !s.dir.join("new.review.txt").exists());
+    assert!(!scripts.join(".bashrc.d").exists());
     if let Some(home) = std::env::var_os("HOME") {
         assert!(!Path::new(&home).join("scriptorium-mcp-test-never.review.txt").exists());
     }
-    // A review the writer attached can be named wherever it is, whatever
-    // its name.
-    std::fs::write(s.dir.join("shared.txt"), "SCRIPT REVIEW v1\n").unwrap();
-    let shared = s.dir.join("shared.txt").to_string_lossy().into_owned();
-    s.ok("attach_reviews", json!({ "script": script, "files": [shared] }));
-    s.ok(
-        "suggest_change",
-        json!({ "script": script, "review_file": shared, "paragraph_id": id, "options": ["I'll go to town tomorrow."] }),
-    );
-    assert!(std::fs::read_to_string(s.dir.join("shared.txt")).unwrap().contains("go to town"));
-    s.ok("detach_reviews", json!({ "script": script, "files": [shared] }));
+
+    // attach_reviews and detach_reviews are the model's choice too: only
+    // reviews in the script's folder, and an attached one must read as one.
+    std::fs::create_dir_all(scripts.join(".hidden")).unwrap();
+    std::fs::write(scripts.join(".hidden/h.review.txt"), "SCRIPT REVIEW v1\n").unwrap();
+    for (files, says) in [
+        (json!([abs_old]), inside),
+        (json!(["../outside.review.txt"]), "`..`"),
+        (json!(["config.review.txt"]), "ask the writer to attach it"),
+        (json!(["notes.txt"]), "end in .review.txt"),
+        (json!([".hidden/h.review.txt"]), "starting with `.`"),
+    ] {
+        let (text, err) = s.call("attach_reviews", json!({ "script": script, "files": files }));
+        assert!(err && text.contains(says), "{files}: {text}");
+        let (text, err) = s.call("detach_reviews", json!({ "script": script, "files": files }));
+        assert!(err, "{files}: {text}");
+    }
+    let session = std::fs::read_to_string(scripts.join("film.scriptorium.json")).unwrap();
+    assert!(!session.contains("outside") && !session.contains("config") && !session.contains("hidden"), "{session}");
+    assert_eq!(std::fs::read_to_string(s.dir.join("outside.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
+    // decide_suggestion's `review` file: never attached from outside.
+    let (text, err) =
+        s.call("decide_suggestion", json!({ "script": script, "review": abs_old, "n": 1, "decision": "accept" }));
+    assert!(err && text.contains("no attached review matches"), "{text}");
+    let session = std::fs::read_to_string(scripts.join("film.scriptorium.json")).unwrap();
+    assert!(!session.contains("outside"), "{session}");
+    assert_eq!(std::fs::read_to_string(s.dir.join("outside.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
 
     // Two reviews attached: the error names the parameter, not a CLI flag.
     let (text, err) = s.call("decide_suggestion", json!({ "script": script, "n": 1, "decision": "accept" }));
@@ -344,6 +364,36 @@ fn paths_are_relative_to_the_script_not_the_server() {
     assert!(scripts.join("final.fdx").is_file(), "{out}");
     let (text, err) = s.call("write_script", json!({ "script": script, "output": "film.fdx" }));
     assert!(err && text.contains("give an output with another name"), "{text}");
+    // Only a .fdx inside the script's folder, never through a link.
+    std::fs::write(s.dir.join("profile"), "keep me\n").unwrap();
+    let abs_out = s.dir.join("out.fdx").to_string_lossy().into_owned();
+    let mut bad_out = vec![
+        ("../out.fdx", "`..`"),
+        (abs_out.as_str(), inside),
+        ("notes.txt", "end in .fdx"),
+        (".hidden/out.fdx", "starting with `.`"),
+        ("~/scriptorium-mcp-test-never.fdx", inside),
+    ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(s.dir.join("profile"), scripts.join("link.fdx")).unwrap();
+        bad_out.push(("link.fdx", "link"));
+    }
+    for (bad, says) in bad_out {
+        let (text, err) = s.call("write_script", json!({ "script": script, "output": bad }));
+        assert!(err && text.contains(says), "{bad}: {text}");
+    }
+    assert_eq!(std::fs::read_to_string(s.dir.join("profile")).unwrap(), "keep me\n");
+    assert!(!s.dir.join("out.fdx").exists());
+    assert_eq!(std::fs::read_to_string(scripts.join("notes.txt")).unwrap(), "keep me\n");
+    // The default name too: a link planted there is refused.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(s.dir.join("profile"), scripts.join("film (scriptorium).fdx")).unwrap();
+        let (text, err) = s.call("write_script", json!({ "script": script }));
+        assert!(err && text.contains("link"), "{text}");
+        assert_eq!(std::fs::read_to_string(s.dir.join("profile")).unwrap(), "keep me\n");
+    }
 
     let (text, err) = s.call("edit_paragraph", json!({ "script": script, "paragraph_id": 999, "text": "x" }));
     assert!(err && text.contains("use list_paragraphs to find ids") && !text.contains("scriptorium"), "{text}");

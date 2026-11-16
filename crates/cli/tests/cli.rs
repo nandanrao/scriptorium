@@ -266,46 +266,57 @@ fn tool_subcommand() {
     assert_eq!(session(&f.0)["reviews"].as_array().unwrap().len(), 2);
 
     // A review_file that isn't attached must be a *.review.txt inside the
-    // script's folder (no `..`, no links out, no absolute path elsewhere),
-    // and an existing one must read as a review. Arguments not offered are
-    // refused.
+    // script's folder (no `..`, no dot-folders, no links out, no absolute
+    // path elsewhere), and an existing one must read as a review. Arguments
+    // not offered are refused. Each refusal says why and names the folder.
     let outside = f.0.parent().unwrap().join(format!("scriptorium-cli-outside-{}", std::process::id()));
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("x.review.txt"), "SCRIPT REVIEW v1\n").unwrap();
     std::fs::write(f.path("notes.txt"), "keep me\n").unwrap();
     std::fs::write(f.path("config.review.txt"), "export PATH=/tmp\n").unwrap();
+    std::fs::create_dir_all(f.path(".bashrc.d")).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&outside, f.path("out")).unwrap();
+    let folder = f.0.canonicalize().unwrap().display().to_string();
     let abs_new = outside.join("new.review.txt").to_string_lossy().into_owned();
     let abs_old = outside.join("x.review.txt").to_string_lossy().into_owned();
-    let mut bad = vec!["notes.txt", "config.review.txt", abs_new.as_str(), abs_old.as_str()];
     let up = format!("../{}/new.review.txt", outside.file_name().unwrap().to_string_lossy());
-    bad.push(&up);
+    let mut bad = vec![
+        ("notes.txt", "end in .review.txt"),
+        ("config.review.txt", "isn't a review file yet"),
+        (abs_new.as_str(), "inside the script's folder"),
+        (abs_old.as_str(), "inside the script's folder"),
+        (up.as_str(), "`..`"),
+        (".bashrc.d/x.review.txt", "starting with `.`"),
+    ];
     if cfg!(unix) {
-        bad.push("out/new.review.txt");
+        bad.push(("out/new.review.txt", "inside the script's folder"));
     }
-    for bad in bad {
+    for (bad, says) in bad {
         let (ok, text) = f.run(&["tool", "film.fdx", "suggest_change", args, "--review-file", bad]);
-        assert!(!ok && text.contains("review"), "{bad}: {text}");
+        assert!(!ok && text.contains(says), "{bad}: {text}");
+        if says != "isn't a review file yet" {
+            assert!(text.contains(&folder), "{bad}: {text}");
+        } else {
+            assert!(text.contains("ask the writer to attach it"), "{text}");
+        }
     }
     assert_eq!(std::fs::read_to_string(f.path("notes.txt")).unwrap(), "keep me\n");
     assert_eq!(std::fs::read_to_string(f.path("config.review.txt")).unwrap(), "export PATH=/tmp\n");
-    assert!(!outside.join("new.review.txt").exists());
+    assert!(!outside.join("new.review.txt").exists() && !f.path(".bashrc.d/x.review.txt").exists());
     assert_eq!(std::fs::read_to_string(outside.join("x.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
-    // A file that isn't a review: refused until the user attaches it.
-    let (ok, text) = f.run(&["tool", "film.fdx", "suggest_change", args, "--review-file", "config.review.txt"]);
-    assert!(!ok && text.contains("isn't a review file") && text.contains("reviews add"), "{text}");
-    // Attached by the user, a review outside the folder can be named.
+    let (ok, text) = f.run(&["tool", "film.fdx", "read_scene", r#"{"scene": 1, "path": "/etc"}"#]);
+    assert!(!ok && text.contains("doesn't take the argument `path`"), "{text}");
+    assert_eq!(session(&f.0)["reviews"].as_array().unwrap().len(), 2);
+    // Attached by the writer, a review outside the folder can be named and
+    // read, but an agent's suggestions never go into it.
     f.ok(&["reviews", "film.fdx", "add", &abs_old]);
     let other = r#"{"paragraph_id": 0, "options": ["EXT. FARM HOUSE - DAWN"]}"#;
-    let out = f.ok(&["tool", "film.fdx", "suggest_change", other, "--review-file", &abs_old]);
-    assert!(out.contains("#1"), "{out}");
-    assert!(std::fs::read_to_string(outside.join("x.review.txt")).unwrap().contains("DAWN"));
+    let (ok, text) = f.run(&["tool", "film.fdx", "suggest_change", other, "--review-file", &abs_old]);
+    assert!(!ok && text.contains("outside the script's folder") && text.contains(&folder), "{text}");
+    assert!(!std::fs::read_to_string(outside.join("x.review.txt")).unwrap().contains("DAWN"));
     f.ok(&["reviews", "film.fdx", "remove", &abs_old]);
     std::fs::remove_dir_all(&outside).unwrap();
-    let (ok, text) = f.run(&["tool", "film.fdx", "read_scene", r#"{"scene": 1, "path": "/etc"}"#]);
-    assert!(!ok && text.contains("`path`"), "{text}");
-    assert_eq!(session(&f.0)["reviews"].as_array().unwrap().len(), 2);
 
     let (ok, text) = f.run(&["tool", "film.fdx", "no_such_tool"]);
     assert!(!ok && text.contains("unknown tool"), "{text}");
@@ -628,4 +639,26 @@ fn block_listing_and_plain_rewrite_refusal() {
     let (ok, text) = f.run(&["decide", "film.fdx", "1", "rewrite", "one line"]);
     assert!(!ok && text.contains("--rewrite-block") && text.contains("lines"), "{text}");
     assert!(f.ok(&["dump", "film.fdx"]).contains("CESAR"));
+}
+
+#[test]
+fn a_planted_session_path_outside_the_folder_is_never_written() {
+    // A session file that lists a review outside the script's folder (made
+    // by hand, or planted): the agent tools read it but never write to it.
+    let f = Folder::new("planted");
+    f.ok(&["reviews", "film.fdx", "add", "a.review.txt"]);
+    let outside = f.0.parent().unwrap().join(format!("scriptorium-cli-planted-{}.review.txt", std::process::id()));
+    let text = std::fs::read_to_string(f.path("a.review.txt")).unwrap();
+    std::fs::write(&outside, &text).unwrap();
+    let mut s = session(&f.0);
+    s["reviews"][0]["path"] = outside.to_string_lossy().into_owned().into();
+    std::fs::write(f.path("film.scriptorium.json"), s.to_string()).unwrap();
+    let list = f.ok(&["tool", "film.fdx", "list_reviews"]);
+    assert!(list.contains("scriptorium-cli-planted"), "{list}");
+    // The only attached review is the default, and it is outside.
+    let args = r#"{"paragraph_id": 0, "options": ["EXT. FARM HOUSE - DAWN"]}"#;
+    let (ok, out) = f.run(&["tool", "film.fdx", "suggest_change", args]);
+    assert!(!ok && out.contains("outside the script's folder"), "{out}");
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), text);
+    std::fs::remove_file(&outside).unwrap();
 }

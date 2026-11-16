@@ -426,13 +426,11 @@ Caveats:
   `default-features = false`, so the MCP server builds without providers,
   keyring and HTTP.
 - Reviews in a session file may be stored as absolute paths (`Opened::open`
-  attaches them as stored). That predates v0.4.0 and only the writer attaches
-  reviews (File › Add review, `reviews add`, MCP `attach_reviews`), so it
-  stays; a model-named `review_file` is confined to the script's folder
-  unless it names a review already attached (AGENTS.md rule 6).
-- MCP `write_script`'s `output` still takes any path, absolute included: the
-  model chooses where the .fdx goes. Consider confining it like
-  `review_file`.
+  attaches them as stored). That predates v0.4.0 and is how a person attaches
+  a review from elsewhere (File › Add review, `reviews add`), so it stays.
+  Agents (the chat agent, the CLI `tool`, every MCP tool) can read such a
+  review but never write into it, and can only name, attach or create files
+  inside the script's folder (AGENTS.md rule 6).
 
 ## Open questions (to settle in roadmap planning)
 

@@ -130,6 +130,12 @@ pub trait ReviewStore {
     fn disk_text(&self, path: &Path) -> Option<String> {
         fs::read_to_string(path).ok()
     }
+    /// Whether the agent may write into the review file at `path`: only
+    /// inside [`Self::dir`] ([`scriptorium_fsio::agent_may_write`]), so a
+    /// session listing a review elsewhere can't aim the agent's writes out.
+    fn may_write(&self, path: &Path) -> Result<(), ReviewError> {
+        scriptorium_fsio::agent_may_write(self.dir(), path).map_err(ReviewError::Failed)
+    }
     /// The names of the files in [`Self::dir`], for picking a review file
     /// name that isn't taken.
     fn file_names(&self) -> Result<Vec<String>, ReviewError> {
@@ -251,6 +257,7 @@ pub fn apply_append(
     mut append: Append,
 ) -> Result<Applied, ReviewError> {
     let (r, attached_here) = resolve(store, file, &append.target)?;
+    store.may_write(&resolve_path(store.dir(), &store.session().reviews[r].path))?;
     let editing = store.editing_paras();
     if !editing.is_empty() {
         refuse_editing(&mut append, &editing);
@@ -401,7 +408,8 @@ fn file_review(store: &mut dyn ReviewStore, path: &str) -> Result<(usize, bool),
     if let Some(text) = store.disk_text(&at) {
         if !is_review_text(&text) {
             return Err(ReviewError::Failed(format!(
-                "{path} isn't a review file (it doesn't start with {FORMAT_HEADER})"
+                "{path} isn't a review file yet (it doesn't start with {FORMAT_HEADER}); {}",
+                scriptorium_fsio::opened::ASK_TO_ATTACH
             )));
         }
         return Ok((store.attach(&at)?, true));

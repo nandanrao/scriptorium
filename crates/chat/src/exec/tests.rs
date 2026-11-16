@@ -92,6 +92,13 @@ impl ReviewStore for Mem {
     fn editing_paras(&self) -> Vec<ParaId> {
         self.editing.clone()
     }
+    fn may_write(&self, path: &Path) -> Result<(), ReviewError> {
+        // No disk under `/mem`: the folder rule, lexically.
+        if self.dir.exists() {
+            return scriptorium_fsio::agent_may_write(&self.dir, path).map_err(ReviewError::Failed);
+        }
+        if path.starts_with(&self.dir) { Ok(()) } else { Err(ReviewError::Failed("outside".into())) }
+    }
     fn file_names(&self) -> Result<Vec<String>, ReviewError> {
         Ok(self.files.keys().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect())
     }
@@ -158,6 +165,9 @@ impl ReviewStore for Borrowed<'_> {
     }
     fn editing_paras(&self) -> Vec<ParaId> {
         self.0.editing_paras()
+    }
+    fn may_write(&self, path: &Path) -> Result<(), ReviewError> {
+        self.0.may_write(path)
     }
     fn file_names(&self) -> Result<Vec<String>, ReviewError> {
         self.0.file_names()
@@ -484,6 +494,33 @@ fn a_threads_review_path_outside_the_folder_is_never_reattached() {
         s.0.session = Session::new(vec![]);
         s.0.files.retain(|p, _| *p == outside);
     }
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn an_attached_review_outside_the_folder_is_never_written() {
+    // A session file (planted, or made by hand) lists a review elsewhere.
+    let base = std::env::temp_dir().join(format!("scriptorium-outside-attached-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("film")).unwrap();
+    let base = base.canonicalize().unwrap();
+    let mut m = Mem::new();
+    m.dir = base.join("film");
+    let outside = base.join("planted.review.txt");
+    let text = new_review_text("film.fdx", "t0001");
+    std::fs::write(&outside, &text).unwrap();
+    m.files.insert(outside.clone(), text.clone());
+    m.attach(&outside).unwrap();
+    let mut s = OneStore(m);
+    let mut file = thread("Dialogue pass");
+    // It is the thread's own review by id, so it is what a call would use.
+    let done = call(&mut s, &mut file, suggest("a", 1, "Laura grins."));
+    assert!(
+        done.result.is_error && done.result.content.contains("outside the script's folder"),
+        "{}",
+        done.result.content
+    );
+    assert_eq!(s.0.files[&outside], text);
     std::fs::remove_dir_all(&base).unwrap();
 }
 

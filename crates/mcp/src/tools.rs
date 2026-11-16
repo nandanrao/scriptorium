@@ -8,14 +8,18 @@
 //! `files`, `output`) is relative to the script's folder: that is where the
 //! model expects them, whatever folder the server was started in.
 //!
-//! `review_file` names a review already attached, or else a `*.review.txt`
-//! inside the script's folder (no `..`, no links out; an existing file must
-//! read as a review): see [`review_file_at`] and the CLI's `tool`. A folder
-//! inside the script's folder that doesn't exist yet is created (e.g.
-//! `reviews/dialogue.review.txt`), so a typo never scatters folders around
-//! the disk.
+//! Every tool here is the model's choice, so every path it names is
+//! confined to the script's folder ([`scriptorium_fsio::agent_file_in_folder`]:
+//! no `..`, no dot-folders, no links out): `review_file` (an attached review,
+//! or else a `*.review.txt` there; an existing one must read as a review),
+//! `attach_reviews`/`detach_reviews` files and a `decide_suggestion` review
+//! file (`*.review.txt` there), and `write_script`'s `output` (a `.fdx`
+//! there). Suggestions are only written into reviews inside the folder. A
+//! folder inside the script's folder that doesn't exist yet is created for a
+//! new review (e.g. `reviews/dialogue.review.txt`). The script itself is the
+//! model's choice too; through a link, its folder is the target's.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use scriptorium_cli::commands::{self, Choice, SuggestionRef};
 use scriptorium_fsio::opened::script_dir;
@@ -38,10 +42,12 @@ const SCRIPT: &str = "Absolute path to the screenplay (.fdx). A relative path is
                       was started in, which usually isn't the script's.";
 const REVIEW: &str = "Which attached review to use, by name or file (a path relative to the script's folder). Leave \
                       out when only one review is attached to the script.";
-const REVIEW_FILE: &str = "The review file to add to, ending in .review.txt, e.g. \"dialogue-pass.review.txt\": a path relative to the \
-                           script's folder, inside it, created and attached if missing (or an attached review). \
-                           Always give one, named for the pass, and keep it for the whole pass.";
-const FILES: &str = "Review files: paths relative to the script's folder, or absolute.";
+const REVIEW_FILE: &str = "The review file to add to, e.g. \"dialogue-pass.review.txt\": a .review.txt file in the \
+                           script's folder (relative to it, or absolute), created and attached if missing, or a \
+                           review already attached. An existing file that doesn't start with SCRIPT REVIEW must be \
+                           attached by the writer first. Always give one, named for the pass, and keep it for the \
+                           whole pass.";
+const FILES: &str = "Review files (.review.txt) in the script's folder: paths relative to it, or absolute.";
 
 /// The shared tools that only read.
 const READ_ONLY: &[&str] =
@@ -79,8 +85,9 @@ pub fn list() -> Vec<Value> {
     tools.extend([
         tool(
             "attach_reviews",
-            "Attach review files (SCRIPT REVIEW v1 text files) to the script so they show up in the app and in these \
-             tools. suggest_change and suggest_changes attach their review_file themselves.",
+            "Attach review files (.review.txt files in the script's folder that start with SCRIPT REVIEW) to the \
+             script so they show up in the app and in these tools. suggest_change and suggest_changes attach their \
+             review_file themselves. Files elsewhere are attached by the writer in the app.",
             json!({ "script": script, "files": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": FILES } }),
             &["script", "files"],
             &undoable,
@@ -150,7 +157,7 @@ pub fn list() -> Vec<Value> {
              next to the original, replaced if it exists). The original is never overwritten.",
             json!({
                 "script": script,
-                "output": { "type": "string", "description": "Where to write, instead of the default: a path relative to the script's folder, or absolute." },
+                "output": { "type": "string", "description": "Where to write, instead of the default: a .fdx in the script's folder (relative to it, or absolute)." },
             }),
             &["script"],
             &json!({ "readOnlyHint": false, "destructiveHint": true }),
@@ -182,9 +189,25 @@ pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
             if files.is_empty() {
                 return Err("give at least one file".to_string().into());
             }
-            let files: Vec<String> = files.iter().map(|f| in_script_dir(&script, f)).collect::<Result<_, _>>()?;
-            let files: Vec<&str> = files.iter().map(String::as_str).collect();
-            if name == "attach_reviews" {
+            // The model picks these paths: only reviews inside the script's
+            // folder, and an attached file must read as one.
+            let dir = script_dir(&script)?;
+            let attach = name == "attach_reviews";
+            let mut checked = vec![];
+            for f in &files {
+                let f = expand_home(f);
+                let at = if attach {
+                    match scriptorium_fsio::opened::agent_review(&dir, &f)? {
+                        (at, true) => at,
+                        (_, false) => return Err(format!("{f}: no such file").into()),
+                    }
+                } else {
+                    scriptorium_fsio::review_in_folder(&dir, &f)?
+                };
+                checked.push(at.to_string_lossy().into_owned());
+            }
+            let files: Vec<&str> = checked.iter().map(String::as_str).collect();
+            if attach {
                 commands::add_reviews(&script, &files, &mut notes)
             } else {
                 commands::remove_reviews(&script, &files)
@@ -192,15 +215,10 @@ pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
         }
         "decide_suggestion" => {
             let script = a.str("script")?;
-            // A review named by a file in the script's folder is that file;
-            // otherwise it's an attached review's name.
-            let review = match a.opt_str("review") {
-                Some(r) => {
-                    let at = in_script_dir(&script, &r)?;
-                    Some(if Path::new(&at).is_file() { at } else { r })
-                }
-                None => None,
-            };
+            // A review in the script's folder named by its file is that file
+            // (attached if it isn't); anything else is an attached review's
+            // name or path (`Opened::open_one` with from_cwd false).
+            let review = a.opt_str("review").map(|r| expand_home(&r));
             let n = a.suggestion_ref("n")?;
             let choice = match a.str("decision")?.as_str() {
                 "accept" => Choice::Accept(a.opt_positive("option")?),
@@ -224,8 +242,14 @@ pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
         "undo" | "redo" => commands::undo_redo(&a.str("script")?, name == "redo", &[], &mut notes),
         "write_script" => {
             let script = a.str("script")?;
-            let output = a.opt_str("output").map(|o| in_script_dir(&script, &o)).transpose()?;
-            commands::apply(&script, &[], false, output.as_deref().map(Path::new), &mut notes)
+            // Always a .fdx inside the script's folder, never through a link
+            // (the default name too: a link planted there is refused).
+            let output = match a.opt_str("output") {
+                Some(o) => expand_home(&o),
+                None => default_output(&script),
+            };
+            let out = scriptorium_fsio::agent_file_in_folder(&script_dir(&script)?, &output, ".fdx", false)?;
+            commands::apply(&script, &[], false, Some(&out), &mut notes)
         }
         _ if scriptorium_tools::catalogue().iter().any(|s| s.name == name) => {
             let mut rest = a.0.clone();
@@ -265,58 +289,26 @@ fn in_script_dir(script: &str, path: &str) -> Result<String, String> {
     Ok(script_dir(script)?.join(path).to_string_lossy().into_owned())
 }
 
-/// A `review_file` resolved like [`in_script_dir`]. No `..`. A missing
-/// folder is created only for a `*.review.txt` and only inside the script's
-/// folder (checked through any links). Whether the file may be used is the
-/// CLI `tool`'s rule: a review already attached, wherever it is, else a
-/// review in the script's folder ([`scriptorium_fsio::review_in_folder`]).
+/// A `review_file` resolved like [`in_script_dir`]. A missing folder for a
+/// new review inside the script's folder is created (e.g.
+/// `reviews/dialogue.review.txt`), by [`scriptorium_fsio::agent_file_in_folder`]'s
+/// rule, so never a dot-folder nor outside. Whether the file may be used is
+/// the CLI `tool`'s rule, as for every other host: an attached review, or a
+/// review inside the script's folder.
 fn review_file_at(script: &str, file: &str) -> Result<String, String> {
-    if Path::new(file).components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(format!(
-            "{file}: review_file can't contain `..`; put it in the script's folder (or a folder inside it)"
-        ));
-    }
     let at = in_script_dir(script, file)?;
-    let parent = match Path::new(&at).parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => return Ok(at),
-    };
-    if parent.is_dir() || !file.to_lowercase().ends_with(".review.txt") {
-        return Ok(at);
+    if Path::new(&at).parent().is_some_and(|p| !p.as_os_str().is_empty() && !p.is_dir()) {
+        // Refused here for a name that also isn't attached; `tool` says why.
+        let _ = scriptorium_fsio::agent_file_in_folder(&script_dir(script)?, &at, ".review.txt", true);
     }
-    let dir = script_dir(script)?;
-    let dir = dir.canonicalize().unwrap_or(dir);
-    // The nearest folder that exists, resolved through links, must be inside.
-    let inside = parent
-        .ancestors()
-        .find(|a| a.is_dir())
-        .and_then(|a| a.canonicalize().ok())
-        .is_some_and(|a| a.starts_with(&dir));
-    if inside && normalize(&parent).starts_with(&dir) {
-        std::fs::create_dir_all(&parent).map_err(|e| format!("can't create the folder {}: {e}", parent.display()))?;
-        Ok(at)
-    } else {
-        Err(format!(
-            "the folder {} doesn't exist; put review_file in the script's folder (or a folder inside it)",
-            parent.display()
-        ))
-    }
+    Ok(at)
 }
 
-/// `p` with `.` and `..` taken out, without touching the disk (the folder
-/// doesn't exist yet, so it can't be canonicalized).
-fn normalize(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
+/// `<name> (scriptorium).fdx` beside the script (what `write_script` writes
+/// without an `output`).
+fn default_output(script: &str) -> String {
+    let stem = Path::new(script).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    format!("{stem} (scriptorium).fdx")
 }
 
 /// Runs a shared tool on `a`'s script with `args` (without `script`, and with
