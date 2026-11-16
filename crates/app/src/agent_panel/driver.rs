@@ -52,6 +52,7 @@ use scriptorium_agent::turn::{self, Limits, Outcome};
 use scriptorium_agent::{AgentError, Event, Request as HttpRequest, Thread, ToolCall, Usage};
 use scriptorium_chat::exec::{self, Added, CallDone, Gate, ReviewError};
 use scriptorium_chat::host::{self, Env, Finished, HostError, Request, Which};
+use scriptorium_chat::lock::OwnRuns;
 use scriptorium_chat::seen::{self, Seen};
 use scriptorium_chat::store::{StoreError, ThreadStore};
 use scriptorium_providers::shell::{CancelToken, Ended, Flow, Keys, Transport, config, transport_from_env};
@@ -77,6 +78,10 @@ pub const THREAD_WAIT: Duration = Duration::from_millis(500);
 const CLOSED: &str = "The script was closed.";
 
 /// Shown when the thread is locked by another program.
+/// The note under a conversation opened while another program is running it.
+pub const READ_ONLY_NOTE: &str =
+    "This conversation is open in another Scriptorium window or an agent. You can read it here.";
+
 pub const BUSY_THREAD: &str = "This thread is running in another program.";
 
 /// What a run asks the writer, blocking until [`Chat::answer`].
@@ -108,6 +113,9 @@ pub enum SendError {
     Disclose { key: String, text: String },
     /// No accounts file, no account, no key, a broken cassette…
     Setup(String),
+    /// The open conversation is in use by another program: it can be read
+    /// here, not added to ([`Chat::read_only`]).
+    ReadOnly,
 }
 
 impl std::fmt::Display for SendError {
@@ -117,6 +125,7 @@ impl std::fmt::Display for SendError {
             SendError::Blank => f.write_str("Type a message to send."),
             SendError::Disclose { text, .. } => f.write_str(text),
             SendError::Setup(m) => f.write_str(m),
+            SendError::ReadOnly => f.write_str(READ_ONLY_NOTE),
         }
     }
 }
@@ -204,6 +213,8 @@ enum ToUi {
     ToolFinished(ToolCall, CallDone),
     Notice(String),
     Saved(Arc<ThreadFile>),
+    /// A new thread was created under this id (before anything is sent).
+    Created(String),
     Ask(Question, mpsc::Sender<bool>),
     Gate {
         file: Box<ThreadFile>,
@@ -256,6 +267,9 @@ impl host::Ui for WorkerUi {
     }
     fn notice(&mut self, text: &str) {
         let _ = self.tx.send(ToUi::Notice(text.to_string()));
+    }
+    fn thread_created(&mut self, id: &str) {
+        let _ = self.tx.send(ToUi::Created(id.to_string()));
     }
     fn saved(&mut self, file: &ThreadFile) {
         // One copy per step, shared from here on.
@@ -360,6 +374,7 @@ struct Job {
     seen: PathBuf,
     /// Disclosure texts accepted in this session.
     accepted: Vec<String>,
+    own: OwnRuns,
 }
 
 /// The worker thread's body: one `host::run`, then `Done`.
@@ -376,6 +391,7 @@ fn work(job: Job, transport: Arc<dyn Transport>, keys: Keys, tx: mpsc::Sender<To
             allow_whole_script: false,
             wait: THREAD_WAIT,
             limits: Limits::default(),
+            own: Some(&job.own),
         };
         let env = Env { accounts: &job.accounts, keys: &keys, seen: &mut seen, clocks: &mut clocks };
         let mut tools = WorkerTools { tx: tx.clone(), notes: vec![] };
@@ -478,6 +494,32 @@ pub struct Chat {
     review: Option<ReviewRef>,
     /// The thread id the message view was last given.
     view_id: Option<String>,
+    /// This process's runs: runs start through it and probes go through it.
+    own: OwnRuns,
+    /// The open conversation is in use by another program: readable, not sendable.
+    read_only: bool,
+}
+
+/// What the thread list reads off the UI thread: the folder and the process's runs.
+pub struct Lister {
+    store: ThreadStore,
+    own: OwnRuns,
+}
+
+impl Lister {
+    /// Every thread file, each readable one with whether it is free to run
+    /// now ([`Chat::probe`]'s answer).
+    pub fn read(&self) -> Result<Vec<(scriptorium_chat::store::Listed, Result<(), StoreError>)>, StoreError> {
+        Ok(self
+            .store
+            .list()?
+            .into_iter()
+            .map(|l| {
+                let held = if l.file.is_ok() { self.own.probe(&self.store, &l.id) } else { Ok(()) };
+                (l, held)
+            })
+            .collect())
+    }
 }
 
 impl EventEmitter<ChatEvent> for Chat {}
@@ -501,6 +543,8 @@ impl Chat {
             ops: vec![],
             review: None,
             view_id: None,
+            own: OwnRuns::default(),
+            read_only: false,
         }
     }
 
@@ -528,6 +572,13 @@ impl Chat {
             total.add(u);
         }
         total
+    }
+
+    /// The open conversation is in use by another program (set when it was
+    /// opened): `send` and `retry` refuse it ([`SendError::ReadOnly`]), so the
+    /// composer should be disabled.
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     /// A run is in progress (Send shows as Stop).
@@ -651,7 +702,13 @@ impl Chat {
             return Err("Stop the agent before switching conversations.".into());
         }
         let file = self.store().read(id).map_err(|e| e.to_string())?;
+        let busy = matches!(self.own.probe(&self.store(), id), Err(StoreError::Busy));
         self.reset(Some(Arc::new(file)), cx);
+        if busy {
+            self.read_only = true;
+            self.notices.push(READ_ONLY_NOTE.to_string());
+            cx.notify();
+        }
         Ok(())
     }
 
@@ -665,13 +722,45 @@ impl Chat {
         Ok(())
     }
 
-    /// Whether thread `id` could be run now (U7's probe when opening it):
-    /// this chat's own run counts as running here.
+    /// Whether thread `id` could be run now: [`StoreError::RunningHere`] for
+    /// this process's own runs, [`StoreError::Busy`] for another program's.
     pub fn probe(&self, id: &str) -> Result<(), StoreError> {
-        if self.running_thread() == Some(id) {
-            return Err(StoreError::RunningHere);
+        self.own.probe(&self.store(), id)
+    }
+
+    /// What the thread list reads, to do on a background thread.
+    pub fn lister(&self) -> Lister {
+        Lister { store: self.store(), own: self.own.clone() }
+    }
+
+    /// Removes thread `id`'s file (its lock file and review stay). Not while
+    /// this process is running it (or a new thread, whose id isn't known
+    /// yet); not while another program is. The open conversation, if it was
+    /// the one, becomes a new one.
+    pub fn remove_thread(&mut self, id: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        const STOP: &str = "Stop the agent first.";
+        if self.run.as_ref().is_some_and(|r| r.thread_id.as_deref().is_none_or(|t| t == id)) {
+            return Err(STOP.into());
         }
-        self.store().probe(id)
+        let store = self.store();
+        let run = match self.own.start(&store, id, Duration::ZERO) {
+            Ok(run) => run,
+            Err(StoreError::RunningHere) => return Err(STOP.into()),
+            Err(StoreError::Busy) => {
+                return Err("Another program is using this conversation. Try again when it's done.".into());
+            }
+            Err(StoreError::NotFound(_)) => return Ok(()),
+            Err(e) => return Err(format!("Couldn't remove it: {e}")),
+        };
+        match store.delete(run.lock()) {
+            Ok(()) | Err(StoreError::NotFound(_)) => {}
+            Err(e) => return Err(format!("Couldn't remove it: {e}")),
+        }
+        drop(run);
+        if self.thread.as_ref().is_some_and(|t| t.id == id) {
+            self.reset(None, cx);
+        }
+        Ok(())
     }
 
     /// A sticky line for the writer: for the composer's (U6's) refusals to
@@ -684,7 +773,7 @@ impl Chat {
 
     // ---- inside -------------------------------------------------------------
 
-    fn store(&self) -> ThreadStore {
+    pub(crate) fn store(&self) -> ThreadStore {
         ThreadStore::for_script(&self.script_path)
     }
 
@@ -703,6 +792,7 @@ impl Chat {
         self.busy_files = false;
         // A choice was for the thread it was made on.
         self.choice = None;
+        self.read_only = false;
         self.ops.push(ViewOp::Stream(StreamOp::Clear));
         self.show(false);
         self.sync_review(cx);
@@ -737,6 +827,14 @@ impl Chat {
         }
     }
 
+    /// The open script's reviews by id: name and number of suggestions (the
+    /// thread list's rows).
+    pub fn reviews(&self, cx: &App) -> HashMap<String, (String, usize)> {
+        let Some(view) = self.script.upgrade() else { return HashMap::new() };
+        let session = view.read(cx).session();
+        session.reviews.iter().map(|r| (r.id.clone(), (r.name.clone(), r.items.len()))).collect()
+    }
+
     /// The thread's review in the open script, if attached.
     fn review_ref(&self, cx: &App) -> Option<ReviewRef> {
         let thread = self.thread.as_ref()?;
@@ -769,6 +867,13 @@ impl Chat {
         if self.run.is_some() {
             return Err(SendError::Running);
         }
+        if self.read_only {
+            // The other program may be done by now.
+            match self.thread.as_ref().map(|t| self.own.probe(&self.store(), &t.id)) {
+                Some(Err(StoreError::Busy)) => return Err(SendError::ReadOnly),
+                _ => self.read_only = false,
+            }
+        }
         let (accounts, seen, warnings) = self.ready()?;
         let transport = shared_transport().map_err(|e| SendError::Setup(e.to_string()))?;
         let job = Job {
@@ -780,6 +885,7 @@ impl Chat {
             accounts,
             seen,
             accepted: self.accepted.values().cloned().collect(),
+            own: self.own.clone(),
         };
         self.launch(job, transport, Keys::system(), cx)?;
         // The model may not use tools here, is retiring…: say so for this run.
@@ -867,6 +973,12 @@ impl Chat {
     fn on_message(&mut self, msg: ToUi, cx: &mut Context<Self>) {
         match msg {
             ToUi::Done(result) => self.finish(result, cx),
+            // Even when stopped: a run that fails still names its thread.
+            ToUi::Created(id) => {
+                if let Some(run) = &mut self.run {
+                    run.thread_id = Some(id);
+                }
+            }
             // Dropped once stopped: the thread as saved comes with Done.
             _ if self.stopped() => {}
             ToUi::Event(e) => {
@@ -1133,6 +1245,7 @@ mod tests {
             accounts,
             seen: f.0.join("seen.json"),
             accepted: vec![],
+            own: OwnRuns::default(),
         }
     }
 
@@ -1165,7 +1278,7 @@ mod tests {
                     seen.texts.push_str(&text);
                     on_text();
                 }
-                ToUi::Event(_) | ToUi::Waiting(_) | ToUi::Busy(_) | ToUi::Notice(_) => {}
+                ToUi::Event(_) | ToUi::Waiting(_) | ToUi::Busy(_) | ToUi::Notice(_) | ToUi::Created(_) => {}
                 ToUi::ToolFinished(_, done) => seen.finished.push(done),
                 ToUi::Saved(_) => seen.saved += 1,
                 ToUi::Ask(q, reply) => {
@@ -1278,7 +1391,8 @@ mod tests {
 
     /// Runs `job` on a real worker over the live view, replaying `cassette`;
     /// returns once the run is over (or panics after a while).
-    fn run_live(cx: &mut TestAppContext, chat: &Entity<Chat>, job: Job, cassette: &str) -> Arc<dyn Transport> {
+    fn run_live(cx: &mut TestAppContext, chat: &Entity<Chat>, mut job: Job, cassette: &str) -> Arc<dyn Transport> {
+        job.own = chat.read_with(cx, |c, _| c.own.clone());
         let transport: Arc<dyn Transport> = Arc::new(Replay::from_text("t", cassette, TimeScale::new(1.0)).unwrap());
         let keys = Keys::in_memory(|_| Some("sk-test".into()));
         let t = transport.clone();
@@ -1362,6 +1476,63 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.session().reviews.iter().any(|r| r.id == id)));
         assert!(std::fs::read_to_string(f.0.join("Tighten the smile.review.txt")).unwrap().contains("Laura grins."));
         assert!(!chat.read_with(cx, |c, _| c.waiting_for_files()));
+    }
+
+    #[gpui::test]
+    fn a_busy_conversation_opens_read_only_and_cannot_be_sent_to_or_removed(cx: &mut TestAppContext) {
+        let f = Folder::new("read-only");
+        seen_disclosure(&f);
+        let (_window, _view, chat) = live(cx, &f);
+        run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        let id = chat.read_with(cx, |c, _| c.thread().unwrap().id.clone());
+        chat.update(cx, |c, cx| c.new_thread(cx)).unwrap();
+        // The finished run is free again: probing it takes nothing from it.
+        assert_eq!(chat.read_with(cx, |c, _| c.probe(&id)), Ok(()));
+        let store = ThreadStore::for_script(&f.0.join("film.fdx"));
+        let held = store.lock(&id, Duration::ZERO).unwrap();
+        assert_eq!(chat.read_with(cx, |c, _| c.probe(&id)), Err(StoreError::Busy));
+        chat.update(cx, |c, cx| c.open_thread(&id, cx)).unwrap();
+        assert!(chat.read_with(cx, |c, _| c.read_only()));
+        assert!(chat.read_with(cx, |c, _| c.notices().iter().any(|n| n == READ_ONLY_NOTE)));
+        assert_eq!(chat.update(cx, |c, cx| c.send("More", cx)), Err(SendError::ReadOnly));
+        assert_eq!(chat.update(cx, |c, cx| c.retry(cx)), Err(SendError::ReadOnly));
+        assert!(chat.update(cx, |c, cx| c.remove_thread(&id, cx)).unwrap_err().contains("Another program"));
+        // The other program lets go: the conversation can be sent to again
+        // (here it fails later, for want of keys, but not as read-only).
+        drop(held);
+        assert_ne!(chat.update(cx, |c, cx| c.send("More", cx)), Err(SendError::ReadOnly));
+        assert!(!chat.read_with(cx, |c, _| c.read_only()));
+    }
+
+    #[gpui::test]
+    fn removing_a_conversation_deletes_its_file_only(cx: &mut TestAppContext) {
+        let f = Folder::new("remove");
+        seen_disclosure(&f);
+        let (_window, _view, chat) = live(cx, &f);
+        run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        let id = chat.read_with(cx, |c, _| c.thread().unwrap().id.clone());
+        chat.update(cx, |c, cx| c.remove_thread(&id, cx)).unwrap();
+        let store = ThreadStore::for_script(&f.0.join("film.fdx"));
+        assert!(store.list().unwrap().is_empty());
+        assert!(store.lock_path(&id).unwrap().exists(), "lock files are never deleted");
+        assert!(chat.read_with(cx, |c, _| c.thread().is_none()), "the open conversation became a new one");
+    }
+
+    #[gpui::test]
+    fn a_new_thread_being_run_is_ours_and_cannot_be_removed(cx: &mut TestAppContext) {
+        let f = Folder::new("remove-running");
+        seen_disclosure(&f);
+        let (_window, _view, chat) = live(cx, &f);
+        run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        let id = chat.read_with(cx, |c, _| c.thread().unwrap().id.clone());
+        // Our own run of it (as the worker starts one) is "here", never "elsewhere".
+        let own = chat.read_with(cx, |c, _| c.own.clone());
+        let store = ThreadStore::for_script(&f.0.join("film.fdx"));
+        let run = own.start(&store, &id, Duration::ZERO).unwrap();
+        assert_eq!(chat.read_with(cx, |c, _| c.probe(&id)), Err(StoreError::RunningHere));
+        assert_eq!(chat.update(cx, |c, cx| c.remove_thread(&id, cx)), Err("Stop the agent first.".to_string()));
+        drop(run);
+        assert_eq!(chat.read_with(cx, |c, _| c.probe(&id)), Ok(()));
     }
 
     #[gpui::test]
