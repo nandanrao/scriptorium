@@ -788,26 +788,36 @@ fn a_review_changed_on_disk_between_calls_is_read_again() {
 }
 
 #[test]
-fn a_named_review_file_is_created_beside_the_script() {
+fn a_review_file_argument_is_refused_and_nothing_is_written() {
     let f = Folder::new("named");
+    let outside = f.script().parent().unwrap().parent().unwrap().join("planted.review.txt");
     let c = [
         tools(
             json!({}),
-            &[(
-                "toolu_1",
-                "suggest_change",
-                json!({"paragraph_id": 1, "options": ["Laura grins."], "review_file": "notes.review.txt"}),
-            )],
+            &[
+                (
+                    "toolu_1",
+                    "suggest_change",
+                    json!({"paragraph_id": 1, "options": ["Laura grins."], "review_file": "notes.review.txt"}),
+                ),
+                (
+                    "toolu_2",
+                    "suggest_change",
+                    json!({"paragraph_id": 1, "options": ["Laura grins."], "review_file": outside.to_string_lossy()}),
+                ),
+            ],
         ),
-        text(result("toolu_1", "added suggestion #1"), "Done."),
+        text(json!({}), "Done."),
     ]
     .join("\n");
     let mut ui = TestUi::new();
     let done = run(&f, Which::New, "Tighten", &c, &mut ui).unwrap();
-    assert_eq!(f.reviews(), ["notes.review.txt"]);
-    assert!(f.read("notes.review.txt").contains("Laura grins."));
-    assert_eq!(f.session()["reviews"][0]["path"], "notes.review.txt");
-    // Not the thread's own review.
+    for r in &ui.finished {
+        assert!(r.result.is_error && r.result.content.contains("review_file"), "{}", r.result.content);
+    }
+    assert_eq!(ui.finished.len(), 2);
+    assert!(f.reviews().is_empty(), "{:?}", f.reviews());
+    assert!(!outside.exists());
     assert_eq!(done.thread.review_id, None);
 }
 

@@ -663,6 +663,19 @@ fn header_lines(body: &str) -> Vec<(usize, usize, &str)> {
     out
 }
 
+/// Whether `text` reads as a review file: its first line that isn't blank,
+/// a comment or a fence is the format line (`SCRIPT REVIEW v1` or `v2`).
+/// [`ReviewFile::parse`] reads any text; hosts that attach a file an agent
+/// named check this first, so a file that isn't a review is never attached
+/// (and its lines never sent anywhere).
+pub fn is_review_text(text: &str) -> bool {
+    let body = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    body.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .find(|l| !l.trim().is_empty() && !skipped(l))
+        .is_some_and(is_format_line)
+}
+
 fn is_format_line(bare: &str) -> bool {
     let t = bare.trim();
     t.eq_ignore_ascii_case(FORMAT_HEADER) || t.eq_ignore_ascii_case(FORMAT_HEADER_V2)
@@ -865,6 +878,16 @@ AFTER: They are playing truco (Argentinian card game).
 
     fn opts(e: &Entry) -> Vec<String> {
         e.options.iter().map(|o| Line::join(o)).collect()
+    }
+
+    #[test]
+    fn review_text_starts_with_the_format_line() {
+        assert!(is_review_text("SCRIPT REVIEW v1\nScript: a.fdx\n"));
+        assert!(is_review_text("\u{FEFF}\r\n# notes\nscript review v2\r\n"));
+        assert!(!is_review_text(""));
+        assert!(!is_review_text("Script: a.fdx\nBEFORE: x\nAFTER: y\n"));
+        assert!(!is_review_text("export PATH=/tmp\nSCRIPT REVIEW v1\n"));
+        assert!(!is_review_text("SCRIPT REVIEW v10\n"));
     }
 
     #[test]

@@ -29,6 +29,7 @@ use serde_json::Value;
 pub use block::{MAX_LINES, Spot, block_entry};
 pub use catalogue::{
     HostField, KINDS, MAX_BATCH, MAX_OPTIONS, MAX_PAGE, PAGE, ToolSpec, add_before, add_host_fields, catalogue,
+    check_args,
 };
 pub use read::{MIN_READ_BUDGET, NOT_EDITABLE, READ_BUDGET, script_size};
 pub use reviews::{SuggestionRow, find_review, item_numbered, item_numbers, suggestion_rows};
@@ -99,8 +100,9 @@ pub enum Target {
     /// ([`Review::pin_id`](scriptorium_review::Review::pin_id), per the host
     /// contract): two reviews with the same id can't be told apart.
     Review { index: usize, id: String },
-    /// A review file by path (MCP's `review_file`), as the host gave it in
-    /// the call. The host resolves it with [`find_review`], opening, creating
+    /// A review file by path (MCP's and the CLI `tool`'s `review_file`;
+    /// the built-in agent isn't offered it, see [`check_args`]), as the host
+    /// gave it in the call. The host resolves it with [`find_review`], opening, creating
     /// and attaching it if it isn't attached. If it was already attached,
     /// duplicates were checked against it.
     File(String),

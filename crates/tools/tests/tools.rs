@@ -7,7 +7,8 @@ use scriptorium_review::{Decision, Line, Review, Session};
 use scriptorium_tools::prompt::{SYSTEM, system, unknown_tools};
 use scriptorium_tools::{
     Append, Applied, Ctx, Failed, HostField, MAX_BATCH, Outcome, Proposal, Target, ToolError, add_before,
-    add_host_fields, apply, call, catalogue, find_review, item_numbered, item_numbers, may_append, script_size,
+    add_host_fields, apply, call, catalogue, check_args, find_review, item_numbered, item_numbers, may_append,
+    script_size,
 };
 use serde_json::{Value, json};
 
@@ -1083,4 +1084,40 @@ fn every_tool_that_can_append_is_in_may_append() {
         Ok(Outcome::Append(_))
     ));
     assert!(!may_append("no_such_tool"));
+}
+
+#[test]
+fn check_args_refuses_arguments_not_offered() {
+    let specs = catalogue();
+    let get = |name: &str| specs.iter().find(|s| s.name == name).unwrap();
+    let ok = |name: &str, args: serde_json::Value| check_args(get(name), &args);
+    assert_eq!(ok("suggest_change", json!({ "paragraph_id": 1, "options": ["x"], "why": "y" })), Ok(()));
+    assert_eq!(ok("script_info", serde_json::Value::Null), Ok(()));
+    let block = json!({ "paragraph_ids": [1, 2], "options": [[{ "kind": "Action", "text": "x" }], []] });
+    assert_eq!(ok("suggest_change", block), Ok(()));
+    // Wrong types are the tool's to refuse, with its own wording.
+    assert_eq!(ok("suggest_change", json!({ "paragraph_id": "one", "options": "x" })), Ok(()));
+
+    let refused = |name: &str, args: serde_json::Value, at: &str| {
+        let e = ok(name, args).unwrap_err().to_string();
+        assert!(e.contains(&format!("`{at}`")) && e.contains(name), "{e}");
+    };
+    refused("suggest_change", json!({ "paragraph_id": 1, "options": ["x"], "review_file": "/etc/x" }), "review_file");
+    refused("suggest_change", json!({ "before": "Laura smiles.", "options": ["x"] }), "before");
+    refused(
+        "suggest_changes",
+        json!({ "suggestions": [{ "paragraph_id": 1, "options": ["x"] }], "review_file": "a" }),
+        "review_file",
+    );
+    refused(
+        "suggest_changes",
+        json!({ "suggestions": [{ "paragraph_id": 1, "options": ["x"] }, { "paragraph_id": 2, "options": ["y"], "review_file": "a" }] }),
+        "suggestions[1].review_file",
+    );
+    refused(
+        "suggest_change",
+        json!({ "insert_after": 1, "options": [[{ "kind": "Action", "text": "x", "file": "a" }]] }),
+        "options[0][0].file",
+    );
+    refused("read_scene", json!({ "scene": 1, "path": "/etc" }), "path");
 }

@@ -265,6 +265,20 @@ fn tool_subcommand() {
     assert!(b.contains("\nId: ") && b.contains("BEFORE: Laura smiles.") && b.contains("PARA: 3"), "{b}");
     assert_eq!(session(&f.0)["reviews"].as_array().unwrap().len(), 2);
 
+    // review_file names only a .review.txt (absolute paths stay allowed:
+    // the user or their agent chose it), and arguments not offered are refused.
+    std::fs::write(f.path("notes.txt"), "keep me\n").unwrap();
+    let profile = f.path("profile").to_string_lossy().into_owned();
+    for bad in ["notes.txt", profile.as_str()] {
+        let (ok, text) = f.run(&["tool", "film.fdx", "suggest_change", args, "--review-file", bad]);
+        assert!(!ok && text.contains(".review.txt"), "{bad}: {text}");
+    }
+    assert_eq!(std::fs::read_to_string(f.path("notes.txt")).unwrap(), "keep me\n");
+    assert!(!f.path("profile").exists());
+    let (ok, text) = f.run(&["tool", "film.fdx", "read_scene", r#"{"scene": 1, "path": "/etc"}"#]);
+    assert!(!ok && text.contains("`path`"), "{text}");
+    assert_eq!(session(&f.0)["reviews"].as_array().unwrap().len(), 2);
+
     let (ok, text) = f.run(&["tool", "film.fdx", "no_such_tool"]);
     assert!(!ok && text.contains("unknown tool"), "{text}");
     let (ok, text) = f.run(&["tool", "film.fdx", "read_scene", "{not json"]);

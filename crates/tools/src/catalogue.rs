@@ -4,6 +4,7 @@
 pub use scriptorium_agent::ToolSpec;
 use serde_json::{Value, json};
 
+use crate::ToolError;
 use crate::block::MAX_LINES;
 use crate::read::{MIN_READ_BUDGET, READ_BUDGET};
 
@@ -221,5 +222,72 @@ fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> 
         name: name.into(),
         description: description.into(),
         schema: json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false }),
+    }
+}
+
+/// Checks that `args` uses only the arguments `spec` offers: every object
+/// whose schema says `additionalProperties: false` (each spec's top level,
+/// a batch's items, a line) may hold only the properties listed, so a model
+/// can't pass an argument the host didn't offer (the built-in agent isn't
+/// offered `review_file`, which names any file). Types and values are left
+/// to the tools, which phrase those errors themselves.
+pub fn check_args(spec: &ToolSpec, args: &Value) -> Result<(), ToolError> {
+    unoffered(&spec.schema, args, "").map_or(Ok(()), |at| {
+        Err(ToolError::Args(format!("{} doesn't take the argument `{at}`: use only the arguments it lists", spec.name)))
+    })
+}
+
+/// The first argument in `value` that `schema` doesn't offer, as a path
+/// (`suggestions[2].review_file`), if any.
+fn unoffered(schema: &Value, value: &Value, at: &str) -> Option<String> {
+    if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
+        // Allowed if a branch of its type allows it (a value no branch's
+        // type fits is the tool's to refuse); else the first finding.
+        let fitting: Vec<&Value> = branches.iter().filter(|b| type_fits(b, value)).collect();
+        let found: Vec<String> = fitting.iter().filter_map(|b| unoffered(b, value, at)).collect();
+        return if found.len() < fitting.len() { None } else { found.into_iter().next() };
+    }
+    match value {
+        Value::Object(map) => {
+            let props = schema.get("properties").and_then(Value::as_object);
+            let closed = schema.get("additionalProperties") == Some(&Value::Bool(false));
+            for (k, v) in map {
+                let path = if at.is_empty() { k.clone() } else { format!("{at}.{k}") };
+                match props.and_then(|p| p.get(k)) {
+                    Some(sub) => {
+                        if let Some(found) = unoffered(sub, v, &path) {
+                            return Some(found);
+                        }
+                    }
+                    None if closed => return Some(path),
+                    None => {}
+                }
+            }
+            None
+        }
+        Value::Array(items) => {
+            let sub = schema.get("items")?;
+            items.iter().enumerate().find_map(|(i, v)| unoffered(sub, v, &format!("{at}[{i}]")))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `value` is of a type `schema` names (any, if it names none).
+fn type_fits(schema: &Value, value: &Value) -> bool {
+    let name = match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    let fits = |t: &Value| t == name || (t == "number" && name == "integer");
+    match schema.get("type") {
+        None => true,
+        Some(Value::Array(types)) => types.iter().any(fits),
+        Some(t) => fits(t),
     }
 }

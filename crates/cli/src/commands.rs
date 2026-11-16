@@ -1187,6 +1187,11 @@ pub fn tool(
     notes: &mut Vec<String>,
 ) -> Result<String, String> {
     let mut args = args.clone();
+    // Only the arguments `tool --list --json` shows (typos and made-up ones
+    // are refused rather than ignored).
+    if let Some(spec) = tool_specs().iter().find(|s| s.name == name) {
+        scriptorium_tools::check_args(spec, &args).map_err(|e| e.to_string())?;
+    }
     let _lock = if READ_ONLY_TOOLS.contains(&name) { None } else { Some(lock(script)?) };
     let mut o = if READ_ONLY_TOOLS.contains(&name) {
         Opened::open_read_only(script, notes)?
@@ -1241,6 +1246,15 @@ pub fn tool(
             Some(r) => (r, true),
             None => {
                 let at = review_at.clone().expect("a file target comes from review_file");
+                // A review file that isn't attached yet is attached or
+                // created only as a `*.review.txt`: never some other file
+                // the agent named. (Its format line isn't required: review
+                // files without one are valid and attach as `reviews add`
+                // attaches them.)
+                let named = at.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if !named.ends_with(".review.txt") {
+                    return Err(format!("{stored}: review_file must name a .review.txt file"));
+                }
                 if at.exists() {
                     // Attached the way `reviews add` does (its saved
                     // decisions applied, its `Id:` pinned).

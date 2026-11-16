@@ -264,6 +264,17 @@ fn paths_are_relative_to_the_script_not_the_server() {
     );
     assert!(err && text.contains("doesn't exist") && text.contains("review_file"), "{text}");
     assert!(!s.dir.join("nowhere").exists());
+    // Only a .review.txt, and no folder made for anything else.
+    std::fs::write(scripts.join("notes.txt"), "keep me\n").unwrap();
+    for bad in ["notes.txt", "made/x.txt"] {
+        let (text, err) = s.call(
+            "suggest_change",
+            json!({ "script": script, "review_file": bad, "paragraph_id": id, "options": ["x y z"] }),
+        );
+        assert!(err && text.contains(".review.txt"), "{bad}: {text}");
+    }
+    assert_eq!(std::fs::read_to_string(scripts.join("notes.txt")).unwrap(), "keep me\n");
+    assert!(!scripts.join("made").exists());
 
     // Two reviews attached: the error names the parameter, not a CLI flag.
     let (text, err) = s.call("decide_suggestion", json!({ "script": script, "n": 1, "decision": "accept" }));

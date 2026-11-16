@@ -8,7 +8,7 @@
 //! `files`, `output`) is relative to the script's folder: that is where the
 //! model expects them, whatever folder the server was started in.
 //!
-//! A `review_file` in a folder that doesn't exist yet: the folder is created
+//! `review_file` must name a `*.review.txt`. One in a folder that doesn't exist yet: the folder is created
 //! when it is inside the script's folder (e.g. `reviews/dialogue.review.txt`);
 //! anywhere else it is an error, so a typo never scatters folders around the
 //! disk.
@@ -36,7 +36,7 @@ const SCRIPT: &str = "Absolute path to the screenplay (.fdx). A relative path is
                       was started in, which usually isn't the script's.";
 const REVIEW: &str = "Which attached review to use, by name or file (a path relative to the script's folder). Leave \
                       out when only one review is attached to the script.";
-const REVIEW_FILE: &str = "The review file to add to, e.g. \"dialogue-pass.review.txt\": a path relative to the \
+const REVIEW_FILE: &str = "The review file to add to, ending in .review.txt, e.g. \"dialogue-pass.review.txt\": a path relative to the \
                            script's folder (or absolute), created and attached if missing. Always give one, named \
                            for the pass, and keep it for the whole pass.";
 const FILES: &str = "Review files: paths relative to the script's folder, or absolute.";
@@ -266,6 +266,10 @@ fn in_script_dir(script: &str, path: &str) -> Result<String, String> {
 /// A `review_file` resolved like [`in_script_dir`], creating its folder if
 /// it's missing and inside the script's folder (see the module docs).
 fn review_file_at(script: &str, file: &str) -> Result<String, String> {
+    // Checked again by the CLI's `tool`; here too so no folder is made for it.
+    if !file.to_lowercase().ends_with(".review.txt") {
+        return Err(format!("{file}: review_file must name a .review.txt file"));
+    }
     let at = in_script_dir(script, file)?;
     let parent = match Path::new(&at).parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),

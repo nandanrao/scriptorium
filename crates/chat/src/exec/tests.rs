@@ -354,27 +354,96 @@ fn plan_review_path_names_a_free_file() {
 }
 
 #[test]
-fn a_named_review_file_is_created_or_attached() {
+fn an_argument_not_offered_is_refused() {
     let mut s = OneStore(Mem::new());
     let mut file = thread("Dialogue pass");
-    let named = |id: &str, para: u64, option: &str| ToolCall {
-        input: json!({"paragraph_id": para, "options": [option], "review_file": "notes.review.txt"}),
-        ..suggest(id, para, option)
+    // The host offers no `review_file`: naming any file is refused before
+    // anything is opened, so nothing is created, attached or written.
+    for (path, input) in [
+        (
+            "notes.review.txt",
+            json!({"paragraph_id": 1, "options": ["Laura grins."], "review_file": "notes.review.txt"}),
+        ),
+        ("/home/u/.profile", json!({"paragraph_id": 1, "options": ["x"], "review_file": "/home/u/.profile"})),
+        (
+            "batch item",
+            json!({"suggestions": [{"paragraph_id": 1, "options": ["x"], "review_file": "../x.review.txt"}]}),
+        ),
+    ] {
+        let name = if input.get("suggestions").is_some() { "suggest_changes" } else { "suggest_change" };
+        let call = ToolCall { name: name.into(), input, ..suggest("a", 1, "x") };
+        let done = run_call(&mut s, &mut file, &call);
+        assert!(done.result.is_error && done.result.content.contains("review_file"), "{path}: {}", done.result.content);
+        assert!(s.0.files.is_empty() && s.0.session.reviews.is_empty(), "{path}");
+    }
+    // A read tool too.
+    let call = ToolCall {
+        name: "list_suggestions".into(),
+        input: json!({"review": "x", "path": "/etc"}),
+        ..suggest("b", 1, "x")
     };
-    let done = call(&mut s, &mut file, named("a", 1, "Laura grins."));
-    assert!(!done.result.is_error, "{}", done.result.content);
-    // It went to the named file, not the thread's own review.
-    assert_eq!(
-        s.0.files.keys().map(|p| p.file_name().unwrap().to_str().unwrap()).collect::<Vec<_>>(),
-        ["notes.review.txt"]
-    );
-    assert!(s.0.file("notes.review.txt").contains("Laura grins."));
+    let done = run_call(&mut s, &mut file, &call);
+    assert!(done.result.is_error && done.result.content.contains("`path`"), "{}", done.result.content);
     assert_eq!(file.review_path, None);
-    // Again: the same file, now attached.
-    let done = call(&mut s, &mut file, named("b", 3, "I am going to town tomorrow."));
-    assert!(!done.result.is_error, "{}", done.result.content);
-    assert_eq!(s.0.session.reviews.len(), 1);
-    assert!(s.0.file("notes.review.txt").contains("going to town"));
+}
+
+/// Suggestions for `path` as a [`Target::File`], through the apply path
+/// (what `review_file` would give if a host passed one on).
+fn to_file(m: &mut Mem, file: &mut ThreadFile, path: &str) -> Result<Applied, ReviewError> {
+    let append = {
+        let ctx =
+            Ctx { doc: &m.doc, session: &m.session, script_name: "film.fdx", is_caps: &*m.caps, default_review: None };
+        let args = json!({"paragraph_id": 1, "options": ["Laura grins."], "review_file": path});
+        match scriptorium_tools::call(&ctx, "suggest_change", &args).unwrap() {
+            Outcome::Append(a) => a,
+            other => panic!("{other:?}"),
+        }
+    };
+    apply_append(m, file, append)
+}
+
+#[test]
+fn a_file_target_must_be_a_review_in_the_scripts_folder() {
+    let base = std::env::temp_dir().join(format!("scriptorium-file-target-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("film")).unwrap();
+    let base = base.canonicalize().unwrap();
+    let mut m = Mem::new();
+    m.dir = base.join("film");
+    let outside = base.join("outside.review.txt");
+    std::fs::write(&outside, format!("{FORMAT_HEADER}\n")).unwrap();
+    m.files.insert(outside.clone(), format!("{FORMAT_HEADER}\n"));
+    // Not a review, though named like one.
+    m.files.insert(m.dir.join("config.review.txt"), "export PATH=/tmp\n".into());
+    m.files.insert(m.dir.join("notes.txt"), format!("{FORMAT_HEADER}\n"));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, m.dir.join("link.review.txt")).unwrap();
+    let before = m.files.clone();
+    let mut file = thread("Dialogue pass");
+    let mut refused = vec![
+        outside.to_string_lossy().into_owned(),
+        "../outside.review.txt".into(),
+        "sub/../../outside.review.txt".into(),
+        "config.review.txt".into(),
+        "notes.txt".into(),
+        "/home/u/.profile".into(),
+        "missing/x.review.txt".into(),
+    ];
+    if cfg!(unix) {
+        refused.push("link.review.txt".into());
+    }
+    for path in &refused {
+        let e = to_file(&mut m, &mut file, path).unwrap_err();
+        assert!(matches!(e, ReviewError::Failed(_)), "{path}: {e:?}");
+        assert_eq!(m.files, before, "{path}");
+        assert!(m.session.reviews.is_empty(), "{path}");
+    }
+    // A review in the folder: created, then attached and added to.
+    to_file(&mut m, &mut file, "pass.review.txt").unwrap();
+    assert!(m.file("pass.review.txt").starts_with(FORMAT_HEADER) && m.file("pass.review.txt").contains("Laura grins."));
+    assert_eq!(m.session.reviews.len(), 1);
+    assert_eq!(file.review_path, None);
+    std::fs::remove_dir_all(&base).unwrap();
 }
 
 /// A script whose files are always busy.

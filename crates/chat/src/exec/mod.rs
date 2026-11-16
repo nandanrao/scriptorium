@@ -39,7 +39,7 @@ use scriptorium_agent::file::ThreadFile;
 use scriptorium_agent::{ToolCall, ToolResult};
 use scriptorium_core::{Document, ElementKind, ParaId};
 use scriptorium_providers::Price;
-use scriptorium_review::file::{FORMAT_HEADER, insert_id};
+use scriptorium_review::file::{FORMAT_HEADER, insert_id, is_review_text};
 use scriptorium_review::sessionfile::{resolve_path, stored_path};
 use scriptorium_review::{ReviewFile, Session};
 use scriptorium_tools::{Append, Applied, Ctx, Failed, Outcome, Target};
@@ -384,15 +384,24 @@ fn find_by_id(store: &dyn ReviewStore, id: &str) -> Result<Option<PathBuf>, Revi
     Ok(None)
 }
 
-/// A review file named by path (MCP's `review_file`, if a thread's tools have
-/// it): relative to the script's folder, or absolute.
+/// A review file named by path (a [`Target::File`]). The built-in agent is
+/// never offered `review_file` ([`run_call`] refuses it), so this is defence
+/// in depth: the file must be a `*.review.txt` inside the script's folder
+/// once links are resolved, and a file that's there must already be a
+/// review ([`is_review_text`]); anything else is refused, never attached,
+/// created or written.
 fn file_review(store: &mut dyn ReviewStore, path: &str) -> Result<(usize, bool), ReviewError> {
-    let at = canonical(&resolve_path(store.dir(), path));
+    let at = review_in_folder(store.dir(), path)?;
     let stored = stored_path(store.dir(), &at);
     if let Some(r) = scriptorium_tools::find_review(store.session(), &stored) {
         return Ok((recheck(store, r)?, false));
     }
-    if store.disk_text(&at).is_some() {
+    if let Some(text) = store.disk_text(&at) {
+        if !is_review_text(&text) {
+            return Err(ReviewError::Failed(format!(
+                "{path} isn't a review file (it doesn't start with {FORMAT_HEADER})"
+            )));
+        }
         return Ok((store.attach(&at)?, true));
     }
     let id = scriptorium_fsio::opened::new_review_id(path, &scriptorium_fsio::opened::review_salt(&at));
@@ -400,15 +409,35 @@ fn file_review(store: &mut dyn ReviewStore, path: &str) -> Result<(usize, bool),
     Ok((store.create(&at, &text)?, true))
 }
 
-/// `path` canonical, or its folder canonical when the file doesn't exist yet.
-fn canonical(path: &Path) -> PathBuf {
-    if let Ok(p) = path.canonicalize() {
-        return p;
+/// `path` (relative to `dir`, the script's folder, canonical) as a canonical
+/// path inside `dir` naming a `*.review.txt`, or why it can't be one: no
+/// `..`, the folder must exist, and the file (or its folder, when the file
+/// doesn't exist yet) resolved through any links must still be in `dir`.
+fn review_in_folder(dir: &Path, path: &str) -> Result<PathBuf, ReviewError> {
+    let refuse = |why: &str| Err(ReviewError::Failed(format!("{path}: {why}")));
+    let joined = resolve_path(dir, path);
+    let name = joined.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if !name.ends_with(".review.txt") {
+        return refuse("a review file's name ends in .review.txt");
     }
-    match (path.parent().and_then(|d| d.canonicalize().ok()), path.file_name()) {
-        (Some(dir), Some(name)) => dir.join(name),
-        _ => path.to_path_buf(),
+    if joined.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return refuse("review files go in the script's folder");
     }
+    let at = match joined.canonicalize() {
+        Ok(p) => p,
+        Err(_) => match (joined.parent().map(Path::canonicalize), joined.file_name()) {
+            (Some(Ok(folder)), Some(file)) => folder.join(file),
+            _ => return refuse("that folder doesn't exist"),
+        },
+    };
+    if !at.starts_with(dir) || at.parent().is_none_or(|p| !p.starts_with(dir)) {
+        return refuse("review files go in the script's folder");
+    }
+    // A link named like a review may point at a file that isn't one.
+    if !at.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().ends_with(".review.txt")) {
+        return refuse("a review file's name ends in .review.txt");
+    }
+    Ok(at)
 }
 
 /// Review `r` again if its file changed on disk since it was read: the
@@ -487,6 +516,13 @@ pub struct Added {
 /// are error results for the model, never a stop. The whole-script check is
 /// the caller's, before this ([`whole_script_gate`]).
 pub fn run_call(script: &mut dyn Script, file: &mut ThreadFile, call: &ToolCall) -> CallDone {
+    // Only the arguments the host offered ([`scriptorium_tools::catalogue`],
+    // without MCP's `review_file`): the tools read more than that.
+    if let Some(spec) = scriptorium_tools::catalogue().iter().find(|s| s.name == call.name)
+        && let Err(e) = scriptorium_tools::check_args(spec, &call.input)
+    {
+        return CallDone::new(call, e.to_string(), true);
+    }
     let writes = scriptorium_tools::may_append(&call.name);
     let mut store = match script.open(writes) {
         Ok(s) => s,
