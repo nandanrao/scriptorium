@@ -1657,6 +1657,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_passing_notice_goes_after_a_while(cx: &mut TestAppContext) {
+        let f = Folder::new("notice-expires");
+        let (_window, view) = workspace(cx, &f);
+        let notice = |cx: &mut TestAppContext| view.read_with(cx, |v, _| v.notice_text().to_string());
+        view.update(cx, |v, cx| v.set_notice("Undid the decision on #1.", cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        assert_eq!(notice(cx), "Undid the decision on #1.");
+        cx.executor().advance_clock(Duration::from_secs(6));
+        cx.run_until_parked();
+        assert_eq!(notice(cx), "");
+    }
+
+    #[gpui::test]
     fn a_question_with_the_panel_closed_shows_in_the_status_bar_until_seen(cx: &mut TestAppContext) {
         let f = Folder::new("say-unsay");
         let (window, view) = workspace(cx, &f);

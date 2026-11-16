@@ -360,8 +360,15 @@ pub struct ScriptView {
     numbers: Vec<Vec<usize>>,
     item_by_para: Vec<HashMap<ParaId, usize>>,
     queue_scroll: UniformListScrollHandle,
-    /// The status bar's message (cleared by the next key the writer presses).
+    /// The status bar's message: cleared by the writer's next action, or
+    /// after [`NOTICE_FOR`] unless it is sticky.
     notice: SharedString,
+    /// When `notice` was set, and whether it stays until taken back (the
+    /// agent's lines while the panel is closed: they go when seen).
+    notice_at: Instant,
+    notice_sticky: bool,
+    /// Clears the notice set at that time once [`NOTICE_FOR`] is up.
+    notice_timer: Option<(Instant, Task<()>)>,
     /// An error the writer may not have seen yet: shown beside `notice`, and
     /// never replaced by a background notice (a reload), only by the writer's
     /// next action.
@@ -397,6 +404,10 @@ pub struct ScriptView {
 }
 
 /// Said when a rewrite is undone because its line went away.
+/// How long a passing notice ("Undid the decision on #1.", what a reload
+/// brought in) stays in the status bar.
+const NOTICE_FOR: Duration = Duration::from_secs(10);
+
 const REWRITE_LOST: &str = "The line you were rewriting was removed, so the rewrite was undone.";
 
 /// How often the app looks for changes another program made to its files.
@@ -445,6 +456,9 @@ impl ScriptView {
             item_by_para: vec![],
             queue_scroll: UniformListScrollHandle::new(),
             notice: notices.join("  ").into(),
+            notice_at: Instant::now(),
+            notice_sticky: false,
+            notice_timer: None,
             error: "".into(),
             reload_note: None,
             shown_notes: notices.iter().cloned().collect(),
@@ -526,9 +540,40 @@ impl ScriptView {
     /// A message in answer to something the writer did: it replaces any
     /// other (the writer has been looking at the screen).
     fn say(&mut self, text: impl Into<SharedString>) {
-        self.notice = text.into();
+        self.set_notice_line(text.into(), false);
         self.error = "".into();
         self.reload_note = None;
+    }
+
+    fn set_notice_line(&mut self, text: SharedString, sticky: bool) {
+        self.notice = text;
+        self.notice_at = Instant::now();
+        self.notice_sticky = sticky;
+    }
+
+    /// A passing notice goes after [`NOTICE_FOR`] (errors stay until the
+    /// writer's next action). Called on render, where the notice shows.
+    fn expire_notice(&mut self, cx: &mut Context<Self>) {
+        if self.notice.is_empty() || self.notice_sticky {
+            self.notice_timer = None;
+            return;
+        }
+        let at = self.notice_at;
+        if self.notice_timer.as_ref().is_some_and(|(t, _)| *t == at) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.notice_at == at && !this.notice_sticky {
+                    this.notice = "".into();
+                    this.reload_note = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        });
+        self.notice_timer = Some((at, task));
     }
 
     /// Something went wrong (possibly in the background, like an autosave).
@@ -550,7 +595,7 @@ impl ScriptView {
             _ => summary,
         };
         if let Some(text) = summary.render() {
-            self.notice = text.into();
+            self.set_notice_line(text.into(), false);
             self.reload_note = Some((Instant::now(), summary));
         }
     }
@@ -1469,6 +1514,8 @@ impl ScriptView {
             }
             AgentPanelEvent::Say(text) => {
                 this.say(text.clone());
+                // It goes when the writer sees it (Unsay), not on a timer.
+                this.notice_sticky = true;
                 cx.notify();
             }
             // Only that line: a newer notice or an error stays.
@@ -1528,6 +1575,11 @@ impl ScriptView {
             crate::log::info(&format!("agent panel {}", if open { "open" } else { "closed" }));
         }
         self.agent_open = open;
+        // The agent's lines for a closed panel ("…Ctrl+L to see") are seen now.
+        if open && self.notice_sticky {
+            self.notice = "".into();
+            self.notice_sticky = false;
+        }
         crate::settings::set_agent_panel_open(open);
         cx.notify();
     }
@@ -3023,6 +3075,7 @@ impl Focusable for ScriptView {
 
 impl Render for ScriptView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.expire_notice(cx);
         let card = self.review().map(|_| self.render_card(window, cx));
         let agent = self.agent.as_ref().filter(|_| self.agent_open).map(|(panel, _)| panel.clone());
         let width = window.viewport_size().width / px(1.);
