@@ -7,6 +7,8 @@
 mod anthropic;
 mod openai;
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -41,11 +43,37 @@ pub struct ToolSpec {
 }
 
 /// An HTTP request for the caller to send. `body` is `Null` for a GET.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Debug` shows header names but not their values (one carries the API
+/// key), except a few harmless ones, so a request can be logged or put in a
+/// panic message without leaking the key.
+#[derive(Clone, PartialEq)]
 pub struct Request {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Value,
+}
+
+/// Headers whose values `Request`'s `Debug` shows.
+const SHOWN_HEADERS: &[&str] = &["content-type", "accept", "anthropic-version", "anthropic-beta"];
+
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Headers<'a>(&'a [(String, String)]);
+        impl fmt::Debug for Headers<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let shown = |k: &str| SHOWN_HEADERS.iter().any(|s| s.eq_ignore_ascii_case(k));
+                f.debug_list()
+                    .entries(self.0.iter().map(|(k, v)| (k, if shown(k) { v.as_str() } else { "<redacted>" })))
+                    .finish()
+            }
+        }
+        f.debug_struct("Request")
+            .field("url", &self.url)
+            .field("headers", &Headers(&self.headers))
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 /// Whether to ask for the model's reasoning. Anthropic only for now; the

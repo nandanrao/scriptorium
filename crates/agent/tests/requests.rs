@@ -763,3 +763,23 @@ fn openai_never_sends_whitespace_as_content() {
     assert_eq!(roles, ["user", "assistant", "tool"]);
     assert_eq!(msgs[1]["content"], Value::Null);
 }
+
+#[test]
+fn request_debug_hides_header_values() {
+    let req = scriptorium_agent::Request {
+        url: "https://api.example.org/v1/messages".into(),
+        headers: vec![
+            ("x-api-key".into(), "sk-secret-1".into()),
+            ("Authorization".into(), "Bearer sk-secret-2".into()),
+            ("content-type".into(), "application/json".into()),
+        ],
+        body: serde_json::json!({"model": "m"}),
+    };
+    let shown = format!("{req:?} {req:#?}");
+    assert!(!shown.contains("sk-secret"), "{shown}");
+    assert!(
+        shown.contains("x-api-key") && shown.contains("<redacted>") && shown.contains("application/json"),
+        "{shown}"
+    );
+    assert!(shown.contains("api.example.org") && shown.contains("\"model\""), "{shown}");
+}
