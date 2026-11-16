@@ -354,6 +354,9 @@ impl Stream {
     }
 }
 
+/// An offline failure, the same while it waits to retry and once it gave up.
+const OFFLINE: &str = "Can't reach the service. Check your internet connection.";
+
 /// What went wrong, in words for the writer (the raw text stays in the detail).
 pub fn plain_error(error: &AgentError) -> String {
     use scriptorium_agent::ErrorKind;
@@ -362,7 +365,7 @@ pub fn plain_error(error: &AgentError) -> String {
             ErrorKind::Auth => "The service refused the key. Check your key in Accounts.",
             ErrorKind::RateLimit => "The service is limiting requests, or the credit is used up. Check Accounts.",
             ErrorKind::Overloaded => "The service is busy right now.",
-            ErrorKind::Offline => "Can't reach the service. Check your connection.",
+            ErrorKind::Offline => OFFLINE,
             ErrorKind::BadRequest => "This model wasn't accepted. Choose another model.",
             ErrorKind::Other => "The service had a problem.",
         },
@@ -379,7 +382,7 @@ pub fn waiting_text(secs: u64, kind: Option<scriptorium_agent::ErrorKind>) -> St
     use scriptorium_agent::ErrorKind;
     match kind {
         Some(ErrorKind::Offline) => {
-            format!("Can't reach the service \u{2014} check your internet connection. Trying again in {secs}s…")
+            format!("{OFFLINE} Trying again in {secs}s…")
         }
         Some(ErrorKind::Overloaded | ErrorKind::RateLimit) | None => {
             format!("The service is busy, trying again in {secs}s…")
@@ -1055,6 +1058,9 @@ mod tests {
         use scriptorium_agent::ErrorKind;
         let offline = waiting_text(4, Some(ErrorKind::Offline));
         assert!(offline.contains("internet connection") && !offline.contains("busy"), "{offline}");
+        // The countdown and the final row say it the same way.
+        let gave_up = plain_error(&AgentError::offline("no connection"));
+        assert!(offline.starts_with(&gave_up), "{offline} / {gave_up}");
         assert!(waiting_text(4, Some(ErrorKind::Overloaded)).contains("busy"));
         assert!(waiting_text(4, Some(ErrorKind::Other)).contains("had a problem"));
     }
