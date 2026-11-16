@@ -3,7 +3,18 @@
 Thank you for testing this. Scriptorium is an early version, so things may
 be rough. Everything you notice helps, including the small things.
 
-## What's new in 0.3.0
+## What's new in 0.4.0
+
+- **AI chat.** Press `Cmd+L` to open a chat column at the right. You talk
+  to an agent (Claude, GPT and others) about your script, and the changes it
+  proposes appear as suggestions on a review card for that conversation, to
+  decide as usual. Nothing in your script changes until you accept it.
+- **You bring your own API key.** See section 9 for getting one, setting it
+  up and the Mac's Keychain questions.
+
+Please do section 9 on a copy of your script.
+
+## What's new in 0.3.0 (still worth checking)
 
 - **Full editing.** `Return` splits a line in two, `Backspace` at the start
   of a line joins it to the one above, and `Tab` changes a line's type
@@ -252,3 +263,71 @@ Note anything that looks different and send a screenshot.
 
 *Optional, for the curious: the app also comes with a command-line tool for
 AI agents to work on the same script; you can ignore it.*
+
+## 9. Trying the AI chat (0.4.0)
+
+The chat needs an API key: a password that lets Scriptorium use an AI
+service on your account. It costs a little money per message, charged by the
+provider (not by us). A few chat messages typically cost cents; the chat
+shows the cost as you go. Work on a copy of your script.
+
+**Getting a key (pick one provider).**
+
+- Anthropic (Claude): console.anthropic.com, sign in, add a few dollars of
+  credit under Billing, then **API keys › Create key**.
+- OpenAI: platform.openai.com, sign in, add credit under Billing, then
+  **API keys › Create new secret key**.
+- OpenRouter: openrouter.ai, sign in, add credit, then **Keys › Create key**.
+  One key reaches many models.
+
+Copy the key when it is shown (you can't see it again). Keep it private.
+
+**Adding it to Scriptorium.**
+
+1. Open Scriptorium and your script. In the menu bar choose
+   **Scriptorium › AI accounts…**.
+2. Add an account, choose the provider, paste the key and save. Press
+   **Check**: it should say the key works.
+3. macOS asks whether Scriptorium may use the Keychain (it may ask for your
+   Mac's password). Choose **Always Allow**, not "Allow". This app is
+   ad-hoc signed, so macOS treats each new version as a different app and
+   **may ask again after every update**, and sometimes more than once in a
+   row. Choose **Always Allow** each time. If you press "Deny", the key
+   isn't saved: open AI accounts and paste it again.
+
+**If the Keychain keeps misbehaving (fallback).** Quit Scriptorium. In
+Terminal run `launchctl setenv SCRIPTORIUM_ANTHROPIC_KEY ` followed by your key
+(use `SCRIPTORIUM_OPENAI_KEY` or `SCRIPTORIUM_OPENROUTER_KEY` for the others),
+then open Scriptorium again. Scriptorium reads that variable when no Keychain
+key is found. This lasts until you restart the Mac; to clear it sooner run
+`launchctl unsetenv SCRIPTORIUM_ANTHROPIC_KEY`. Anyone who can read your
+Terminal history can see the key, so use the Keychain when you can.
+
+**Trying the chat.**
+
+- [ ] Press `Cmd+L`. Does the chat column open at the right? Does the
+      composer have the cursor? `Cmd+L` again closes it; your draft stays.
+- [ ] Type a question ("Who is the most active character in scene 3?")
+      and press Return. A card appears first explaining what is sent to the
+      provider. Read it, then press **Send**. (**Not now** keeps your draft.)
+- [ ] Watch the reply stream in. Do the "tool rows" (what the agent read)
+      make sense?
+- [ ] Ask for a change ("Make MARA's lines in scene 3 shorter").
+      Suggestions appear in the sidebar as a review named after the chat.
+      Open it, accept one, rewrite one, undo one.
+- [ ] Press `Cmd+.` while it is working: it should stop, and your
+      conversation stays.
+- [ ] Quit and reopen: is the conversation still in the thread list? (It is
+      saved next to your script in a folder named `MY SCRIPT.threads`.)
+- [ ] Ask something that needs the whole script ("Summarise the whole
+      script"). It should ask first, with a cost estimate.
+- [ ] Give a wrong key on purpose: is the error understandable?
+
+Please tell us the cost shown for what you tried, how long replies took,
+and anything the agent suggested that was wrong or odd. Chat conversations
+contain pieces of your script, so don't send us the `.threads` folder unless
+you are happy for us to see them.
+
+Where things live: accounts in
+`~/Library/Application Support/scriptorium/accounts.json` (no keys in it),
+keys in the Keychain (open Keychain Access and search "scriptorium").

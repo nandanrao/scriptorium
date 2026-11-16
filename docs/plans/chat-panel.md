@@ -3,7 +3,7 @@
 Status: **revised after two design reviews** (2026-11-15). The coordinator
 settled the reviewers' findings and the open questions while the user was
 asleep; items marked (U) are listed under "Decided overnight" for the user to
-revisit. Nothing built yet. This is the panel design doc that
+revisit. Built for v0.4.0 (2026-11-15). This is the panel design doc that
 [built-in-agent.md](built-in-agent.md) requires before any panel code.
 
 Read with: [built-in-agent.md](built-in-agent.md) (decisions, architecture,
@@ -27,16 +27,10 @@ gpui-kit.
 
 ## Decided overnight (coordinator, 2026-11-15; user may revisit)
 
-- (U) No implicit context: a message carries only what the writer typed, not
-  the scene or suggestion they're looking at. Deferred past v0.4.0.
-- (U) When the panel opens and the window is narrower than about 1600 px,
-  the sidebar collapses (to a rail with the view list's shortcuts); it comes
-  back when the panel closes or the window widens.
-- (U) `scriptorium chat` may write the session file while the app is open
-  (to attach a thread's review), as the MCP server does today; the app
-  reloads and merges. The in-app agent never writes the session file.
-- (U) `keyring` crate, Secret Service on Linux and the Keychain on macOS,
-  with the `SCRIPTORIUM_<PROVIDER>_KEY` env-var fallback.
+Moved to the decisions list in [PLAN.md](../PLAN.md) ("Chat panel decisions",
+decided 2026-11-15, user may revisit): no implicit context, the sidebar
+collapse below about 1600 px, `scriptorium chat` writing the session file, and
+the `keyring` crate with the env-var fallback.
 
 Also settled (no user input needed): the chat host is its own crate; one
 shared apply path; `review_path` in thread files; per-thread locking rules;
