@@ -283,7 +283,7 @@ impl ThreadList {
                         this.note = Some("Couldn't read the conversations for this script.".into());
                     }
                 }
-                this.read_at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                this.read_at = now_secs();
                 if select_open {
                     this.selected =
                         open_id.and_then(|id| this.rows.iter().position(|r| r.entry.id == id)).map_or(0, |i| i + 1);
@@ -658,6 +658,15 @@ impl Render for ThreadList {
             )
             .when(self.open, |d| d.child(self.render_list(cx)))
     }
+}
+
+/// Now, by the chat clock (so `SCRIPTORIUM_TEST_CLOCK` fixes "5 min ago"
+/// as it fixes the threads' own times), else the system clock.
+fn now_secs() -> u64 {
+    scriptorium_chat::clock::from_env()
+        .ok()
+        .and_then(|c| scriptorium_chat::core::model::parse_rfc3339(&c.clock.now()))
+        .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()))
 }
 
 #[cfg(test)]

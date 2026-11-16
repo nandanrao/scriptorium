@@ -18,7 +18,7 @@ use scriptorium_agent::{AgentError, Request};
 
 pub use cancel::CancelToken;
 pub use http::Http;
-pub use keys::{KeyError, KeySource, KeyStatus, Keys};
+pub use keys::{KEYRING_ENV, KeyError, KeySource, KeyStatus, Keys, keyring_off};
 pub use receive::{Received, receive};
 pub use replay::Replay;
 pub use time::TimeScale;

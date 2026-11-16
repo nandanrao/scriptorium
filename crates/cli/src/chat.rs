@@ -42,11 +42,10 @@ use serde_json::{Value, json};
 
 use crate::commands::{EXIT_BUSY, EXIT_DECLINED, EXIT_ERROR, EXIT_STOPPED, EXIT_USAGE, Failed};
 
-/// Set to `off` to keep keys out of the OS keyring: only the
-/// `SCRIPTORIUM_<ACCOUNT>_KEY` / `SCRIPTORIUM_<PROVIDER>_KEY` variables are
-/// read, and nothing on the machine's keyring is read or changed (CI, a
-/// session without a keyring, tests). `key set` and `key delete` refuse.
-pub const KEYRING_ENV: &str = "SCRIPTORIUM_KEYRING";
+/// `SCRIPTORIUM_KEYRING=off` (see the providers crate): `key set` and
+/// `key delete` refuse.
+pub use scriptorium_providers::shell::KEYRING_ENV;
+use scriptorium_providers::shell::keyring_off;
 
 pub fn command(cmd: &str, args: &[&str], notes: &mut Vec<String>) -> Result<String, Failed> {
     match cmd {
@@ -112,14 +111,10 @@ fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).expect("JSON values serialize") + "\n"
 }
 
-fn keyring_off() -> bool {
-    std::env::var(KEYRING_ENV).is_ok_and(|v| v.trim().eq_ignore_ascii_case("off"))
-}
-
 /// The keys: the OS keyring and the environment, or the environment alone
 /// with `SCRIPTORIUM_KEYRING=off`.
 fn keys() -> Keys {
-    if keyring_off() { Keys::env_only() } else { Keys::system() }
+    Keys::from_env()
 }
 
 fn accounts_path() -> Result<std::path::PathBuf, String> {

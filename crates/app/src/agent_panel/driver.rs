@@ -940,7 +940,7 @@ impl Chat {
             accepted: self.accepted.values().cloned().collect(),
             own: self.own.clone(),
         };
-        self.launch(job, transport, Keys::system(), cx)?;
+        self.launch(job, transport, super::keys(), cx)?;
         // The model may not use tools here, is retiring…: say so for this run.
         self.notices.extend(warnings);
         Ok(())

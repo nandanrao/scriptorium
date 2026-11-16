@@ -15,8 +15,10 @@
 //! [`accounts_changed`]; whatever shows accounts (the composer's model chip)
 //! observes [`AccountsChanged`] and redraws.
 //!
-//! Tests can set `SCRIPTORIUM_TEST_KEYS=memory` (an in-memory keychain) or
-//! `=env` (no keychain) so the real one is never touched, and
+//! `SCRIPTORIUM_KEYRING=off` keeps the keyring out, as in the CLI. Debug
+//! builds also take `SCRIPTORIUM_TEST_KEYS=memory` (an in-memory keychain)
+//! or `=env` (no keychain) so the real one is never touched; tests set
+//! one of these, and
 //! `XDG_CONFIG_HOME` to a scratch folder for the accounts file.
 
 mod form;
