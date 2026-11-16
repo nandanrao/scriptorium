@@ -48,7 +48,7 @@ use scriptorium_providers::{AccountsFile, Price, PriceBook, ProvidersError, Reso
 
 use crate::clock::{Clock, Clocks};
 use crate::exec::{self, CallDone, Gate, ReviewError};
-use crate::lock::CLI_WAIT;
+use crate::lock::{CLI_WAIT, OwnRuns, Run as OwnRun, ThreadLock};
 use crate::model::{disclosure_key, disclosure_text, host_of};
 use crate::naming;
 use crate::seen::Seen;
@@ -84,6 +84,26 @@ pub struct Request<'a> {
     /// zero for the app (it shows a busy thread at once).
     pub wait: Duration,
     pub limits: Limits,
+    /// The runs this process has going, for a program that runs more than
+    /// one thread (the app): the thread is locked through it, so a probe in
+    /// the same process sees this run ([`OwnRuns::probe`]) and a probe never
+    /// takes the lock out from under it. `None` for the CLI.
+    pub own: Option<&'a OwnRuns>,
+}
+
+/// A thread's lock, taken through [`Request::own`] or not.
+enum Held {
+    Plain(ThreadLock),
+    Own(OwnRun),
+}
+
+impl Held {
+    fn lock(&self) -> &ThreadLock {
+        match self {
+            Held::Plain(l) => l,
+            Held::Own(r) => r.lock(),
+        }
+    }
 }
 
 impl<'a> Request<'a> {
@@ -98,6 +118,7 @@ impl<'a> Request<'a> {
             allow_whole_script: false,
             wait: CLI_WAIT,
             limits: Limits::default(),
+            own: None,
         }
     }
 }
@@ -438,7 +459,14 @@ fn run_inner(
             accepted.push(k);
         }
         let existing = match &req.which {
-            Which::Thread(id) => Some(threads.lock_and_read(id, req.wait)?),
+            Which::Thread(id) => {
+                let held = match req.own {
+                    Some(own) => Held::Own(own.start(&threads, id, req.wait)?),
+                    None => Held::Plain(threads.lock(id, req.wait)?),
+                };
+                let file = threads.read(id)?;
+                Some((held, file))
+            }
             Which::New => None,
         };
         let resolved = settle_account(env.accounts, existing.as_ref().map(|(_, f)| f), req.account, req.model)?;
@@ -463,9 +491,12 @@ fn run_inner(
             (lock, file)
         }
         None => {
-            let lock = threads.create(env.clocks.ids.as_mut())?;
+            let lock = match req.own {
+                Some(own) => Held::Own(own.create(&threads, env.clocks.ids.as_mut())?),
+                None => Held::Plain(threads.create(env.clocks.ids.as_mut())?),
+            };
             let file = new_thread(
-                lock.id(),
+                lock.lock().id(),
                 message.unwrap_or_default(),
                 &file_name(req.script),
                 &resolved,
@@ -474,7 +505,7 @@ fn run_inner(
             (lock, file)
         }
     };
-    if let Some(w) = lock.warning() {
+    if let Some(w) = lock.lock().warning() {
         ui.notice(w);
     }
     if let Some(m) = message {
@@ -484,7 +515,7 @@ fn run_inner(
     let clock = &*env.clocks.clock;
     let save = |file: &mut ThreadFile| -> Result<(), HostError> {
         file.updated = clock.now();
-        threads.write(&lock, file)?;
+        threads.write(lock.lock(), file)?;
         Ok(())
     };
     save(&mut file)?;

@@ -192,6 +192,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(sec!("f"), gpui::NoAction, composer),
         KeyBinding::new(if cfg!(target_os = "macos") { "cmd-shift-f" } else { "ctrl-h" }, gpui::NoAction, composer),
     ];
+    b.extend(threads::bindings());
     if !cfg!(target_os = "macos") {
         // gpui-base's only redo key on Linux is Ctrl+Y; the app's is Ctrl+Shift+Z.
         // Every text field (the composer, the accounts sheet's) gets it.
@@ -263,7 +264,7 @@ impl AgentPanel {
             focus: cx.focus_handle(),
             script: script.clone(),
             script_path,
-            threads: cx.new(|cx| ThreadList::new(window, cx)),
+            threads: cx.new(|cx| ThreadList::new(chat.clone(), window, cx)),
             messages,
             composer,
             chat,
@@ -487,6 +488,9 @@ impl Render for AgentPanel {
             .on_action(cx.listener(Self::on_send))
             .on_action(cx.listener(Self::on_stop))
             .on_action(cx.listener(Self::on_new_thread))
+            .on_action(cx.listener(|this, _: &threads::OpenThreads, window, cx| {
+                this.threads.update(cx, |t, cx| t.open(window, cx))
+            }))
             .on_action(cx.listener(|this, _: &FocusNext, window, cx| this.cycle_focus(true, window, cx)))
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| this.cycle_focus(false, window, cx)))
             .on_action(cx.listener(|this, _: &UndoAny, window, cx| this.undo_menu(false, window, cx)))

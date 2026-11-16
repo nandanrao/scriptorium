@@ -290,9 +290,14 @@ fn a_thread_running_elsewhere_is_refused() {
     assert_eq!(out["retry"], "scriptorium chat film.fdx --thread t0001 --json More");
     let run = f.run(&["threads", "film.fdx", "set-model", "t0001", "work", "claude-haiku-4-5"], None).expect_err();
     assert!(run.stderr().contains("running in another program"), "{}", run.all());
-    // Reading isn't refused.
+    // Reading isn't refused, and the list says it's busy (text and JSON).
     f.run(&["threads", "film.fdx", "show", "t0001"], None).expect_ok();
+    let list = f.run(&["threads", "film.fdx", "--json"], None).expect_ok().json();
+    assert_eq!(list[0]["busy"], true);
+    assert!(f.run(&["threads", "film.fdx"], None).expect_ok().stdout().contains("busy: yes"));
     drop(held);
+    let list = f.run(&["threads", "film.fdx", "--json"], None).expect_ok().json();
+    assert_eq!(list[0]["busy"], false);
 
     let run = f.run(&["threads", "film.fdx", "set-model", "t0001", "work", "claude-haiku-4-5", "--json"], None);
     assert_eq!(run.expect_ok().json()["model"], "claude-haiku-4-5");
