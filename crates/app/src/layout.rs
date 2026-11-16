@@ -65,13 +65,18 @@ pub fn page_width() -> Pixels {
 /// list's left): centred when it fits; otherwise the visible part (text column
 /// and marks) is centred and the outer margins are cut off.
 pub fn page_left(width: Pixels) -> Pixels {
-    let page = page_width();
+    px(page_left_at(f32::from(width), zoom()))
+}
+
+/// [`page_left`] at zoom `z`, in plain numbers.
+fn page_left_at(width: f32, z: f32) -> f32 {
+    let page = 8.5 * 96.0 * z;
     if width >= page {
         return (width - page) / 2.;
     }
-    let visible_mid = inch((VISIBLE_LEFT + VISIBLE_RIGHT) / 2.);
+    let visible_mid = (VISIBLE_LEFT + VISIBLE_RIGHT) / 2. * 96.0 * z;
     // Never leave a gap at the right edge of the list.
-    (width / 2. - visible_mid).max(width - page).min(px(0.))
+    (width / 2. - visible_mid).max(width - page).min(0.)
 }
 
 /// Blank space above the first paragraph (the page's top margin).
@@ -143,6 +148,43 @@ mod tests {
         // Too narrow even for the column: shrink, but never below 0.5.
         assert!(zoom_for(500.0) < 1.0);
         assert_eq!(zoom_for(100.0), 0.5);
+    }
+
+    #[test]
+    fn zoom_hands_over_from_cropping_to_shrinking() {
+        // The column with its marks is 6.9 in = 662.4 px at 1.0, plus 16 px.
+        let edge = (VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0 + 16.0;
+        assert_eq!(zoom_for(edge), 1.0);
+        assert_eq!(zoom_for(edge + 50.0), 1.0);
+        let below = zoom_for(edge - 20.0);
+        assert!(below < 1.0 && below > 0.95, "{below}");
+        // The whole page fits from 8.5 in + 16 px: then it grows past 1.0.
+        assert!(zoom_for(8.5 * 96.0 + 16.0 + 50.0) > 1.0);
+    }
+
+    #[test]
+    fn page_left_centres_crops_and_never_leaves_a_gap() {
+        let page = 8.5 * 96.0;
+        // Room to spare: centred.
+        assert_eq!(page_left_at(page + 100.0, 1.0), 50.0);
+        assert_eq!(page_left_at(page, 1.0), 0.0);
+        // A little short: the visible part (1.1–8.0 in) is centred, the
+        // margins cropped, and the page's right edge stays at the list's.
+        let w = 700.0;
+        let left = page_left_at(w, 1.0);
+        assert!(left < 0.0);
+        assert!(left + VISIBLE_LEFT * 96.0 >= 0.0, "the left mark is cut: {left}");
+        assert!(left + VISIBLE_RIGHT * 96.0 <= w, "the * is cut: {left}");
+        assert!(left + page >= w, "a gap at the right: {left}");
+        // Just short of the page: cropping is only what doesn't fit.
+        let left = page_left_at(page - 10.0, 1.0);
+        assert!((-10.0..0.0).contains(&left), "{left}");
+        // At the hand-over to shrinking the visible part fills the list.
+        let w = (VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0;
+        assert!((page_left_at(w, 1.0) + VISIBLE_LEFT * 96.0).abs() < 0.01);
+        let z = zoom_for(500.0);
+        let left = page_left_at(500.0 - 16.0, z);
+        assert!(left + VISIBLE_LEFT * 96.0 * z >= -0.01 && left + VISIBLE_RIGHT * 96.0 * z <= 484.01, "{left}");
     }
 
     #[test]
