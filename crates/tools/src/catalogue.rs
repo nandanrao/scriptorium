@@ -232,20 +232,37 @@ fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 /// offered `review_file`, which names any file). Types and values are left
 /// to the tools, which phrase those errors themselves.
 pub fn check_args(spec: &ToolSpec, args: &Value) -> Result<(), ToolError> {
-    unoffered(&spec.schema, args, "").map_or(Ok(()), |at| {
-        Err(ToolError::Args(format!("{} doesn't take the argument `{at}`: use only the arguments it lists", spec.name)))
-    })
+    let name = &spec.name;
+    match unoffered(&spec.schema, args, "") {
+        None => Ok(()),
+        Some(Finding::Unoffered(at)) => {
+            Err(ToolError::Args(format!("{name} doesn't take the argument `{at}`: use only the arguments it lists")))
+        }
+        Some(Finding::Shape(at)) => {
+            Err(ToolError::Args(format!("{name}: `{at}` isn't any of the forms its schema allows")))
+        }
+    }
 }
 
-/// The first argument in `value` that `schema` doesn't offer, as a path
-/// (`suggestions[2].review_file`), if any.
-fn unoffered(schema: &Value, value: &Value, at: &str) -> Option<String> {
+/// What [`unoffered`] found, at a path like `suggestions[2].review_file`.
+enum Finding {
+    /// An argument the schema doesn't offer.
+    Unoffered(String),
+    /// A value none of an `anyOf`'s branches takes by type.
+    Shape(String),
+}
+
+/// The first argument in `value` that `schema` doesn't offer, if any.
+fn unoffered(schema: &Value, value: &Value, at: &str) -> Option<Finding> {
     if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
-        // Allowed if a branch of its type allows it (a value no branch's
-        // type fits is the tool's to refuse); else the first finding.
+        // Allowed if a branch of its type allows it; a value no branch's
+        // type fits is refused; else the first finding.
         let fitting: Vec<&Value> = branches.iter().filter(|b| type_fits(b, value)).collect();
-        let found: Vec<String> = fitting.iter().filter_map(|b| unoffered(b, value, at)).collect();
-        return if found.len() < fitting.len() { None } else { found.into_iter().next() };
+        if fitting.is_empty() {
+            return Some(Finding::Shape(at.to_string()));
+        }
+        let mut found: Vec<Finding> = fitting.iter().filter_map(|b| unoffered(b, value, at)).collect();
+        return if found.len() < fitting.len() { None } else { Some(found.remove(0)) };
     }
     match value {
         Value::Object(map) => {
@@ -259,7 +276,7 @@ fn unoffered(schema: &Value, value: &Value, at: &str) -> Option<String> {
                             return Some(found);
                         }
                     }
-                    None if closed => return Some(path),
+                    None if closed => return Some(Finding::Unoffered(path)),
                     None => {}
                 }
             }

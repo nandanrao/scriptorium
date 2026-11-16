@@ -108,7 +108,10 @@ impl Http {
         let status = response.status().as_u16();
         rec.status = Some(status);
         if (300..400).contains(&status) {
-            let to = response.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or("another address");
+            let to = match response.headers().get("location").and_then(|v| v.to_str().ok()) {
+                Some(loc) => resolve_location(&req.url, loc),
+                None => "another address".to_string(),
+            };
             let message = format!(
                 "{host} redirected the request to {to}. Scriptorium doesn't follow redirects, so your key and script \
                  go only where the account points: if the service moved, change the account's address."
@@ -211,6 +214,28 @@ impl Transport for Http {
             _ => Ok(()),
         }
     }
+}
+
+/// A redirect's `location` as a full URL, resolved against the request's
+/// `url` when it is relative (`/v2/x`, `x`, `//host/x`), so the message
+/// names where it really pointed.
+fn resolve_location(url: &str, loc: &str) -> String {
+    let loc = loc.trim();
+    if loc.contains("://") {
+        return loc.to_string();
+    }
+    let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+    if let Some(net) = loc.strip_prefix("//") {
+        return format!("{scheme}://{net}");
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if loc.starts_with('/') {
+        return format!("{scheme}://{authority}{loc}");
+    }
+    // Relative to the request path's folder (its query and fragment dropped).
+    let path = rest[authority.len()..].split(['?', '#']).next().unwrap_or("");
+    let folder = path.rfind('/').map_or("/", |i| &path[..=i]);
+    format!("{scheme}://{authority}{folder}{loc}")
 }
 
 /// The host of a URL, for messages.
@@ -495,6 +520,16 @@ mod tests {
         assert!(matches!(replayed[3].1, Err(AgentError::Parse(_))), "a bad line replays as Parse");
         replay.finish().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn relative_locations_resolve_against_the_request() {
+        let url = "https://api.example.org/v1/messages?beta=1";
+        assert_eq!(resolve_location(url, "https://evil.example/x"), "https://evil.example/x");
+        assert_eq!(resolve_location(url, "//evil.example/x"), "https://evil.example/x");
+        assert_eq!(resolve_location(url, "/v2/messages"), "https://api.example.org/v2/messages");
+        assert_eq!(resolve_location(url, "chat"), "https://api.example.org/v1/chat");
+        assert_eq!(resolve_location("http://localhost:8080", "x"), "http://localhost:8080/x");
     }
 
     #[test]

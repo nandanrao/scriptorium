@@ -44,6 +44,9 @@ impl Seen {
     pub fn insert(&mut self, key: &str) -> Result<(), String> {
         self.keys.extend(read(&self.path));
         self.keys.insert(key.to_string());
+        // Keys from before 0.4.0's release named the host alone; they match
+        // nothing now (keys start with `scheme://`), so they're dropped.
+        self.keys.retain(|k| k.contains("://"));
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
@@ -71,15 +74,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("scriptorium-seen-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("sub").join(FILE_NAME);
+        let (k1, k2) = ("https://a.example:443\u{1f}/s/a.fdx", "https://b.example:443\u{1f}/s/a.fdx");
         let mut a = Seen::load(&path);
-        assert!(!a.contains("k1"));
+        assert!(!a.contains(k1));
         let mut b = Seen::load(&path);
-        a.insert("k1").unwrap();
-        b.insert("k2").unwrap();
+        a.insert(k1).unwrap();
+        b.insert(k2).unwrap();
         let c = Seen::load(&path);
-        assert!(c.contains("k1") && c.contains("k2"));
+        assert!(c.contains(k1) && c.contains(k2));
+        // Old host-only keys are dropped on the next save.
+        std::fs::write(&path, r#"{"version": 1, "disclosures": ["api.anthropic.com\u001f/s/a.fdx"]}"#).unwrap();
+        assert!(Seen::load(&path).contains("api.anthropic.com\u{1f}/s/a.fdx"));
+        Seen::load(&path).insert(k1).unwrap();
+        let d = Seen::load(&path);
+        assert!(d.contains(k1) && !d.contains("api.anthropic.com\u{1f}/s/a.fdx"));
         std::fs::write(&path, "not json").unwrap();
-        assert!(!Seen::load(&path).contains("k1"));
+        assert!(!Seen::load(&path).contains(k1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

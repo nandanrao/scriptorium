@@ -1120,4 +1120,9 @@ fn check_args_refuses_arguments_not_offered() {
         "options[0][0].file",
     );
     refused("read_scene", json!({ "scene": 1, "path": "/etc" }), "path");
+    // An option that is neither a string nor a list of lines.
+    for odd in [json!({ "kind": "Action", "text": "x", "review_file": "a" }), json!(3)] {
+        let e = ok("suggest_change", json!({ "paragraph_id": 1, "options": [odd] })).unwrap_err().to_string();
+        assert!(e.contains("`options[0]`") && e.contains("forms"), "{e}");
+    }
 }
