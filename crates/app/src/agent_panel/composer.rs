@@ -57,6 +57,8 @@ type Loaded = Result<AccountsFile, String>;
 
 pub struct Composer {
     input: Entity<TextareaState>,
+    /// The panel's width, for the model list's.
+    width: f32,
     chat: Entity<Chat>,
     accounts: Loaded,
     /// The first-use disclosure shown in place of sending: (key, text).
@@ -88,6 +90,14 @@ struct Focus {
 }
 
 impl Composer {
+    /// The panel's width, as the panel is given it.
+    pub fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if self.width != width {
+            self.width = width;
+            cx.notify();
+        }
+    }
+
     pub fn new(chat: Entity<Chat>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(PLACEHOLDER));
         let subs = vec![
@@ -103,6 +113,7 @@ impl Composer {
         ];
         Self {
             input,
+            width: super::WIDTH,
             chat,
             accounts: load_accounts(),
             disclosure: None,
@@ -798,8 +809,9 @@ impl Composer {
                 .absolute()
                 .bottom(px(30.))
                 .left_0()
-                .min_w(px(240.))
-                .max_w(px(330.))
+                // Within the panel, as the thread list is.
+                .min_w(px(240f32.min(self.width - 16.)))
+                .max_w(px((self.width - 16.).min(330.)))
                 .max_h(px(320.))
                 .overflow_y_scroll()
                 .occlude()

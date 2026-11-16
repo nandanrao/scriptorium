@@ -2655,7 +2655,7 @@ impl ScriptView {
     }
 
     fn render_status(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let mut left = div().flex().items_center().gap_3();
+        let mut left = div().flex_none().flex().items_center().gap_3();
         let typing = self.typing(window, cx);
         let hints = status_hints(typing, self.review().is_some(), self.rewriting.is_some());
         match self.view {
@@ -2711,6 +2711,10 @@ impl ScriptView {
             .child(div().flex_1())
             .child(
                 div()
+                    // In a narrow window the line ends in "…" rather than
+                    // running off the edge.
+                    .min_w_0()
+                    .truncate()
                     .when(!said.is_empty(), |d| d.text_color(INK).font_weight(FontWeight::SEMIBOLD))
                     .when(!self.error.is_empty(), |d| d.text_color(WARN))
                     .child(right),
@@ -3160,8 +3164,22 @@ impl Render for ScriptView {
         self.expire_notice(cx);
         let agent = self.agent.as_ref().filter(|_| self.agent_open).map(|(panel, _)| panel.clone());
         let width = window.viewport_size().width / px(1.);
-        let cols = agent_panel::columns(width, agent.is_some(), self.review().is_some());
-        let card = self.review().map(|_| self.render_card(cols.card, window, cx));
+        // Keys going to the script keep it on screen (the card gives way).
+        let keep_script = self.rewriting.is_some() || self.editor.read(cx).focus_handle().is_focused(window);
+        let cols = agent_panel::columns(width, agent.is_some(), self.review().is_some(), keep_script);
+        // A card that gave way to the script isn't drawn (its focus isn't in it).
+        let card_shown = !cols.card_hidden(self.review().is_some());
+        let card = self.review().filter(|_| card_shown).map(|_| {
+            let card = self.render_card(cols.card, window, cx);
+            if cols.script {
+                card
+            } else {
+                card.child(small(format!(
+                    "The script is hidden to make room. Widen the window or close the chat ({}) to see it.",
+                    crate::menus::shortcut("l")
+                )))
+            }
+        });
         if let Some(panel) = &agent {
             panel.update(cx, |p, cx| p.set_width(cols.panel, cx));
         }
