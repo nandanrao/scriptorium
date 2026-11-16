@@ -41,6 +41,10 @@ name = "vpointer"
 path = "tests/tools/vpointer.rs"
 test = true
 
+[dev-dependencies]
+# TestAppContext for the run driver's tests over a live ScriptView.
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Already in the tree through gpui's Wayland backend; no new crates.
 wayland-client = "0.31"

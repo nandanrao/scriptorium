@@ -769,26 +769,42 @@ impl Chat {
         }
         let (accounts, seen) = self.ready()?;
         let transport = shared_transport().map_err(|e| SendError::Setup(e.to_string()))?;
-        let which = match &self.thread {
-            Some(t) => Which::Thread(t.id.clone()),
-            None => Which::New,
-        };
         let job = Job {
             script: self.script_path.clone(),
-            which: which.clone(),
-            message: message.clone(),
+            which: self.which(),
+            message,
             account: self.choice.as_ref().map(|(a, _)| a.clone()),
             model: self.choice.as_ref().and_then(|(_, m)| m.clone()),
             accounts,
             seen,
             accepted: self.accepted.values().cloned().collect(),
         };
+        self.launch(job, transport, Keys::system(), cx)
+    }
+
+    /// The open thread, or a new one.
+    fn which(&self) -> Which {
+        match &self.thread {
+            Some(t) => Which::Thread(t.id.clone()),
+            None => Which::New,
+        }
+    }
+
+    /// Starts `job` on a worker thread and the UI side of it.
+    fn launch(
+        &mut self,
+        job: Job,
+        transport: Arc<dyn Transport>,
+        keys: Keys,
+        cx: &mut Context<Self>,
+    ) -> Result<(), SendError> {
+        let (which, message) = (job.which.clone(), job.message.is_some());
         let (tx, rx) = mpsc::channel();
         let cancel = CancelToken::new();
         let worker_cancel = cancel.clone();
         std::thread::Builder::new()
             .name("agent-run".into())
-            .spawn(move || work(job, transport, Keys::system(), tx, worker_cancel))
+            .spawn(move || work(job, transport, keys, tx, worker_cancel))
             .map_err(|e| SendError::Setup(format!("Couldn't start the agent: {e}")))?;
         crate::log::info(&format!(
             "agent: run on {} ({})",
@@ -796,8 +812,21 @@ impl Chat {
                 Which::Thread(id) => id.as_str(),
                 Which::New => "a new thread",
             },
-            if message.is_some() { "message" } else { "again" }
+            if message { "message" } else { "again" }
         ));
+        self.begin(which, message, rx, cancel, cx);
+        Ok(())
+    }
+
+    /// The UI side of a run whose worker reports on `rx`.
+    fn begin(
+        &mut self,
+        which: Which,
+        message: bool,
+        rx: mpsc::Receiver<ToUi>,
+        cancel: CancelToken,
+        cx: &mut Context<Self>,
+    ) {
         let script = self.script.clone();
         let task = cx.spawn(async move |this, cx| pump(rx, this, script, cx).await);
         self.notices.clear();
@@ -812,11 +841,10 @@ impl Chat {
                 Which::Thread(id) => Some(id),
                 Which::New => None,
             },
-            message: message.is_some(),
+            message,
             task: Some(task),
         });
         cx.notify();
-        Ok(())
     }
 
     fn stopped(&self) -> bool {
@@ -1224,5 +1252,234 @@ mod tests {
         assert_eq!(RunFailed::from_host(HostError::Store(StoreError::Busy)).text, BUSY_THREAD);
         assert!(RunFailed::from_host(HostError::Declined).declined);
         assert_eq!(RunFailed::from_host(HostError::NothingToSend).text, "Type a message to send");
+    }
+
+    // ---- over a live ScriptView (gpui::TestAppContext) ----------------------
+
+    use gpui::{AppContext as _, Entity, TestAppContext, WindowHandle};
+    use scriptorium_chat::exec::EDITING_LINE;
+
+    /// A script view of `f`'s script and a chat on it.
+    fn live(cx: &mut TestAppContext, f: &Folder) -> (WindowHandle<ScriptView>, Entity<ScriptView>, Entity<Chat>) {
+        cx.update(gpui_base::init);
+        let path = f.0.join("film.fdx");
+        let opened = crate::script_view::Opened::load(&path, &[]).unwrap();
+        let window = cx.add_window(|window, cx| ScriptView::new(opened, window, cx));
+        let view = window.root(cx).unwrap();
+        let weak = view.downgrade();
+        let chat = cx.new(|_| Chat::new(weak, path));
+        (window, view, chat)
+    }
+
+    /// Runs `job` on a real worker over the live view, replaying `cassette`;
+    /// returns once the run is over (or panics after a while).
+    fn run_live(cx: &mut TestAppContext, chat: &Entity<Chat>, job: Job, cassette: &str) -> Arc<dyn Transport> {
+        let transport: Arc<dyn Transport> = Arc::new(Replay::from_text("t", cassette, TimeScale::new(1.0)).unwrap());
+        let keys = Keys::in_memory(|_| Some("sk-test".into()));
+        let t = transport.clone();
+        chat.update(cx, |c, cx| c.launch(job, t, keys, cx)).unwrap();
+        settle(cx, |cx| chat.read_with(cx, |c, _| !c.is_running()));
+        transport
+    }
+
+    /// Lets the UI side run (fake time) and real worker threads go on until `done`.
+    fn settle(cx: &mut TestAppContext, done: impl Fn(&mut TestAppContext) -> bool) {
+        for _ in 0..3000 {
+            cx.executor().advance_clock(FRAME);
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("the run didn't end");
+    }
+
+    /// The disclosure for `f`'s script on the test account, as already shown.
+    fn seen_disclosure(f: &Folder) {
+        let job = job(f, "x");
+        let resolved = host::settle_account(&job.accounts, None, None, None).unwrap();
+        let mut seen = scriptorium_chat::seen::Seen::load(&job.seen);
+        if let Some((key, _)) = host::disclosure(&seen, &resolved.base_url, &job.script) {
+            seen.insert(&key).unwrap();
+        }
+    }
+
+    /// The result of the thread's tool call `id`.
+    fn result_of(chat: &Entity<Chat>, cx: &mut TestAppContext, id: &str) -> String {
+        chat.read_with(cx, |c, _| {
+            c.thread()
+                .unwrap()
+                .thread
+                .messages
+                .iter()
+                .flat_map(|m| &m.blocks)
+                .find_map(|b| match b {
+                    scriptorium_agent::Block::ToolResult(r) if r.id == id => Some(r.content.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no result for {id}"))
+        })
+    }
+
+    /// One `suggest_change` round on `para`, then an answer.
+    fn suggest_cassette(message: &str, id: &str, para: u64, option: &str) -> String {
+        let reply = OWN_REVIEW.replacen("\"Tighten\"", &format!("{message:?}"), 1).replace("toolu_1", id).replace(
+            r#"\"paragraph_id\": 1, \"options\": [\"Laura grins.\"]"#,
+            &format!(r#"\"paragraph_id\": {para}, \"options\": [\"{option}\"]"#),
+        );
+        // The second exchange checks only the call id; any result will do.
+        reply.replace(r#""contains": "added suggestion #1""#, r#""contains": """#)
+    }
+
+    #[gpui::test]
+    fn a_round_on_the_live_view_waits_out_a_busy_session_lock(cx: &mut TestAppContext) {
+        let f = Folder::new("live-busy");
+        seen_disclosure(&f);
+        let (_w, view, chat) = live(cx, &f);
+        // Another program holds the session lock for a moment.
+        let lock_path = scriptorium_fsio::SessionLock::path_for(&f.0.join("film.fdx"));
+        let held = scriptorium_fsio::SessionLock::acquire(&lock_path, Duration::ZERO).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            drop(held);
+        });
+        let started = std::time::Instant::now();
+        let transport = run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        // The suggestion waited for the lock (retried off the UI thread).
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        release.join().unwrap();
+        transport.finish().unwrap();
+        assert!(result_of(&chat, cx, "toolu_1").starts_with("added suggestion #1"));
+        // The live view has the thread's review, written by the agent; the
+        // session file is the view's to save.
+        let id = chat.read_with(cx, |c, _| c.thread().unwrap().review_id.clone().unwrap());
+        assert!(view.read_with(cx, |v, _| v.session().reviews.iter().any(|r| r.id == id)));
+        assert!(std::fs::read_to_string(f.0.join("Tighten the smile.review.txt")).unwrap().contains("Laura grins."));
+        assert!(!chat.read_with(cx, |c, _| c.waiting_for_files()));
+    }
+
+    #[gpui::test]
+    fn a_proposal_on_the_line_being_rewritten_is_refused_on_the_live_view(cx: &mut TestAppContext) {
+        let f = Folder::new("live-editing");
+        seen_disclosure(&f);
+        let (window, view, chat) = live(cx, &f);
+        run_live(cx, &chat, job(&f, "Tighten the smile"), OWN_REVIEW);
+        let (thread_id, review_id) =
+            chat.read_with(cx, |c, _| (c.thread().unwrap().id.clone(), c.thread().unwrap().review_id.clone().unwrap()));
+        // The writer starts rewriting suggestion #1 (on ¶1)…
+        window.update(cx, |v, window, cx| v.rewrite_for_test(&review_id, 1, window, cx)).unwrap();
+        assert!(view.read_with(cx, |v, _| v.is_rewriting()));
+        // …and an agent change meanwhile leaves the rewrite alone.
+        view.update(cx, |v, cx| v.after_agent_change(cx));
+        assert!(view.read_with(cx, |v, _| v.is_rewriting()));
+        // Another conversation's agent proposes on that line, into its own
+        // review (so it isn't a duplicate there).
+        let _ = thread_id;
+        chat.update(cx, |c, cx| c.new_thread(cx)).unwrap();
+        run_live(cx, &chat, job(&f, "Once more"), &suggest_cassette("Once more", "toolu_9", 1, "Laura beams."));
+        let result = result_of(&chat, cx, "toolu_9");
+        assert!(result.contains(EDITING_LINE), "{result}");
+        assert!(view.read_with(cx, |v, _| v.is_rewriting()));
+        let other = std::fs::read_to_string(f.0.join("Once more.review.txt")).unwrap_or_default();
+        assert!(!other.contains("Laura beams."), "{other}");
+    }
+
+    /// A run whose "worker" is the test: the chat's UI side over `rx`'s sender.
+    fn fake_run(cx: &mut TestAppContext, chat: &Entity<Chat>) -> (mpsc::Sender<ToUi>, CancelToken) {
+        let (tx, rx) = mpsc::channel();
+        let cancel = CancelToken::new();
+        let c = cancel.clone();
+        chat.update(cx, |chat, cx| chat.begin(Which::New, true, rx, c, cx));
+        (tx, cancel)
+    }
+
+    fn call(id: &str, para: u64) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "suggest_change".into(),
+            input: serde_json::json!({"paragraph_id": para, "options": ["Laura grins."]}),
+            input_error: None,
+            raw_input: None,
+            extra: None,
+        }
+    }
+
+    fn thread_file(f: &Folder) -> ThreadFile {
+        let j = job(f, "Hello");
+        let resolved = host::settle_account(&j.accounts, None, None, None).unwrap();
+        host::new_thread("t0001", "Hello", "film.fdx", &resolved, "2026-11-15T09:30:00Z")
+    }
+
+    #[gpui::test]
+    fn a_call_queued_when_stop_is_pressed_never_runs(cx: &mut TestAppContext) {
+        let f = Folder::new("live-stop-call");
+        let (_w, view, chat) = live(cx, &f);
+        let (tx, cancel) = fake_run(cx, &chat);
+        let (reply, answer) = mpsc::channel();
+        tx.send(ToUi::Call { file: Box::new(thread_file(&f)), call: call("c1", 1), reply }).unwrap();
+        chat.update(cx, |c, cx| c.stop(cx));
+        assert!(cancel.is_cancelled());
+        cx.executor().advance_clock(FRAME);
+        cx.run_until_parked();
+        let (mark, done, _) = answer.try_recv().expect("answered");
+        assert_eq!((mark, done.result.content.as_str()), (None, turn::CANCELLED));
+        assert!(view.read_with(cx, |v, _| v.session().reviews.is_empty()));
+        assert!(!f.0.join("Hello.review.txt").exists());
+    }
+
+    #[gpui::test]
+    fn dropping_the_chat_answers_a_pending_question_and_call(cx: &mut TestAppContext) {
+        let f = Folder::new("live-drop");
+        let (_w, _view, chat) = live(cx, &f);
+        let (tx, cancel) = fake_run(cx, &chat);
+        let (q_reply, q_answer) = mpsc::channel();
+        tx.send(ToUi::Ask(Question::WholeScript("Read it all?".into()), q_reply)).unwrap();
+        cx.executor().advance_clock(FRAME);
+        cx.run_until_parked();
+        assert!(chat.read_with(cx, |c, _| c.question().is_some()));
+        // A call arrives that the UI hasn't taken yet; then the chat goes.
+        let (c_reply, c_answer) = mpsc::channel();
+        tx.send(ToUi::Call { file: Box::new(thread_file(&f)), call: call("c1", 1), reply: c_reply }).unwrap();
+        drop(chat);
+        cx.update(|_| {});
+        cx.run_until_parked();
+        cx.executor().advance_clock(FRAME);
+        cx.run_until_parked();
+        // The worker's waits end: no answer is "no", no result is "closed".
+        assert!(q_answer.recv_timeout(Duration::from_secs(1)).is_err());
+        assert!(c_answer.recv_timeout(Duration::from_secs(1)).is_err());
+        assert!(cancel.is_cancelled());
+    }
+
+    #[gpui::test]
+    fn events_after_stop_are_dropped(cx: &mut TestAppContext) {
+        let f = Folder::new("live-late");
+        let (_w, _view, chat) = live(cx, &f);
+        let (tx, _cancel) = fake_run(cx, &chat);
+        tx.send(ToUi::Event(Event::Text { index: 0, text: "Half".into() })).unwrap();
+        cx.executor().advance_clock(FRAME);
+        cx.run_until_parked();
+        chat.update(cx, |c, cx| c.stop(cx));
+        chat.update(cx, |c, _| c.take_view_ops());
+        let mut file = thread_file(&f);
+        tx.send(ToUi::Event(Event::Text { index: 0, text: " more".into() })).unwrap();
+        tx.send(ToUi::Busy(true)).unwrap();
+        tx.send(ToUi::Saved(Arc::new(file.clone()))).unwrap();
+        cx.executor().advance_clock(FRAME);
+        cx.run_until_parked();
+        let ops = chat.update(cx, |c, _| c.take_view_ops());
+        assert!(ops.is_empty(), "{ops:?}");
+        assert!(chat.read_with(cx, |c, _| c.is_stopping() && !c.waiting_for_files() && c.thread().is_none()));
+        // The run reports back: the thread as saved shows, and it's over.
+        assert!(file.thread.push_user("Hello"));
+        let done = Finished { thread: file, outcome: Outcome::Stopped, created: true };
+        tx.send(ToUi::Done(Ok(done))).unwrap();
+        cx.executor().advance_clock(FRAME);
+        cx.run_until_parked();
+        assert!(chat.read_with(cx, |c, _| !c.is_running() && c.thread().is_some()));
+        let ops = chat.update(cx, |c, _| c.take_view_ops());
+        assert!(ops.iter().any(|o| matches!(o, ViewOp::SetThread { id, .. } if id == "t0001")), "{ops:?}");
+        assert!(ops.contains(&ViewOp::RunActive(false)));
     }
 }

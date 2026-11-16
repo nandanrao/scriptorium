@@ -876,6 +876,19 @@ impl ScriptView {
 
     // ---- rewriting in place ----------------------------------------------------
 
+    /// Tests: show review `id`'s suggestion `n` and start rewriting it (E).
+    #[cfg(test)]
+    pub(crate) fn rewrite_for_test(&mut self, id: &str, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_suggestion(id, n, window, cx);
+        self.start_rewrite(window, cx);
+    }
+
+    /// Tests: whether a rewrite is in progress.
+    #[cfg(test)]
+    pub(crate) fn is_rewriting(&self) -> bool {
+        self.rewriting.is_some()
+    }
+
     /// E: put the highlighted option into the line and edit it in the script.
     fn start_rewrite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((r, i)) = self.current() else { return };
