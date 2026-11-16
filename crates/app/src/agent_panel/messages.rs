@@ -470,7 +470,9 @@ impl MessageView {
         let open = has_details && self.open.contains(key);
         let link = self.suggestion_link(tool);
         let label_color = if tool.state == ToolState::Failed { WARN } else { INK_2 };
-        let label = div().id(("tool-label", ix)).text_color(label_color).child(tool.label.clone());
+        // min_w_0: a long label (a review named after a long title) wraps
+        // instead of running past the panel's edge and over its chevron.
+        let label = div().id(("tool-label", ix)).min_w_0().text_color(label_color).child(tool.label.clone());
         let label = match link {
             // The label itself is the link: it shows the suggestion on the card.
             Some((id, n)) => {

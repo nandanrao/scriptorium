@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Writes the cassettes the chat-panel scenarios replay (crates/app/tests/cassettes/sNN_*.jsonl).
+
+The cassettes are committed; run this after changing one here, so the
+scenarios stay readable as code. Anthropic Messages streams throughout (the
+scenarios' account is Anthropic); paragraph ids are those of the scenarios'
+film.fdx (lib.sh): 0 EXT. FARM HOUSE, 1 "Laura smiles.", 2 CESAR, 3 "I am go
+to the town tomorrow.", 4 INT. KITCHEN, 5 "Laura pours coffee for two.",
+6 LAURA, 7 "You will miss the bus."
+
+    python3 crates/app/tests/scenarios/make_cassettes.py
+"""
+
+import json
+import os
+
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cassettes")
+_msg = 0
+
+
+def _start(inp=120):
+    global _msg
+    _msg += 1
+    return ["event: message_start",
+            {"type": "message_start", "message": {"id": f"msg_{_msg}", "usage": {"input_tokens": inp, "output_tokens": 1}}},
+            ""]
+
+
+def _text_block(i, chunks):
+    out = ["event: content_block_start",
+           {"type": "content_block_start", "index": i, "content_block": {"type": "text", "text": ""}}, ""]
+    for c in chunks:
+        out += ["event: content_block_delta",
+                {"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": c}}, ""]
+    return out + ["event: content_block_stop", {"type": "content_block_stop", "index": i}, ""]
+
+
+def _tool_block(i, call_id, name, args):
+    return ["event: content_block_start",
+            {"type": "content_block_start", "index": i,
+             "content_block": {"type": "tool_use", "id": call_id, "name": name, "input": {}}}, "",
+            "event: content_block_delta",
+            {"type": "content_block_delta", "index": i,
+             "delta": {"type": "input_json_delta", "partial_json": json.dumps(args)}}, "",
+            "event: content_block_stop", {"type": "content_block_stop", "index": i}, ""]
+
+
+def _end(stop, out=40):
+    return ["event: message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": stop}, "usage": {"output_tokens": out}}, "",
+            "event: message_stop", {"type": "message_stop"}, ""]
+
+
+def text(expect, *chunks, delay_ms=0):
+    """A plain answer, streamed in `chunks`."""
+    x = {"expect": expect, "lines": _start() + _text_block(0, chunks) + _end("end_turn")}
+    if delay_ms:
+        x["delay_ms"] = delay_ms
+    return x
+
+
+def tools(expect, *calls):
+    """A reply that only calls tools: (call id, tool name, arguments)."""
+    lines = _start()
+    for i, (cid, name, args) in enumerate(calls):
+        lines += _tool_block(i, cid, name, args)
+    return {"expect": expect, "lines": lines + _end("tool_use")}
+
+
+def user(s):
+    return {"last_user": s}
+
+
+def result(call_id, contains):
+    return {"results": [{"id": call_id, "contains": contains}]}
+
+
+def error(status, body, retry_after=None):
+    x = {"status": status, "body": body}
+    if retry_after is not None:
+        x["retry_after"] = retry_after
+    return x
+
+
+def write(name, comment, exchanges):
+    with open(os.path.join(OUT, name), "w") as f:
+        for line in comment.strip().splitlines():
+            f.write(f"// {line}\n")
+        for x in exchanges:
+            f.write(json.dumps(x, ensure_ascii=False) + "\n")
+
+
+def change(pid, option, why):
+    return {"paragraph_id": pid, "options": [option], "why": why}
+
+
+OVERLOADED = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+
+# The read-and-suggest round of S5 and S11: read scene 1, two suggestions in
+# one call, a short answer.
+READ_AND_SUGGEST = [
+    tools(user("Tighten the farm house scene"), ("toolu_r1", "read_scene", {"scene": 1})),
+    tools(result("toolu_r1", "¶1 Laura smiles."),
+          ("toolu_s1", "suggest_changes", {"suggestions": [
+              change(1, "Laura grins.", "sharper"),
+              change(3, "I am going to town tomorrow.", "grammar")]})),
+    text(result("toolu_s1", "added"), "Two suggestions are waiting ", "in this conversation's review."),
+]
+
+write("s02_click_focus.jsonl", "S2: a message sent from a composer focused by a click.", [
+    text(user("Who is Laura"), "Laura is the lead: ", "she runs the farm."),
+])
+
+write("s03_disclosure.jsonl", "S3: the first send after the disclosure card's Agree and send; a second send without the card.", [
+    text(user("Who is Laura"), "Laura is the lead."),
+    text(user("And Cesar"), "Cesar is her brother."),
+])
+
+STREAM = ["The scene ", "opens at ", "night, ", "on a farm ", "house. ", "Laura ", "smiles, ", "and Cesar ",
+          "says he ", "is going ", "to town. ", "The next ", "morning, ", "in the ", "kitchen, ", "Laura ",
+          "pours ", "coffee ", "for two ", "and warns ", "him he ", "will miss ", "the bus. ", "It is a ",
+          "quiet ", "opening ", "that sets ", "up their ", "routine."]
+write("s04_streaming.jsonl", "S4: a slow stream (80 ms a line, about 8 s), shot mid-stream and at the end.", [
+    text(user("Summarise the script"), *STREAM, delay_ms=80),
+])
+
+write("s05_tool_rows.jsonl", "S5: read_scene, then suggest_changes into the thread's own review, then an answer.",
+      READ_AND_SUGGEST)
+
+write("s06_reattach.jsonl", "S6: a suggestion (creating the thread's review), then, after the review is detached, one more: the same file is attached again.", [
+    tools(user("Tighten the smile"), ("toolu_a", "suggest_change", change(1, "Laura grins.", "sharper"))),
+    text(result("toolu_a", "added suggestion #1"), "One suggestion is waiting."),
+    tools(user("One more"), ("toolu_b", "suggest_change", change(3, "I am going to town tomorrow.", "grammar"))),
+    text(result("toolu_b", "added suggestion #2"), "Another one is waiting."),
+])
+
+write("s07_stop.jsonl", "S7: a slow reply stopped midway (Ctrl+.), then a send after the stop.", [
+    text(user("Write a long answer"), *(["This is a very long answer. "] * 60), delay_ms=150),
+    text(user("Shorter"), "Short answer."),
+])
+
+write("s08_errors.jsonl", """S8, one conversation: overloaded (529, retry-after 10 s) then a reply;
+an auth failure (401); then "Third": a server error (500) through all three
+retries; Retry: a line that isn't a stream event; Retry: offline through all
+retries; Retry: a reply. (A failed message stays: the next request carries
+"Second" and "Third" both.)""", [
+    error(529, OVERLOADED, retry_after=10),
+    text(user("First"), "First answer."),
+    error(401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}),
+    *[error(500, {"type": "error", "error": {"type": "api_error", "message": "Internal server error"}})] * 4,
+    {"expect": user("Third"), "lines": _start(), "bad_line": "<html>502 Bad Gateway</html>"},
+    *[{"offline": "connection refused"}] * 4,
+    text(user("Third"), "Third answer, after Retry."),
+])
+
+write("s09_whole_small.jsonl", "S9, a short script: read_script runs without asking.", [
+    tools(user("Read it all"), ("toolu_w0", "read_script", {})),
+    text(result("toolu_w0", "Laura smiles."), "I read the whole script."),
+])
+
+write("s09_whole_big.jsonl", """S9, a long script: read_script asks; Not now, so the agent is told; a
+second read_script in the same conversation is refused without asking.""", [
+    tools(user("Read it all"), ("toolu_w1", "read_script", {})),
+    text(result("toolu_w1", "chose not to send the whole script"), "All right, I'll read scenes instead."),
+    tools(user("Try again"), ("toolu_w2", "read_script", {})),
+    text(result("toolu_w2", "chose not to send the whole script"), "Still declined."),
+])
+
+write("s11_parity.jsonl", "S11: the same conversation through `scriptorium chat` and through the panel.",
+      READ_AND_SUGGEST)
+
+write("s12_cli_new.jsonl", "S12, the CLI beside the app: a new conversation with one suggestion.", [
+    tools(user("Fix the grammar"), ("toolu_c1", "suggest_change", change(3, "I am going to town tomorrow.", "grammar"))),
+    text(result("toolu_c1", "added suggestion #1"), "One suggestion is waiting."),
+])
+
+write("s12_cli_slow.jsonl", "S12: a slow CLI run (about 8 s), so the app finds the conversation busy.", [
+    text(user("Take your time"), *(["Slowly. "] * 40), delay_ms=60),
+])
+
+write("s12_app_slow.jsonl", "S12: a slow app run (about 8 s), so the CLI finds the conversation busy.", [
+    text(user("Think slowly"), *(["Slowly. "] * 40), delay_ms=60),
+])
+
+write("s14_rewriting.jsonl", "S14: proposals while the writer is rewriting line 3: that one is refused, the other added.", [
+    tools(user("Fix the grammar"),
+          ("toolu_g", "suggest_changes", {"suggestions": [
+              change(3, "I am going to town tomorrow.", "grammar"),
+              change(7, "You'll miss the bus.", "contraction")]})),
+    text(result("toolu_g", "editing this line"), "One was refused: you're editing that line."),
+])

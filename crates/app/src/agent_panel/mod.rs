@@ -297,8 +297,15 @@ impl AgentPanel {
                 if let Err(e) = self.chat.update(cx, |c, cx| c.retry(cx)) {
                     self.chat.update(cx, |c, cx| c.notice(e.to_string(), cx));
                 }
+                // The row and its button go away with the run: focus left on
+                // the button would leave no element focused, and every key
+                // (Ctrl+Q, Ctrl+L…) dead until a click.
+                self.focus_composer(window, cx);
             }
-            ErrorAction::NewThread => self.new_thread(cx),
+            ErrorAction::NewThread => {
+                self.new_thread(cx);
+                self.focus_composer(window, cx);
+            }
             ErrorAction::ManageAccounts => window.dispatch_action(Box::new(OpenAccounts), cx),
             ErrorAction::ChooseModel => self.composer.update(cx, |c, cx| c.open_picker(window, cx)),
         }
