@@ -113,6 +113,10 @@ fn nonempty(v: String) -> Option<String> {
 /// through [`Keys::from_env`].
 pub const KEYRING_ENV: &str = "SCRIPTORIUM_KEYRING";
 
+/// Why there is no keyring with [`KEYRING_ENV`]`=off` ([`Keys::env_only`]),
+/// so a program can tell that choice from a keyring that failed.
+pub const KEYRING_OFF_REASON: &str = "keyring not used";
+
 /// Whether [`KEYRING_ENV`] is `off` (any case, spaces ignored).
 pub fn keyring_off() -> bool {
     std::env::var(KEYRING_ENV).is_ok_and(|v| v.trim().eq_ignore_ascii_case("off"))
@@ -136,7 +140,7 @@ impl Keys {
 
     /// The process environment only: never touches the keyring.
     pub fn env_only() -> Keys {
-        Keys { store: Store::None("keyring not used"), env: Box::new(|k| std::env::var(k).ok()) }
+        Keys { store: Store::None(KEYRING_OFF_REASON), env: Box::new(|k| std::env::var(k).ok()) }
     }
 
     /// An empty in-memory keyring and the environment `env` describes:

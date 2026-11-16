@@ -3,7 +3,7 @@
 //! keyring, no files, so it is tested alone.
 
 use scriptorium_agent::{Effort, Protocol};
-use scriptorium_providers::shell::{KeyStatus, config};
+use scriptorium_providers::shell::{KEYRING_ENV, KEYRING_OFF_REASON, KeyStatus, config};
 use scriptorium_providers::{Account, AccountsFile, Provider};
 
 /// Which provider an account is for (the pick when adding one).
@@ -267,6 +267,11 @@ pub fn key_long(status: &KeyStatus, needs_key: bool, provider: &str) -> (String,
         KeyStatus::Env(_) => {
             ("Using a key from your environment, which takes priority over one saved here.".into(), Tone::Good)
         }
+        KeyStatus::Missing { keyring: Some(why), .. } if why == KEYRING_OFF_REASON => (
+            "The keychain is turned off for this app, so a key can't be saved here. See Advanced for another way."
+                .into(),
+            Tone::Bad,
+        ),
         KeyStatus::Missing { keyring: Some(_), .. } => (
             "Your system's keychain isn't available, so a key can't be saved here. See Advanced for another way."
                 .into(),
@@ -283,8 +288,14 @@ pub fn key_advanced(env_vars: &[String], status: Option<&KeyStatus>) -> String {
         "Instead of the keychain, the key can come from the environment variable {}. A variable that is set is used first.",
         env_vars.join(" or ")
     );
-    if let Some(KeyStatus::Missing { keyring: Some(why), .. }) = status {
-        text.push_str(&format!(" The keychain said: {why}."));
+    match status {
+        Some(KeyStatus::Missing { keyring: Some(why), .. }) if why == KEYRING_OFF_REASON => {
+            text.push_str(&format!(" The keychain is turned off ({KEYRING_ENV}=off)."));
+        }
+        Some(KeyStatus::Missing { keyring: Some(why), .. }) => {
+            text.push_str(&format!(" Why the keychain can't be used: {why}."));
+        }
+        _ => {}
     }
     text
 }
@@ -431,6 +442,11 @@ mod tests {
         assert!(!key_long(&no_ring, true, "A").0.contains("no bus"));
         let adv = key_advanced(&["SCRIPTORIUM_WORK_KEY".into(), "SCRIPTORIUM_ANTHROPIC_KEY".into()], Some(&no_ring));
         assert!(adv.contains("SCRIPTORIUM_WORK_KEY or SCRIPTORIUM_ANTHROPIC_KEY") && adv.contains("no bus"), "{adv}");
+        // Turned off on purpose: said so, not as a failure.
+        let off = KeyStatus::Missing { env_vars: vec![], keyring: Some(KEYRING_OFF_REASON.into()) };
+        assert!(key_long(&off, true, "A").0.contains("turned off"));
+        let adv = key_advanced(&["SCRIPTORIUM_A_KEY".into()], Some(&off));
+        assert!(adv.contains("turned off") && !adv.contains(KEYRING_OFF_REASON), "{adv}");
     }
 
     #[test]
