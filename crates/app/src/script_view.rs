@@ -2103,6 +2103,7 @@ impl ScriptView {
 
     fn render_card(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let focused = self.focus.is_focused(window);
+        let typing = self.typing(window, cx);
         let mut body: Vec<AnyElement> = vec![];
         let shell = div()
             .id("card")
@@ -2173,7 +2174,7 @@ impl ScriptView {
         if item.block {
             self.block_card(&mut body, r, i, cx);
             let status = self.session.status(self.doc(cx), r, i);
-            self.card_footer(&mut body, r, i, status, focused, cx);
+            self.card_footer(&mut body, r, i, status, typing, cx);
             return shell.children(body);
         }
         let fallback = ParaContext::default();
@@ -2285,7 +2286,7 @@ impl ScriptView {
                     .into_any_element(),
             );
         }
-        self.card_footer(&mut body, r, i, status, focused, cx);
+        self.card_footer(&mut body, r, i, status, typing, cx);
         shell.children(body)
     }
 
@@ -2459,7 +2460,7 @@ impl ScriptView {
         r: usize,
         i: usize,
         status: Status,
-        focused: bool,
+        typing: Typing,
         cx: &mut Context<Self>,
     ) {
         let item = self.session.item(r, i);
@@ -2517,15 +2518,33 @@ impl ScriptView {
                     .into_any_element(),
             );
         }
-        if !focused {
-            body.push(
-                small("Typing goes to the script. Esc or click here for review keys.".to_string()).into_any_element(),
-            );
+        if typing != Typing::ReviewKeys {
+            let into = if typing == Typing::Chat { "the chat" } else { "the script" };
+            body.push(small(format!("Typing goes to {into}. Esc or click here for review keys.")).into_any_element());
         }
     }
 
-    fn render_status(&self, cx: &mut Context<Self>) -> Div {
+    /// Where keys typed now go, for the hints on the card and the status bar.
+    fn typing(&self, window: &Window, cx: &App) -> Typing {
+        if self.agent_open && self.agent.as_ref().is_some_and(|(p, _)| p.read(cx).has_focus(window, cx)) {
+            Typing::Chat
+        } else if self.review().is_some() && self.focus.is_focused(window) {
+            Typing::ReviewKeys
+        } else {
+            Typing::Script
+        }
+    }
+
+    fn render_status(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let mut left = div().flex().items_center().gap_3();
+        let typing = self.typing(window, cx);
+        let script_hints = || {
+            format!(
+                "Enter new line · Tab line type · {} undo · {} write .fdx",
+                crate::menus::shortcut("z"),
+                crate::menus::shortcut("s")
+            )
+        };
         let hints = match self.view {
             View::Review(r) => {
                 let p = self.session.progress(self.doc(cx), r);
@@ -2540,16 +2559,21 @@ impl ScriptView {
                             .bg(RULE)
                             .child(div().h_full().rounded_sm().bg(ACCENT).w(px(120. * pct))),
                     );
-                "A accept · 1 2 3 option · Tab next option · R keep mine · E rewrite · J/K next/prev · U undo"
-                    .to_string()
+                match typing {
+                    Typing::ReviewKeys => {
+                        "A accept · 1 2 3 option · Tab next option · R keep mine · E rewrite · J/K next/prev · U undo"
+                            .to_string()
+                    }
+                    Typing::Script => format!("Typing edits the script · Esc review keys · {}", script_hints()),
+                    Typing::Chat => chat_hints("review keys"),
+                }
             }
             View::Script => {
                 left = left.child(format!("Script · {} paragraphs", self.doc(cx).paragraphs().len()));
-                format!(
-                    "Enter new line · Tab line type · {} undo · {} write .fdx",
-                    crate::menus::shortcut("z"),
-                    crate::menus::shortcut("s")
-                )
+                match typing {
+                    Typing::Chat => chat_hints("the script"),
+                    _ => script_hints(),
+                }
             }
         };
         let said: Vec<&str> =
@@ -2591,6 +2615,22 @@ impl ScriptView {
                     .child(right),
             )
     }
+}
+
+/// Where keys typed now go ([`ScriptView::typing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typing {
+    /// The script's text (the editor, or nothing in particular).
+    Script,
+    /// The review card's single keys (A, R, E, J/K…).
+    ReviewKeys,
+    /// The chat panel (its message box, list or buttons).
+    Chat,
+}
+
+/// The status bar's hints while the chat panel has focus; Esc goes to `back`.
+fn chat_hints(back: &str) -> String {
+    format!("Typing goes to the chat · Esc {back} · {} close the chat", crate::menus::shortcut("l"))
 }
 
 /// Indexes into `items` in script order (by their numbers).
@@ -3020,7 +3060,7 @@ impl Render for ScriptView {
                     .children(card)
                     .children(agent),
             )
-            .child(self.render_status(cx))
+            .child(self.render_status(window, cx))
     }
 }
 
