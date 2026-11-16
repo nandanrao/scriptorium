@@ -42,13 +42,27 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// than written through: these files are never links by design, so one is
 /// someone pointing the write elsewhere.
 pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    refuse_link(path)?;
+    write_atomic_mode(path, bytes, 0o600)
+}
+
+/// [`write_atomic`], but an existing symlink at `path` is refused rather
+/// than written through, as [`write_atomic_private`] does; a new file gets
+/// the usual permissions. For the session file, which is never a link by
+/// design (one is someone pointing the write elsewhere).
+pub fn write_atomic_no_link(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    refuse_link(path)?;
+    write_atomic_mode(path, bytes, 0o666)
+}
+
+fn refuse_link(path: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{} is a link; not writing through it", path.display()),
         ));
     }
-    write_atomic_mode(path, bytes, 0o600)
+    Ok(())
 }
 
 fn write_atomic_mode(path: &Path, bytes: &[u8], new_mode: u32) -> io::Result<()> {
@@ -119,22 +133,69 @@ fn random_u64() -> u64 {
     h.finish()
 }
 
+/// Whether new folders may be made for a file an agent names
+/// ([`agent_file_in_folder`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Folders {
+    /// The file's folder must exist.
+    MustExist,
+    /// A missing folder is accepted when the nearest folder that exists is
+    /// inside the script's folder (resolved through links). Nothing is
+    /// created here: the caller makes it (`create_dir_all` of the returned
+    /// path's parent) only when it actually writes, so a call that fails
+    /// later leaves no empty folder.
+    MayCreate,
+}
+
+/// Where a path lies relative to the script's folder, resolved through
+/// links: the one place that canonicalises, strips the folder and checks
+/// for dot parts, shared by [`agent_file_in_folder`] and
+/// [`agent_write_place`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Place {
+    /// Inside, with no part starting with `.`: the canonical path.
+    Inside(PathBuf),
+    /// Inside, but a part of it starts with `.`.
+    Hidden,
+    /// Not inside the script's folder.
+    Outside,
+    /// Its folder doesn't exist.
+    NoFolder,
+}
+
+/// [`Place`] of `path` (absolute) with respect to `dir` (canonical): the
+/// file resolved through links where it exists, else its folder.
+fn place(dir: &Path, path: &Path) -> Place {
+    let at = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => match (path.parent().map(Path::canonicalize), path.file_name()) {
+            (Some(Ok(folder)), Some(name)) => folder.join(name),
+            _ => return Place::NoFolder,
+        },
+    };
+    match at.strip_prefix(dir) {
+        Ok(rest) if hidden(rest) => Place::Hidden,
+        Ok(_) => Place::Inside(at),
+        Err(_) => Place::Outside,
+    }
+}
+
 /// A file an agent (a model) names, checked before anything is written:
 /// `path` (relative to `dir`, the script's folder, or absolute) as a
 /// canonical path inside `dir` whose name ends in `suffix` (any case), or
 /// why it can't be one, naming the script's folder. The rule for every path
 /// a model picks: no `..`; no part starting with `.` (so never
 /// `~/.bashrc.d/` when the script sits in the home folder); the folder must
-/// exist, or with `create_folders` be created, only inside `dir`; the file
-/// (or its folder, when the file doesn't exist yet), resolved through any
-/// links, must still be inside `dir` (itself canonicalised, so `/var` and
-/// `/private/var` on macOS compare equal); and an existing file must not be
-/// a link.
+/// exist (or, with [`Folders::MayCreate`], be creatable inside `dir`); the
+/// file (or its folder, when the file doesn't exist yet), resolved through
+/// any links, must still be inside `dir` (itself canonicalised, so `/var`
+/// and `/private/var` on macOS compare equal); and an existing file must
+/// not be a link.
 ///
 /// Checked, then used: a folder swapped for a link in between would need
 /// someone who can already write inside the script's folder, so that race
 /// isn't guarded against.
-pub fn agent_file_in_folder(dir: &Path, path: &str, suffix: &str, create_folders: bool) -> Result<PathBuf, String> {
+pub fn agent_file_in_folder(dir: &Path, path: &str, suffix: &str, folders: Folders) -> Result<PathBuf, String> {
     let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
     let refuse = |why: &str| Err(format!("{path}: {why} (the script's folder is {})", dir.display()));
     let p = Path::new(path);
@@ -151,69 +212,102 @@ pub fn agent_file_in_folder(dir: &Path, path: &str, suffix: &str, create_folders
     if let Ok(rest) = joined.strip_prefix(&dir)
         && hidden(rest)
     {
-        return refuse("a name or folder starting with `.` isn't allowed");
+        return refuse(HIDDEN);
     }
     let parent = joined.parent().ok_or_else(|| format!("{path}: not a file name"))?;
-    if create_folders && !parent.is_dir() {
-        // Only below a folder that is already inside, resolved through links.
-        let inside = parent
-            .ancestors()
-            .find(|a| a.is_dir())
-            .and_then(|a| a.canonicalize().ok())
-            .is_some_and(|a| a.starts_with(&dir));
-        if !inside || !joined.starts_with(&dir) {
-            return refuse("files go inside the script's folder");
-        }
-        fs::create_dir_all(parent).map_err(|e| format!("can't create the folder {}: {e}", parent.display()))?;
-    }
     if fs::symlink_metadata(&joined).is_ok_and(|m| m.file_type().is_symlink()) {
         return refuse("that's a link; name the file itself");
     }
-    let folder = match parent.canonicalize() {
-        Ok(f) => f,
-        Err(_) => return refuse("that folder doesn't exist"),
-    };
-    let at = folder.join(joined.file_name().expect("checked above"));
-    match at.strip_prefix(&dir) {
-        Ok(rest) if !hidden(rest) => Ok(at),
-        Ok(_) => refuse("a name or folder starting with `.` isn't allowed"),
-        Err(_) => refuse("files go inside the script's folder"),
+    if folders == Folders::MayCreate && !parent.is_dir() {
+        // Only below a folder that is already inside, resolved through links.
+        let nearest = parent.ancestors().find(|a| a.is_dir()).map(|a| place(&dir, &a.join("x")));
+        return match nearest {
+            Some(Place::Inside(_)) if joined.starts_with(&dir) => Ok(joined),
+            Some(Place::Hidden) => refuse(HIDDEN),
+            _ => refuse("files go inside the script's folder"),
+        };
+    }
+    match place(&dir, &joined) {
+        Place::Inside(at) => Ok(at),
+        Place::Hidden => refuse(HIDDEN),
+        Place::Outside => refuse("files go inside the script's folder"),
+        Place::NoFolder => refuse("that folder doesn't exist"),
     }
 }
+
+const HIDDEN: &str = "a name or folder starting with `.` isn't allowed";
 
 /// Whether any part of `rest` (a relative path) starts with `.`.
 fn hidden(rest: &Path) -> bool {
     rest.components().any(|c| matches!(c, std::path::Component::Normal(n) if n.to_string_lossy().starts_with('.')))
 }
 
-/// [`agent_file_in_folder`] for a review file (`*.review.txt`): where an
-/// agent may create or attach a review it names that isn't attached yet.
-/// The chat agent's, and the CLI `tool`'s and MCP's `review_file`. An
-/// existing file must also read as a review; the caller checks its text.
+/// [`agent_file_in_folder`] for a review file (`*.review.txt`) whose
+/// folder exists: where an agent may create or attach a review it names
+/// that isn't attached yet. The chat agent's, and the CLI `tool`'s and
+/// MCP's `review_file`. An existing file must also read as a review; the
+/// caller checks its text.
 pub fn review_in_folder(dir: &Path, path: &str) -> Result<PathBuf, String> {
-    agent_file_in_folder(dir, path, ".review.txt", false)
+    agent_file_in_folder(dir, path, ".review.txt", Folders::MustExist)
 }
 
-/// Whether an agent may write into the attached file at `path` (a review
-/// it adds suggestions to): inside `dir`, the script's folder, once links
-/// are resolved, with no part starting with `.`. A review the writer
-/// attached from elsewhere stays readable to agents but not writable, so a
-/// planted session file can't aim an agent's writes outside the folder.
-pub fn agent_may_write(dir: &Path, path: &Path) -> Result<(), String> {
+/// Whether `name` (a bare file name the host picked, such as a thread's
+/// planned review name) is one an agent may create in the script's folder,
+/// without touching the disk: a `*.review.txt`, no folder part, not
+/// starting with `.`.
+pub fn plain_review_name(name: &str) -> bool {
+    !name.contains(['/', '\\']) && !name.starts_with('.') && name.to_lowercase().ends_with(".review.txt")
+}
+
+/// Whether `name` is one of a script's own files, never a review whatever
+/// a session lists: a script (`.fdx`), a session file or a lock.
+pub fn is_script_file(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.ends_with(".fdx") || name.ends_with(".scriptorium.json") || name.ends_with(".scriptorium.lock")
+}
+
+/// Where an agent may write into an attached review at `path`: inside
+/// `dir`, the script's folder, once links are resolved, with no part
+/// starting with `.`, and not a script, session or lock file. (The text
+/// must also read as a review: `opened::agent_may_write` checks that.) The
+/// canonical path, or the writer-facing reason.
+pub fn agent_write_place(dir: &Path, path: &Path) -> Result<PathBuf, String> {
     let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
-    let at = path.canonicalize().or_else(|_| {
-        let folder = path.parent().ok_or(std::io::ErrorKind::NotFound)?.canonicalize()?;
-        Ok::<_, std::io::Error>(folder.join(path.file_name().unwrap_or_default()))
-    });
-    match at.ok().and_then(|at| at.strip_prefix(&dir).map(|r| !hidden(r)).ok()) {
-        Some(true) => Ok(()),
-        _ => Err(format!(
-            "{} is outside the script's folder ({}): agents can read it but not write to it; ask the writer to \
-             move it into the script's folder, or name a new review there",
-            path.display(),
-            dir.display()
-        )),
+    let why = match place(&dir, path) {
+        Place::Inside(at) if at.file_name().is_some_and(|n| is_script_file(&n.to_string_lossy())) => {
+            "is a script or one of its own files, not a review"
+        }
+        Place::Inside(at) => return Ok(at),
+        Place::Hidden => "is in a hidden folder or has a hidden name (starting with `.`)",
+        Place::Outside => "is outside the script's folder",
+        Place::NoFolder => "is in a folder that doesn't exist",
+    };
+    Err(not_writable(path, why, &dir))
+}
+
+/// The refusal for an attached file an agent may not write into: what's
+/// wrong, and what the writer can do about it in the app.
+pub fn not_writable(path: &Path, why: &str, dir: &Path) -> String {
+    format!(
+        "{} {why}: agents only add suggestions to review files inside the script's folder ({}). The writer can \
+         copy it into that folder and attach the copy with File › Add review",
+        path.display(),
+        dir.display()
+    )
+}
+
+/// A script path as given (by a person or a model), before anything is
+/// written beside it (the lock, the session): it must be a regular `.fdx`
+/// file (through a link, the file it points at). Returns it canonical.
+pub fn check_script(script: &Path) -> Result<PathBuf, String> {
+    let at = script.canonicalize().map_err(|e| format!("{}: {e}", script.display()))?;
+    if !at.is_file() {
+        return Err(format!("{}: not a file; give a Final Draft script (.fdx)", script.display()));
     }
+    if !at.extension().is_some_and(|e| e.eq_ignore_ascii_case("fdx")) {
+        return Err(format!("{}: not a Final Draft script (.fdx)", script.display()));
+    }
+    Ok(at)
 }
 
 /// How long a program waits for another to finish with a script's session.
@@ -329,7 +423,14 @@ impl SessionLock {
         if fs::symlink_metadata(lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(LockError::Io(format!("{} is a link; not opening it", lock_path.display())));
         }
-        let file = options.open(lock_path).map_err(|e| LockError::Io(format!("{}: {e}", lock_path.display())))?;
+        let file = options.open(lock_path).map_err(|e| {
+            // O_NOFOLLOW on a link is ELOOP: say so plainly.
+            #[cfg(unix)]
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                return LockError::Io(format!("{} is a link; not opening it", lock_path.display()));
+            }
+            LockError::Io(format!("{}: {e}", lock_path.display()))
+        })?;
         let until = Instant::now() + wait;
         loop {
             // Through the trait: newer toolchains have an inherent
@@ -363,6 +464,9 @@ mod tests {
         fs::write(&target, "keep\n").unwrap();
         std::os::unix::fs::symlink(&target, dir.join("seen.json")).unwrap();
         assert!(write_atomic_private(&dir.join("seen.json"), b"{}").is_err());
+        std::os::unix::fs::symlink(&target, dir.join("film.scriptorium.json")).unwrap();
+        assert!(write_atomic_no_link(&dir.join("film.scriptorium.json"), b"{}").is_err());
+        write_atomic_no_link(&dir.join("new.json"), b"{}").unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "keep\n");
         assert!(fs::symlink_metadata(dir.join("seen.json")).unwrap().file_type().is_symlink());
         let _ = fs::remove_dir_all(&dir);
@@ -407,16 +511,17 @@ mod tests {
             let e = review_in_folder(&dir, bad).unwrap_err();
             assert!(e.contains(says) && in_folder(&e), "{bad}: {e}");
         }
-        // Creating folders: only inside, never a dot-folder or through a link.
+        // New folders: accepted only inside, never a dot-folder or through
+        // a link, and never made here (the caller makes them when it writes).
         assert_eq!(
-            agent_file_in_folder(&dir, "new/sub/c.review.txt", ".review.txt", true),
+            agent_file_in_folder(&dir, "new/sub/c.review.txt", ".review.txt", Folders::MayCreate),
             Ok(canon.join("new/sub/c.review.txt"))
         );
-        assert!(canon.join("new/sub").is_dir());
-        assert!(agent_file_in_folder(&dir, ".bashrc.d/x.review.txt", ".review.txt", true).is_err());
-        assert!(!canon.join(".bashrc.d").exists());
-        assert!(agent_file_in_folder(&dir, "out.fdx", ".fdx", false).is_ok());
-        assert!(agent_file_in_folder(&dir, "out.txt", ".fdx", false).is_err());
+        assert!(!canon.join("new").exists());
+        let e = agent_file_in_folder(&dir, ".bashrc.d/x.review.txt", ".review.txt", Folders::MayCreate).unwrap_err();
+        assert!(e.contains("starting with `.`"), "{e}");
+        assert!(agent_file_in_folder(&dir, "out.fdx", ".fdx", Folders::MustExist).is_ok());
+        assert!(agent_file_in_folder(&dir, "out.txt", ".fdx", Folders::MustExist).is_err());
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(base.join("outside.review.txt"), dir.join("link.review.txt")).unwrap();
@@ -424,16 +529,49 @@ mod tests {
             std::os::unix::fs::symlink(base.join("film/notes"), dir.join("dangling.review.txt")).unwrap();
             assert!(review_in_folder(&dir, "link.review.txt").unwrap_err().contains("link"));
             assert!(review_in_folder(&dir, "up/new.review.txt").is_err());
-            assert!(agent_file_in_folder(&dir, "up/made/new.review.txt", ".review.txt", true).is_err());
-            assert!(!base.join("made").exists());
-            // A dangling link is a link too: refused, whatever writes next.
-            assert!(review_in_folder(&dir, "dangling.review.txt").is_err());
+            let e = agent_file_in_folder(&dir, "up/made/new.review.txt", ".review.txt", Folders::MayCreate);
+            assert!(e.unwrap_err().contains("inside the script's folder"));
+            // A dangling link is a link too: refused before anything writes.
+            assert!(review_in_folder(&dir, "dangling.review.txt").unwrap_err().contains("link"));
         }
-        // Writing into attached files.
-        assert!(agent_may_write(&dir, &canon.join("reviews/b.review.txt")).is_ok());
-        assert!(agent_may_write(&dir, &base.join("outside.review.txt")).unwrap_err().contains("outside"));
-        assert!(agent_may_write(&dir, &canon.join(".hidden/x.review.txt")).is_err());
+        // Where an agent may write into an attached file, and why not.
+        assert!(agent_write_place(&dir, &canon.join("reviews/b.review.txt")).is_ok());
+        for (path, says) in [
+            (base.join("outside.review.txt"), "is outside the script's folder"),
+            (canon.join(".hidden/x.review.txt"), "hidden"),
+            (canon.join("missing/x.review.txt"), "folder that doesn't exist"),
+            (canon.join("film.fdx"), "a script or one of its own files"),
+            (canon.join("film.scriptorium.json"), "a script or one of its own files"),
+            (canon.join("film.scriptorium.lock"), "a script or one of its own files"),
+        ] {
+            let e = agent_write_place(&dir, &path).unwrap_err();
+            assert!(e.contains(says) && e.contains("File › Add review") && !e.contains("name a new"), "{e}");
+        }
+        #[cfg(unix)]
+        {
+            // An attached review in the folder that is a link out.
+            let e = agent_write_place(&dir, &dir.join("link.review.txt")).unwrap_err();
+            assert!(e.contains("outside"), "{e}");
+        }
+        assert!(plain_review_name("Dialogue pass.review.txt"));
+        for bad in ["Makefile", ".zshenv", ".x.review.txt", "a/b.review.txt", "a\\b.review.txt", "run.sh"] {
+            assert!(!plain_review_name(bad), "{bad}");
+        }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_script_is_a_regular_fdx_file() {
+        let dir = std::env::temp_dir().join(format!("scriptorium-check-script-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("folder.fdx")).unwrap();
+        fs::write(dir.join("film.FDX"), "x").unwrap();
+        fs::write(dir.join(".bashrc"), "x").unwrap();
+        assert!(check_script(&dir.join("film.FDX")).is_ok());
+        for bad in [".bashrc", "folder.fdx", "missing.fdx"] {
+            assert!(check_script(&dir.join(bad)).is_err(), "{bad}");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

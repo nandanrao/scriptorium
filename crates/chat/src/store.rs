@@ -115,12 +115,35 @@ impl ThreadStore {
 
     /// `<id>.json`.
     pub fn path(&self, id: &str) -> Result<PathBuf, StoreError> {
+        self.check_dir()?;
         Ok(self.dir.join(format!("{}.json", checked(id)?)))
     }
 
     /// `<id>.lock`.
     pub fn lock_path(&self, id: &str) -> Result<PathBuf, StoreError> {
+        self.check_dir()?;
         Ok(self.dir.join(format!("{}.lock", checked(id)?)))
+    }
+
+    /// The threads folder, if it exists, must be a real folder in the
+    /// script's folder: a `<stem>.threads` link (planted, or made by hand)
+    /// would send thread files, which hold excerpts of the script, elsewhere.
+    fn check_dir(&self) -> Result<(), StoreError> {
+        let Ok(meta) = fs::symlink_metadata(&self.dir) else { return Ok(()) };
+        let refuse = |why: &str| Err(StoreError::Io(format!("{} {why}; not using it", self.dir.display())));
+        if meta.file_type().is_symlink() {
+            return refuse("is a link");
+        }
+        let parent = match self.dir.parent() {
+            Some(p) if p.as_os_str().is_empty() => Path::new(".").canonicalize().ok(),
+            Some(p) => p.canonicalize().ok(),
+            None => None,
+        };
+        let actual = self.dir.canonicalize().ok().and_then(|d| d.parent().map(Path::to_path_buf));
+        if parent.is_none() || parent != actual {
+            return refuse("isn't a folder in the script's folder");
+        }
+        Ok(())
     }
 
     /// Every thread file, by id. No folder yet: no threads. Lock files,
@@ -203,6 +226,7 @@ impl ThreadStore {
     /// file, so two programs creating threads at once get different ids.
     /// Write the thread file under the returned lock.
     pub fn create(&self, ids: &mut dyn IdSource) -> Result<ThreadLock, StoreError> {
+        self.check_dir()?;
         fs::create_dir_all(&self.dir).map_err(|e| io_err(&self.dir, e))?;
         for _ in 0..10_000 {
             let id = ids.next_id();
@@ -296,6 +320,21 @@ pub(crate) mod tests {
     use crate::clock::{SequentialIds, from_vars};
     use scriptorium_agent::Thread;
     use scriptorium_agent::file::tools_hash;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_threads_folder_that_is_a_link_is_refused() {
+        let dir = scratch("threads-link");
+        let elsewhere = scratch("threads-link-elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, dir.join("film.threads")).unwrap();
+        let store = ThreadStore::for_script(&dir.join("film.fdx"));
+        let e = store.create(&mut SequentialIds::default()).unwrap_err();
+        assert!(e.to_string().contains("is a link"), "{e}");
+        assert!(store.path("t0001").is_err() && store.lock_path("t0001").is_err());
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
 
     /// A fresh scratch folder for one test.
     pub(crate) fn scratch(name: &str) -> PathBuf {

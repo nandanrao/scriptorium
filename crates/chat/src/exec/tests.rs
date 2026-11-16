@@ -93,11 +93,17 @@ impl ReviewStore for Mem {
         self.editing.clone()
     }
     fn may_write(&self, path: &Path) -> Result<(), ReviewError> {
-        // No disk under `/mem`: the folder rule, lexically.
+        // The files are in the map: the folder rule against the disk when
+        // the folder is real (lexically under `/mem`), the text from the map.
         if self.dir.exists() {
-            return scriptorium_fsio::agent_may_write(&self.dir, path).map_err(ReviewError::Failed);
+            scriptorium_fsio::agent_write_place(&self.dir, path).map_err(ReviewError::Failed)?;
+        } else if !path.starts_with(&self.dir) {
+            return Err(ReviewError::Failed("outside".into()));
         }
-        if path.starts_with(&self.dir) { Ok(()) } else { Err(ReviewError::Failed("outside".into())) }
+        match self.files.get(path) {
+            Some(text) if scriptorium_review::file::is_review_text(text) => Ok(()),
+            _ => Err(ReviewError::Failed(format!("{} doesn't start with SCRIPT REVIEW", path.display()))),
+        }
     }
     fn file_names(&self) -> Result<Vec<String>, ReviewError> {
         Ok(self.files.keys().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect())
@@ -522,6 +528,22 @@ fn an_attached_review_outside_the_folder_is_never_written() {
     );
     assert_eq!(s.0.files[&outside], text);
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_planted_planned_name_is_never_created() {
+    // A thread file whose planned review name is no review's: a fresh name
+    // is used instead, and the planted one is never created.
+    for planted in ["Makefile", ".zshenv", ".x.review.txt", "run.sh"] {
+        let mut s = OneStore(Mem::new());
+        let mut file = thread("Dialogue pass");
+        file.review_path = Some(planted.into());
+        let done = call(&mut s, &mut file, suggest("a", 1, "Laura grins."));
+        assert!(!done.result.is_error, "{planted}: {}", done.result.content);
+        let names: Vec<_> = s.0.files.keys().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["Dialogue pass.review.txt"], "{planted}");
+        assert_eq!(file.review_path.as_deref(), Some("Dialogue pass.review.txt"));
+    }
 }
 
 /// A script whose files are always busy.

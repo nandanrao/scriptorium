@@ -1146,7 +1146,7 @@ impl ScriptView {
         let doc = self.doc(cx);
         let len = doc.log().len();
         let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log()).to_json();
-        match scriptorium_fsio::write_atomic(&self.session_path, json.as_bytes()) {
+        match scriptorium_fsio::write_atomic_no_link(&self.session_path, json.as_bytes()) {
             Ok(()) => {
                 self.seen_session = Seen::wrote(&json);
                 self.synced = len;

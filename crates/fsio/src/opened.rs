@@ -15,7 +15,7 @@ use scriptorium_fdx::FdxFile;
 use scriptorium_review::Session;
 use scriptorium_review::sessionfile::{self, Resumed, SessionFile};
 
-use crate::write_atomic;
+use crate::{Folders, write_atomic, write_atomic_no_link};
 
 /// A script, its review files and the saved session: the review files
 /// attached in the session, plus any given on the command line.
@@ -173,14 +173,21 @@ impl Opened {
         notes: &mut Vec<String>,
     ) -> Result<(Self, usize), String> {
         let dir = script_dir(script)?;
+        // Why an agent's pick isn't a file to attach, told if it isn't an
+        // attached review's name either.
+        let mut not_file = None;
         let in_dir = pick.and_then(|p| {
             if !from_cwd {
                 // An agent's pick (MCP): a file is attached only if it is a
                 // review inside the script's folder; anything else can only
                 // name a review already attached.
-                return match agent_review(&dir, p) {
+                return match agent_review(&dir, p, Folders::MustExist) {
                     Ok((at, true)) => Some(at.to_string_lossy().into_owned()),
-                    _ => None,
+                    Ok((_, false)) => None,
+                    Err(e) => {
+                        not_file = Some(e);
+                        None
+                    }
                 };
             }
             let at = Path::new(p);
@@ -207,7 +214,14 @@ impl Opened {
         let r = if let Some(&r) = o.given.first() {
             r
         } else if let Some(p) = pick {
-            o.find_attached(p).ok_or_else(|| format!("no attached review matches {p:?}. Attached: {}", o.names()))?
+            o.find_attached(p).ok_or_else(|| match &not_file {
+                // Named like a file (a path or a review file name): say why
+                // it can't be used as one.
+                Some(why) if p.contains(['/', '\\', '.']) => {
+                    format!("no attached review matches {p:?}, and as a file: {why}. Attached: {}", o.names())
+                }
+                _ => format!("no attached review matches {p:?}. Attached: {}", o.names()),
+            })?
         } else {
             match o.session.reviews.len() {
                 0 => return Err(format!("no review files attached to {script}; attach one first")),
@@ -263,7 +277,7 @@ impl Opened {
             write_atomic(at, text.as_bytes()).map_err(|e| format!("{}: {e}", at.display()))?;
         }
         let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, self.doc.log()).to_json();
-        write_atomic(&self.session_path, json.as_bytes())
+        write_atomic_no_link(&self.session_path, json.as_bytes())
             .map_err(|e| format!("{}: {e}", self.session_path.display()))?;
         Ok(())
     }
@@ -283,25 +297,49 @@ impl Opened {
 pub const ASK_TO_ATTACH: &str =
     "ask the writer to attach it (File › Add review in the app, or `scriptorium reviews <script> add <file>`)";
 
+/// The refusal for a file an agent named that exists but doesn't read as a
+/// review (every host words it the same).
+pub fn not_a_review(path: &str) -> String {
+    format!(
+        "{path} isn't a review file yet (it doesn't start with {}); {ASK_TO_ATTACH}",
+        scriptorium_review::file::FORMAT_HEADER
+    )
+}
+
 /// A review file an agent names that isn't attached: where it is under the
-/// one rule ([`crate::review_in_folder`]: a `*.review.txt` inside the
+/// one rule ([`crate::agent_file_in_folder`]: a `*.review.txt` inside the
 /// script's folder `dir`), and whether it exists; an existing file must
 /// start with `SCRIPT REVIEW` ([`scriptorium_review::file::is_review_text`]).
-/// The CLI `tool` and the MCP server use this; the chat agent applies the
-/// same checks through its store.
-pub fn agent_review(dir: &Path, path: &str) -> Result<(PathBuf, bool), String> {
-    let at = crate::review_in_folder(dir, path)?;
+/// With [`Folders::MayCreate`] its folder may be missing; the caller makes
+/// it when it writes. The CLI `tool` and the MCP server use this; the chat
+/// agent applies the same checks through its store.
+pub fn agent_review(dir: &Path, path: &str, folders: Folders) -> Result<(PathBuf, bool), String> {
+    let at = crate::agent_file_in_folder(dir, path, ".review.txt", folders)?;
     if !at.exists() {
         return Ok((at, false));
     }
     let text = std::fs::read_to_string(&at).map_err(|e| format!("{path}: {e}"))?;
     if !scriptorium_review::file::is_review_text(&text) {
-        return Err(format!(
-            "{path} isn't a review file yet (it doesn't start with {}); {ASK_TO_ATTACH}",
-            scriptorium_review::file::FORMAT_HEADER
-        ));
+        return Err(not_a_review(path));
     }
     Ok((at, true))
+}
+
+/// Whether an agent may write into the attached file at `path`: inside the
+/// script's folder `dir`, no hidden part, not a script, session or lock
+/// file ([`crate::agent_write_place`]), and its text on disk reads as a
+/// review (a file the writer attached starts with `SCRIPT REVIEW` whatever
+/// its name; a session file listing `run.sh` can't make an agent append to
+/// it). Every agent write into a review goes through this: the CLI `tool`,
+/// the MCP server, and the chat agent (its stores' default).
+pub fn agent_may_write(dir: &Path, path: &Path) -> Result<(), String> {
+    let at = crate::agent_write_place(dir, path)?;
+    let text = std::fs::read_to_string(&at).unwrap_or_default();
+    if !scriptorium_review::file::is_review_text(&text) {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        return Err(crate::not_writable(path, "doesn't start with SCRIPT REVIEW, so it isn't a review", &dir));
+    }
+    Ok(())
 }
 
 /// Read and parse a Final Draft file.

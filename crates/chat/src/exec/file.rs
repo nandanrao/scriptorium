@@ -25,7 +25,8 @@ pub struct FileScript {
 impl FileScript {
     /// The script at `script`; it must exist.
     pub fn new(script: &Path) -> Result<Self, String> {
-        let canonical = script.canonicalize().map_err(|e| format!("{}: {e}", script.display()))?;
+        // A regular .fdx: never a lock beside a dotfile or a folder.
+        let canonical = scriptorium_fsio::check_script(script)?;
         let script = script.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", script.display()))?.to_string();
         Ok(FileScript { script, canonical, lock_wait: Duration::ZERO, notes: vec![] })
     }

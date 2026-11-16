@@ -29,8 +29,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::fsio::{LockError, SessionLock, write_atomic};
+use scriptorium_fsio::Folders;
 use scriptorium_fsio::opened::{
-    Opened, agent_review, file_name, load, new_review_id, no_reviews, review_salt, script_dir,
+    Opened, agent_may_write, agent_review, file_name, load, new_review_id, no_reviews, review_salt, script_dir,
 };
 
 pub const USAGE: &str = "\
@@ -483,7 +484,8 @@ pub fn remove_reviews(script: &str, files: &[&str]) -> Result<String, String> {
         }
         let _ = writeln!(out, "removed {f} (the script's text keeps its decisions)");
     }
-    write_atomic(&session_path, file.to_json().as_bytes()).map_err(|e| format!("{}: {e}", session_path.display()))?;
+    scriptorium_fsio::write_atomic_no_link(&session_path, file.to_json().as_bytes())
+        .map_err(|e| format!("{}: {e}", session_path.display()))?;
     Ok(out)
 }
 
@@ -1080,7 +1082,8 @@ fn changed_paragraphs(original: &[Paragraph], edited: &[Paragraph]) -> usize {
 /// The script's session lock; None (with a note on stderr) when the file
 /// system has no locks, as the app goes on. Busy past the wait is an error.
 pub(crate) fn lock(script: &str) -> Result<Option<SessionLock>, String> {
-    let at = Path::new(script).canonicalize().map_err(|e| format!("{script}: {e}"))?;
+    // A regular .fdx first: never a lock beside a dotfile or a folder.
+    let at = scriptorium_fsio::check_script(Path::new(script))?;
     match SessionLock::for_script(&at) {
         Ok(l) => Ok(Some(l)),
         Err(e @ LockError::NoLocks) => {
@@ -1092,7 +1095,7 @@ pub(crate) fn lock(script: &str) -> Result<Option<SessionLock>, String> {
 }
 
 /// "<name> (scriptorium).fdx" next to the script, as the app writes it.
-fn output_path(script: &Path) -> PathBuf {
+pub fn output_path(script: &Path) -> PathBuf {
     let stem = script.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     script.with_file_name(format!("{stem} (scriptorium).fdx"))
 }
@@ -1188,7 +1191,7 @@ fn tool_command(args: &[&str], notes: &mut Vec<String>) -> Result<String, String
 /// review, or else a `*.review.txt` inside the folder, created and attached
 /// if missing ([`scriptorium_fsio::review_in_folder`]); else they go to the
 /// only attached review. Suggestions are written only into files inside the
-/// script's folder ([`scriptorium_fsio::agent_may_write`]). Read-only
+/// script's folder ([`scriptorium_fsio::opened::agent_may_write`]). Read-only
 /// tools never write, and a saved session that can't be used is a note for
 /// them rather than an error. Returns the tool result, ending in a newline.
 pub fn tool(
@@ -1243,6 +1246,9 @@ pub fn tool(
     }
     // The review it goes into, and whether it was attached before this run
     // (only then can its file have changed since it was read).
+    // `new_file`: a review created by this call (not on disk yet; its
+    // folder may still have to be made).
+    let mut new_file = None;
     let (mut r, was_attached) = match &append.target {
         Target::Own => {
             return Err(
@@ -1258,7 +1264,8 @@ pub fn tool(
                 // script's folder (the rule the chat agent follows too), and
                 // an existing file there only if it reads as a review.
                 let named = review_named.as_deref().expect("a file target comes from review_file");
-                let (at, _) = agent_review(&o.dir, named).map_err(|e| format!("review_file {e}"))?;
+                let (at, _) =
+                    agent_review(&o.dir, named, Folders::MayCreate).map_err(|e| format!("review_file {e}"))?;
                 if at.exists() {
                     // Attached the way `reviews add` does (its saved
                     // decisions applied, its `Id:` pinned).
@@ -1275,6 +1282,7 @@ pub fn tool(
                     let caps = |k: &ElementKind| fdx.is_caps(k.name());
                     let review = Review::open_live(stored.clone(), &text, &original, &o.doc, caps, &o.script_name)
                         .with_path(stored.clone());
+                    new_file = Some(at);
                     (o.session.add(review)?, false)
                 }
             }
@@ -1293,13 +1301,21 @@ pub fn tool(
                 .ok_or(format!("{stored} was detached meanwhile; run the tool again"))?;
         }
     }
-    // Wherever the review came from (a session file may list any path),
-    // an agent writes only inside the script's folder.
-    scriptorium_fsio::agent_may_write(&o.dir, &o.review_path(r))?;
+    // Wherever the review came from (a session file may list any path), an
+    // agent writes only into a review inside the script's folder. A review
+    // made here was checked by `agent_review` above.
+    if new_file.is_none() {
+        agent_may_write(&o.dir, &o.review_path(r))?;
+    }
     let fdx = &o.fdx;
     let caps = |k: &ElementKind| fdx.is_caps(k.name());
     let applied = scriptorium_tools::apply(&mut o.session, &o.doc, r, append, &caps).map_err(|e| e.to_string())?;
     if let Some(text) = &applied.file_text {
+        // Its folder is made only now that there is something to write.
+        if let Some(parent) = new_file.as_deref().and_then(Path::parent) {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("can't create the folder {}: {e}", parent.display()))?;
+        }
         let path = o.review_path(r);
         o.write_review(&path, text)?;
         o.save()?;

@@ -200,8 +200,10 @@ pub fn add_host_fields(spec: &mut ToolSpec, fields: &[HostField]) {
                 "review_file",
                 json!({
                     "type": "string",
-                    "description": "The review file to add to, e.g. \"dialogue-pass.review.txt\" (created and \
-                                    attached if missing). Leave out to use the default review.",
+                    "description": "The review file to add to, e.g. \"dialogue-pass.review.txt\": a .review.txt \
+                                    in the script's folder, created and attached if missing. Suggestions only go \
+                                    into review files inside the script's folder. Leave out to use the default \
+                                    review.",
                 }),
                 false,
             ),
@@ -229,8 +231,10 @@ fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 /// whose schema says `additionalProperties: false` (each spec's top level,
 /// a batch's items, a line) may hold only the properties listed, so a model
 /// can't pass an argument the host didn't offer (the built-in agent isn't
-/// offered `review_file`, which names any file). Types and values are left
-/// to the tools, which phrase those errors themselves.
+/// offered `review_file`, its host's choice). Every host also confines the
+/// files a model names to the script's folder (AGENTS.md rule 6). Types and
+/// values are left to the tools, which phrase those errors themselves; an
+/// `anyOf` value of no allowed form is refused here.
 pub fn check_args(spec: &ToolSpec, args: &Value) -> Result<(), ToolError> {
     let name = &spec.name;
     match unoffered(&spec.schema, args, "") {

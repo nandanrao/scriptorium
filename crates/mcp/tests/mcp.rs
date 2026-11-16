@@ -287,7 +287,7 @@ fn paths_are_relative_to_the_script_not_the_server() {
         (abs_old.as_str(), inside),
     ];
     if cfg!(unix) {
-        bad.extend([("up/new.review.txt", inside), ("up/made/new.review.txt", "doesn't exist")]);
+        bad.extend([("up/new.review.txt", inside), ("up/made/new.review.txt", inside)]);
     }
     for (bad, says) in bad {
         let (text, err) = s.call(
@@ -318,8 +318,9 @@ fn paths_are_relative_to_the_script_not_the_server() {
     ] {
         let (text, err) = s.call("attach_reviews", json!({ "script": script, "files": files }));
         assert!(err && text.contains(says), "{files}: {text}");
+        // Detaching only edits the session: these aren't attached.
         let (text, err) = s.call("detach_reviews", json!({ "script": script, "files": files }));
-        assert!(err, "{files}: {text}");
+        assert!(err && text.contains("isn't attached"), "{files}: {text}");
     }
     let session = std::fs::read_to_string(scripts.join("film.scriptorium.json")).unwrap();
     assert!(!session.contains("outside") && !session.contains("config") && !session.contains("hidden"), "{session}");
@@ -462,4 +463,81 @@ fn suggest_changes_with_a_block_and_a_cut_then_list_and_rewrite() {
         json!({ "script": "film.fdx", "review_file": "other.review.txt", "insert_after": 0, "options": ["x"] }),
     );
     assert!(err && text.contains("list of lines"), "{text}");
+}
+
+#[test]
+fn a_planted_session_never_aims_writes_at_other_files() {
+    // A session file in the script's folder (planted with the script, say)
+    // listing a shell script, the script itself and a review outside.
+    let mut s = Server::start_in("planted", "film", "film");
+    let scripts = s.dir.join("film");
+    let script = scripts.join("film.fdx").to_string_lossy().into_owned();
+    s.ok(
+        "suggest_change",
+        json!({ "script": script, "review_file": "pass.review.txt", "paragraph_id": 1, "options": ["Laura grins."] }),
+    );
+    std::fs::write(scripts.join("run.sh"), "#!/bin/sh\necho hello\n").unwrap();
+    std::fs::write(s.dir.join("outside.review.txt"), "SCRIPT REVIEW v1\n").unwrap();
+    let session_path = scripts.join("film.scriptorium.json");
+    let original: Value = serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
+    let script_before = std::fs::read_to_string(&script).unwrap();
+    let outside = s.dir.join("outside.review.txt").to_string_lossy().into_owned();
+    for (target, says) in [
+        ("run.sh", "doesn't start with SCRIPT REVIEW"),
+        ("film.fdx", "a script or one of its own files"),
+        (outside.as_str(), "is outside the script's folder"),
+    ] {
+        let mut planted = original.clone();
+        planted["reviews"] = json!([{ "path": target, "id": "zz", "text_hash": "0" }]);
+        std::fs::write(&session_path, planted.to_string()).unwrap();
+        // The only attached review is the default.
+        let (text, err) = s.call(
+            "suggest_change",
+            json!({ "script": script, "paragraph_id": 1, "options": ["$(echo INJECTED >&2)"] }),
+        );
+        assert!(err && text.contains(says) && text.contains("File › Add review"), "{target}: {text}");
+        // Named by its path, too.
+        let (text, err) = s.call(
+            "suggest_change",
+            json!({ "script": script, "review_file": target, "paragraph_id": 1, "options": ["$(echo INJECTED >&2)"] }),
+        );
+        assert!(err, "{target}: {text}");
+        // Detaching only edits the session: it works wherever the file is.
+        let out = s.ok("detach_reviews", json!({ "script": script, "files": [target] }));
+        assert!(out.contains("removed"), "{out}");
+    }
+    assert_eq!(std::fs::read_to_string(scripts.join("run.sh")).unwrap(), "#!/bin/sh\necho hello\n");
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), script_before);
+    assert_eq!(std::fs::read_to_string(s.dir.join("outside.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
+    // An attached review in the folder that is a link out: never written.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(s.dir.join("outside.review.txt"), scripts.join("link.review.txt")).unwrap();
+        let mut planted = original.clone();
+        planted["reviews"] = json!([{ "path": "link.review.txt", "id": "zz", "text_hash": "0" }]);
+        std::fs::write(&session_path, planted.to_string()).unwrap();
+        let (text, err) =
+            s.call("suggest_change", json!({ "script": script, "paragraph_id": 1, "options": ["Laura beams."] }));
+        assert!(err && text.contains("outside the script's folder"), "{text}");
+        assert_eq!(std::fs::read_to_string(s.dir.join("outside.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
+    }
+    // decide_suggestion says why a review file can't be used.
+    std::fs::write(&session_path, original.to_string()).unwrap();
+    std::fs::write(scripts.join("notes.review.txt"), "export X=1\n").unwrap();
+    let (text, err) = s.call(
+        "decide_suggestion",
+        json!({ "script": script, "review": "notes.review.txt", "n": 1, "decision": "accept" }),
+    );
+    assert!(err && text.contains("isn't a review file yet") && text.contains("ask the writer"), "{text}");
+    // A script that isn't a regular .fdx gets no lock beside it.
+    std::fs::write(scripts.join(".bashrc"), "x").unwrap();
+    let dot = scripts.join(".bashrc").to_string_lossy().into_owned();
+    let (text, err) = s.call("suggest_change", json!({ "script": dot, "paragraph_id": 1, "options": ["x"] }));
+    assert!(err && text.contains(".fdx"), "{text}");
+    assert!(!scripts.join(".bashrc.scriptorium.lock").exists() && !scripts.join("..scriptorium.lock").exists());
+    let names: Vec<_> = std::fs::read_dir(&scripts).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(
+        !names.iter().any(|n| n.to_string_lossy().starts_with(".bashrc.") || n == ".scriptorium.lock"),
+        "{names:?}"
+    );
 }

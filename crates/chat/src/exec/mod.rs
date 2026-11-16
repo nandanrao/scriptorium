@@ -130,11 +130,12 @@ pub trait ReviewStore {
     fn disk_text(&self, path: &Path) -> Option<String> {
         fs::read_to_string(path).ok()
     }
-    /// Whether the agent may write into the review file at `path`: only
-    /// inside [`Self::dir`] ([`scriptorium_fsio::agent_may_write`]), so a
-    /// session listing a review elsewhere can't aim the agent's writes out.
+    /// Whether the agent may write into the review file at `path`: only a
+    /// review inside [`Self::dir`] ([`scriptorium_fsio::opened::agent_may_write`]),
+    /// so a session listing a file elsewhere, or one that isn't a review,
+    /// can't aim the agent's writes at it.
     fn may_write(&self, path: &Path) -> Result<(), ReviewError> {
-        scriptorium_fsio::agent_may_write(self.dir(), path).map_err(ReviewError::Failed)
+        scriptorium_fsio::opened::agent_may_write(self.dir(), path).map_err(ReviewError::Failed)
     }
     /// The names of the files in [`Self::dir`], for picking a review file
     /// name that isn't taken.
@@ -347,7 +348,10 @@ fn own_review(store: &mut dyn ReviewStore, file: &mut ThreadFile) -> Result<(usi
     let text = new_review_text(store.script_name(), &file.id);
     let mut taken = store.file_names()?;
     let is_taken = |taken: &[String], name: &str| taken.iter().any(|t| t.to_lowercase() == name.to_lowercase());
-    let mut planned = file.review_path.clone().filter(|p| !p.contains(['/', '\\']) && !is_taken(&taken, p));
+    // The thread file's planned name is checked like a model's: a planted
+    // `Makefile` or `.zshenv` is never created; a fresh name is used instead.
+    let mut planned =
+        file.review_path.clone().filter(|p| scriptorium_fsio::plain_review_name(p) && !is_taken(&taken, p));
     for _ in 0..NAME_TRIES {
         let name = planned.take().unwrap_or_else(|| naming::review_file_name(&file.title, &taken));
         let at = store.dir().join(&name);
@@ -407,10 +411,7 @@ fn file_review(store: &mut dyn ReviewStore, path: &str) -> Result<(usize, bool),
     }
     if let Some(text) = store.disk_text(&at) {
         if !is_review_text(&text) {
-            return Err(ReviewError::Failed(format!(
-                "{path} isn't a review file yet (it doesn't start with {FORMAT_HEADER}); {}",
-                scriptorium_fsio::opened::ASK_TO_ATTACH
-            )));
+            return Err(ReviewError::Failed(scriptorium_fsio::opened::not_a_review(path)));
         }
         return Ok((store.attach(&at)?, true));
     }
