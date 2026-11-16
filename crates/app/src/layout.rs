@@ -17,10 +17,26 @@ pub fn zoom() -> f32 {
     f32::from_bits(ZOOM_BITS.load(Ordering::Relaxed))
 }
 
-/// Fit the page to `available_width` (up to [`MAX_ZOOM`]). Returns true if the zoom changed.
+/// The part of the page that must stay on screen when the page is wider than
+/// the space it has, in inches from the page's left edge: the review mark left
+/// of the text column (1.5 in), the column, and the revision `*` at 7.75 in.
+pub const VISIBLE_LEFT: f32 = 1.1;
+pub const VISIBLE_RIGHT: f32 = 8.0;
+
+/// The zoom for `available_width`: the whole page up to [`MAX_ZOOM`], but never
+/// smaller than 1.0 while the text column with its marks still fits (the page's
+/// outer margins are cropped instead, see [`page_left`]); below that, the
+/// smallest zoom that keeps the column readable without cropping text.
+pub fn zoom_for(available_width: f32) -> f32 {
+    let room = available_width - 16.0;
+    let page = room / (8.5 * 96.0);
+    let column = room / ((VISIBLE_RIGHT - VISIBLE_LEFT) * 96.0);
+    page.max(column.min(1.0)).clamp(0.5, MAX_ZOOM)
+}
+
+/// Fit the page to `available_width` (see [`zoom_for`]). Returns true if the zoom changed.
 pub fn fit_width(available_width: Pixels) -> bool {
-    let fit = (f32::from(available_width) - 16.0) / (8.5 * 96.0);
-    let z = fit.clamp(0.5, MAX_ZOOM);
+    let z = zoom_for(f32::from(available_width));
     let changed = (z - zoom()).abs() > 0.005;
     if changed {
         ZOOM_BITS.store(z.to_bits(), Ordering::Relaxed);
@@ -43,6 +59,19 @@ pub fn line_height() -> Pixels {
 
 pub fn page_width() -> Pixels {
     inch(8.5)
+}
+
+/// Where the page's left edge goes in a list `width` wide (relative to the
+/// list's left): centred when it fits; otherwise the visible part (text column
+/// and marks) is centred and the outer margins are cut off.
+pub fn page_left(width: Pixels) -> Pixels {
+    let page = page_width();
+    if width >= page {
+        return (width - page) / 2.;
+    }
+    let visible_mid = inch((VISIBLE_LEFT + VISIBLE_RIGHT) / 2.);
+    // Never leave a gap at the right edge of the list.
+    (width / 2. - visible_mid).max(width - page).min(px(0.))
 }
 
 /// Blank space above the first paragraph (the page's top margin).
@@ -104,6 +133,17 @@ pub fn display_caps(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_keeps_normal_size_while_the_column_fits() {
+        // Wide: the whole page, up to the maximum.
+        assert_eq!(zoom_for(2000.0), MAX_ZOOM);
+        // 1500 px window with panel and card (~700 px): normal size, margins cropped.
+        assert_eq!(zoom_for(708.0), 1.0);
+        // Too narrow even for the column: shrink, but never below 0.5.
+        assert!(zoom_for(500.0) < 1.0);
+        assert_eq!(zoom_for(100.0), 0.5);
+    }
 
     #[test]
     fn caps_keeps_byte_offsets() {

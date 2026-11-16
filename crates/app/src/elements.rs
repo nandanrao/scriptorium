@@ -239,7 +239,7 @@ impl Element for ParaElement {
     ) {
         let lh = layout::line_height();
         let page_w = layout::page_width();
-        let page_left = bounds.left() + ((bounds.size.width - page_w) / 2.).max(px(0.));
+        let page_left = bounds.left() + layout::page_left(bounds.size.width);
         window.paint_quad(fill(
             Bounds::new(point(page_left, bounds.top()), size(page_w, bounds.size.height)),
             rgb(0xffffff),
@@ -261,8 +261,11 @@ impl Element for ParaElement {
             (ed.decor.current.contains(&p.id), ed.decor.marks.get(&p.id).copied(), changed)
         };
         let pad = px(5.);
+        // With no blank line above (dialogue under its cue), a full pad would
+        // run the box's border through the line above.
+        let pad_top = if g.space_before >= 1.0 { pad } else { px(1.) };
         let block = Bounds::from_corners(
-            point(page_left + layout::inch(1.5) - pad * 2., text_origin.y - pad),
+            point(page_left + layout::inch(1.5) - pad * 2., text_origin.y - pad_top),
             // Stay inside this paragraph's bounds: the next one paints its page over anything below.
             point(
                 page_left + layout::inch(7.5) + pad * 2.,
