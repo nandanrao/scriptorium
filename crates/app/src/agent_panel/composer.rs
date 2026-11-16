@@ -34,11 +34,14 @@ use scriptorium_providers::shell::config;
 use scriptorium_providers::{AccountsFile, PriceBook, model_name, reply_cost, thread_cost};
 
 use super::accounts::AccountsChanged;
-use super::driver::{Chat, ChatEvent, Question, SendError};
+use super::driver::{Chat, ChatEvent, Question, READ_ONLY_NOTE, SendError};
 use super::{OpenAccounts, Send};
 use crate::theme::*;
 
 const PLACEHOLDER: &str = "Ask about the script, or ask for changes…";
+/// The placeholder of a conversation another program has open (the full
+/// note shows under the field).
+const READ_ONLY_PLACEHOLDER: &str = "Read only: open in another program.";
 
 /// What the composer tells the panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +69,8 @@ pub struct Composer {
     highlight: usize,
     /// The free-text model field, while open: for this account.
     other: Option<(String, Entity<InputState>)>,
+    /// The field is off: the conversation is another program's.
+    read_only: bool,
     focus: Focus,
     _subs: Vec<Subscription>,
 }
@@ -90,7 +95,10 @@ impl Composer {
                 this.accounts = load_accounts();
                 cx.notify();
             }),
-            cx.observe(&chat, |_, _, cx| cx.notify()),
+            cx.observe_in(&chat, window, |this, _, window, cx| {
+                this.sync_read_only(window, cx);
+                cx.notify();
+            }),
             cx.subscribe_in(&chat, window, Self::on_chat_event),
         ];
         Self {
@@ -102,6 +110,7 @@ impl Composer {
             picker: false,
             highlight: 0,
             other: None,
+            read_only: false,
             focus: Focus {
                 send: cx.focus_handle(),
                 chip: cx.focus_handle(),
@@ -164,13 +173,35 @@ impl Composer {
             crate::log::info("agent composer: Enter with the disclosure showing; not sent");
             return;
         }
+        if self.read_only {
+            // The field already says why; the notice is for a send that
+            // finds the conversation taken (SendError::ReadOnly).
+            return;
+        }
         self.send_draft(window, cx);
     }
 
-    /// Whether Send can send now: no card waits for an answer, and there's
-    /// an account to send with.
+    /// Whether Send can send now: no card waits for an answer, there's an
+    /// account to send with, and the conversation isn't another program's.
     fn can_send(&self, cx: &App) -> bool {
-        self.disclosure.is_none() && !matches!(self.chip(cx), Chip::Setup) && self.accounts.is_ok()
+        self.disclosure.is_none()
+            && !matches!(self.chip(cx), Chip::Setup)
+            && self.accounts.is_ok()
+            && !self.chat.read(cx).read_only()
+    }
+
+    /// A conversation another program has open can be read, not added to:
+    /// the field is off and says why in place of the placeholder.
+    fn sync_read_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let read_only = self.chat.read(cx).read_only();
+        if read_only == self.read_only {
+            return;
+        }
+        self.read_only = read_only;
+        self.input.update(cx, |s, cx| {
+            s.set_disabled(read_only, cx);
+            s.set_placeholder(if read_only { READ_ONLY_PLACEHOLDER } else { PLACEHOLDER }, window, cx);
+        });
     }
 
     /// Hands the draft to the driver; shows why it wasn't sent, if it wasn't.
@@ -184,6 +215,13 @@ impl Composer {
                 self.sent = Some(text);
             }
             Err(SendError::Blank) => {}
+            Err(SendError::ReadOnly) => {
+                crate::log::info("agent composer: not sent: read-only conversation");
+                // Once: Enter again doesn't pile up the same line.
+                if !self.chat.read(cx).notices().iter().any(|n| n == READ_ONLY_NOTE) {
+                    self.chat.update(cx, |c, cx| c.notice(READ_ONLY_NOTE, cx));
+                }
+            }
             Err(SendError::Running) => {}
             Err(SendError::Disclose { key, text }) => {
                 crate::log::info("agent composer: disclosure first");
@@ -446,7 +484,7 @@ impl Composer {
                         .gap_1()
                         .text_color(if busy { OWN } else { INK_2 })
                         .when(busy, |d| d.child("⏳"))
-                        .child(div().flex_1().child(text))
+                        .child(div().flex_1().min_w_0().child(text))
                 }))
                 .into_any_element(),
         )
@@ -644,11 +682,21 @@ impl Composer {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(div().text_size(px(11.)).text_color(INK_3).truncate().child(if running {
-                        "You can type while the agent works."
-                    } else {
-                        "Enter to send · Shift+Enter for a new line"
-                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(INK_3)
+                            .map(|d| if self.read_only { d.child(READ_ONLY_NOTE) } else { d.truncate() })
+                            .when(!self.read_only, |d| {
+                                d.child(if running {
+                                    "You can type while the agent works."
+                                } else {
+                                    "Enter to send · Shift+Enter for a new line"
+                                })
+                            }),
+                    )
                     .child(action),
             )
             .into_any_element()

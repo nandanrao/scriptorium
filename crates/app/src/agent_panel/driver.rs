@@ -509,10 +509,13 @@ pub struct Lister {
     own: OwnRuns,
 }
 
+/// Each thread file with whether it is free to run now.
+pub type Listing = Vec<(scriptorium_chat::store::Listed, Result<(), StoreError>)>;
+
 impl Lister {
     /// Every thread file, each readable one with whether it is free to run
     /// now ([`Chat::probe`]'s answer).
-    pub fn read(&self) -> Result<Vec<(scriptorium_chat::store::Listed, Result<(), StoreError>)>, StoreError> {
+    pub fn read(&self) -> Result<Listing, StoreError> {
         Ok(self
             .store
             .list()?
