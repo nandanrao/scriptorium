@@ -114,3 +114,22 @@ pub fn check_tools(file: &ThreadFile, tools: &[ToolSpec]) -> ToolsCheck {
         ToolsCheck::Changed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The hash is over the specs' JSON with object keys in the order they
+    /// were written, not sorted: the CLI and the app (where GPUI turns on
+    /// serde_json's `preserve_order`) must agree, or a thread moved between
+    /// them looks as if its tools changed. Fails if `preserve_order` is lost
+    /// from the workspace's serde_json.
+    #[test]
+    fn tools_hash_keeps_key_order() {
+        let spec = ToolSpec { name: "t".into(), description: "d".into(), schema: json!({"b": 1, "a": 2}) };
+        let written = r#"[{"name":"t","description":"d","schema":{"b":1,"a":2}}]"#;
+        assert_eq!(serde_json::to_string(&[&spec]).unwrap(), written);
+        assert_eq!(tools_hash(&[spec]), format!("{:016x}", fnv1a(written.as_bytes())));
+    }
+}

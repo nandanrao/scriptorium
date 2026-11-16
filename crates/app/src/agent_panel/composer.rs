@@ -688,7 +688,8 @@ impl Composer {
                             .min_w_0()
                             .text_size(px(11.))
                             .text_color(INK_3)
-                            .map(|d| if self.read_only { d.child(READ_ONLY_NOTE) } else { d.truncate() })
+                            // Read only: the notice above the field says why, once.
+                            .truncate()
                             .when(!self.read_only, |d| {
                                 d.child(if running {
                                     "You can type while the agent works."

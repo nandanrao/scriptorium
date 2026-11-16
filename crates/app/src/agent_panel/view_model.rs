@@ -47,6 +47,9 @@ pub enum Key {
     ToolAt { message: usize, n: usize },
     /// A line after the messages (error, waiting, stopping).
     Tail(&'static str),
+    /// "No reply" under the writer's message `message`, which the next
+    /// message (the writer's again) followed without an answer.
+    NoReply(usize),
 }
 
 /// Where a tool call stands.
@@ -380,6 +383,11 @@ pub struct Context<'a> {
     pub review: Option<&'a str>,
 }
 
+/// Under a message of the writer's that got no answer before their next one
+/// (the request failed; its error row went with the run). The error itself
+/// isn't stored in the thread.
+pub const NO_REPLY: &str = "No reply: the request failed.";
+
 /// The rows to show: the thread's messages, then the streaming reply, then
 /// the run's state line. Builds everything afresh; a view that repaints
 /// every frame keeps a [`RowCache`] instead.
@@ -433,6 +441,17 @@ impl RowCache {
             });
             out.extend(rows.iter().cloned());
             self.done[mi] = finished.then(|| (m.clone(), rows));
+        }
+        // Rebuilt every time: it depends on the message after.
+        let mut i = 0;
+        while i < out.len() {
+            if let Key::User(mi) = out[i].key
+                && thread.messages.get(mi + 1).is_some_and(|n| n.role == Role::User)
+            {
+                out.insert(i + 1, Row { key: Key::NoReply(mi), kind: Kind::Notice { text: NO_REPLY.into() } });
+                i += 1;
+            }
+            i += 1;
         }
         stream_rows(thread.messages.len(), stream, &mut out);
         out
@@ -683,6 +702,23 @@ mod tests {
         assert_eq!(r[0].kind, Kind::User { text: "Hello".into() });
         assert_eq!(r[1].kind, Kind::Text { text: "Hi there".into(), streaming: false });
         assert_eq!(r[1].key, Key::Block { message: 1, block: 0 });
+    }
+
+    #[test]
+    fn unanswered_message_says_no_reply() {
+        let mut t = Thread::default();
+        assert!(t.push_user("Second"));
+        assert!(t.push_user("Third"));
+        assert_eq!(t.messages.len(), 2, "two messages of the writer's in a row");
+        let r = build(&t, &Stream::new(), false);
+        assert_eq!(
+            r.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+            vec![Key::User(0), Key::NoReply(0), Key::User(1)]
+        );
+        assert_eq!(r[1].kind, Kind::Notice { text: NO_REPLY.into() });
+        // The last message isn't marked: it is the one running or failing now.
+        text_turn(&mut t, "Answer", Usage::default());
+        assert_eq!(build(&t, &Stream::new(), false).iter().filter(|r| matches!(r.key, Key::NoReply(_))).count(), 1);
     }
 
     #[test]

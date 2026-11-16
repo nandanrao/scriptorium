@@ -50,6 +50,7 @@ use crate::theme::*;
 use composer::{Composer, ComposerEvent};
 use driver::{Chat, ChatEvent, ErrorAction, ViewOp};
 use messages::{MessageEvent, MessageView};
+use scriptorium_providers::shell::Keys;
 use threads::ThreadList;
 
 actions!(
@@ -130,7 +131,28 @@ pub fn init(cx: &mut App) {
     #[cfg(not(target_os = "macos"))]
     let font = load_bundled_font(cx);
     crate::log::info(&format!("agent panel font: {font}"));
+    if scriptorium_providers::shell::keyring_off() {
+        crate::log::info(&format!(
+            "{}=off: keys come from the environment only; the keyring isn't touched",
+            scriptorium_providers::shell::KEYRING_ENV
+        ));
+    }
     cx.set_global(PanelFont(font.into()));
+}
+
+/// The keys a run and the accounts sheet use, so both always agree: the
+/// keyring and the environment, or the environment alone with
+/// `SCRIPTORIUM_KEYRING=off` (as the CLI). In debug builds
+/// `SCRIPTORIUM_TEST_KEYS=memory` (kept in this process only) or `=env`
+/// replace the keyring for tests; release builds ignore it.
+pub(crate) fn keys() -> Keys {
+    #[cfg(debug_assertions)]
+    match std::env::var("SCRIPTORIUM_TEST_KEYS").as_deref() {
+        Ok("memory") => return Keys::in_memory(|k| std::env::var(k).ok()),
+        Ok("env") => return Keys::env_only(),
+        _ => {}
+    }
+    Keys::from_env()
 }
 
 /// Inter (SIL OFL 1.1, assets/fonts/LICENSE-Inter.txt): static regular,

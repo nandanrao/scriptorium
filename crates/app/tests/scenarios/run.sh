@@ -6,24 +6,35 @@
 #   crates/app/tests/scenarios/run.sh S5 S11       # only these
 #   NO_BUILD=1 crates/app/tests/scenarios/run.sh   # use the binaries already built
 #
-# Needs sway, swaymsg, wtype, grim, jq, magick (ImageMagick) and
-# dbus-run-session. Never touches the user's display, config, keyring or
-# network: each scenario runs in its own folder under $SCENARIO_OUT (default ${TMPDIR:-/tmp}/scriptorium-scenarios),
-# with replies from crates/app/tests/cassettes (SCRIPTORIUM_REPLAY), a fixed
-# clock and sequential ids (SCRIPTORIUM_TEST_CLOCK). Screenshots go to
-# $SCENARIO_OUT/shots/<scenario>-<step>.png, the app's log and output to
-# $SCENARIO_OUT/work/<scenario>/. Exit status: 0 when every scenario passes.
+#   CI=1 crates/app/tests/scenarios/run.sh         # a slow machine: 3× the waits,
+#                                                  # software rendering (pixman)
+#
+# Never touches the user's display, config, keyring or network: Sway runs
+# in a private XDG_RUNTIME_DIR, each run in its own folder ($SCENARIO_OUT, or
+# a new mktemp -d), each scenario in a folder of its own there, with replies
+# from crates/app/tests/cassettes (SCRIPTORIUM_REPLAY), a fixed clock and
+# sequential ids (SCRIPTORIUM_TEST_CLOCK) and SCRIPTORIUM_KEYRING=off.
+# Screenshots go to $OUT/shots/<scenario>-<step>.png, the app's log and
+# files to $OUT/work/<scenario>/. Exit status: 0 when every scenario passes,
+# 1 when one fails, 2 when it couldn't run.
 #
 # Checks are on what the programs leave behind (thread files, review files,
-# the session, the app's log and exit code, the CLI's --json output); what
-# only the screen shows (focus rings, the sidebar rail, a countdown) is in
-# the shots, listed under "look at" in the summary. Uses CARGO_TARGET_DIR if
-# set, and runs private copies of the binaries (a concurrent build can't swap
-# them). Cassettes come from make_cassettes.py beside this file.
+# the session, the app's log and exit code, the CLI's --json output). What
+# only the screen shows (focus rings, the sidebar rail, a countdown) is
+# listed per scenario as "visual items unverified": look at those shots.
+# The places clicked and the colours looked for are named at the top of
+# lib.sh. Cassettes come from make_cassettes.py beside this file.
+#
+# Packages (Debian/Ubuntu names; a CI image needs all of them): sway, wtype,
+# grim, jq, imagemagick (7's `magick` or 6's `convert`), dbus (for
+# dbus-run-session), util-linux (setsid), mesa-vulkan-drivers (lavapipe:
+# GPUI draws with Vulkan, software is enough), fonts-dejavu-core, and a Rust
+# toolchain. CI=1 sets WLR_RENDERER=pixman for Sway. There is no CI job yet.
 #
 # A new scenario: a function named like the others (fresh, app_start, keys,
-# check …, app_quit — see lib.sh), added to ALL. To drive one by hand,
-# source this file (it then only defines the functions) after sway_start.
+# check …, visual …, app_quit — see lib.sh), added to ALL. To drive one by
+# hand, source this file (it then only defines the functions), then
+# sway_start.
 
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -68,7 +79,8 @@ S1() {
     shot 04-review-1700-no-rail
     ctrl l
     resolution 1500x1000
-    LOOK+=("S1: 02 rail at 1500 in the review view and the composer's focus ring; 04 no rail at 1700")
+    visual "02: the sidebar is a rail at 1500 px in the review view; the composer shows its focus ring"
+    visual "04: no rail at 1700 px"
     app_quit 0
 }
 
@@ -78,7 +90,7 @@ S2() {
     fresh
     app_start "$CASSETTES/s02_click_focus.jsonl" || return
     shot 01-editor-focused
-    click 1300 882
+    click_composer
     type_text "Who is Laura"
     shot 02-clicked-typed
     key -k Return
@@ -107,7 +119,7 @@ S3() {
     check "Agree and send sends the draft" wait_run 1
     check "the draft as typed is the first message" jq_is "$(thread t0001)" '.thread.messages[0].blocks[0].text == "Who is Laura"'
     check "the disclosure is remembered" file_has config/scriptorium/seen.json film.fdx
-    click_composer
+    focus_composer
     type_text "And Cesar"
     key -k Return
     check "a second send goes straight out" wait_run 2
@@ -133,7 +145,7 @@ S4() {
     want=$(grep -o '"text": "[^"]*"' "$CASSETTES/s04_streaming.jsonl" | sed 's/"text": "//; s/"$//' | tr -d '\n')
     check "the thread file holds the whole streamed text" \
         jq_is "$(thread t0001)" ".thread.messages[1].blocks[0].text == \"$want\""
-    LOOK+=("S4: 01 mid-stream, 02 the end shows the same text as the thread file")
+    visual "01: the reply mid-stream; 02: the end reads as the thread file"
     app_quit 0
 }
 
@@ -251,7 +263,10 @@ S8() {
     ctrl t
     shot 07-list-unreadable
     key -k Escape
-    LOOK+=("S8: 01 the countdown, 02–05 the error rows, 07 the unreadable thread greyed in the list")
+    visual "01: the retry countdown"
+    visual "02–05: the auth, server, parse and offline error rows"
+    visual "06: \"No reply\" under \"Second\""
+    visual "07: the unreadable thread greyed in the list"
     app_quit 0
 }
 
@@ -303,26 +318,23 @@ big_script() {
 
 # ---- S10 accounts sheet -------------------------------------------------------------
 
-# Places in the sheet at 1500×1000 (a fixed 440 px column on the right; the
-# fields above the notices don't move).
 S10() {
     fresh
     resolution 1500x1000
     app_start || return
-    click 27 18 # File
-    click 66 283 # AI accounts…
+    click $FILE_MENU
+    click $MENU_ACCOUNTS
     shot 01-sheet
-    click 1395 249 # Custom
-    click 1280 259 # Base URL
+    click $SHEET_CUSTOM
+    click $SHEET_BASE_URL
     type_text "http://localhost:1234/v1"
-    click 1280 321 # Model
+    click $SHEET_MODEL
     type_text "qwen3"
-    click 1130 465 # More options
-    click 1120 629 # Advanced: where a key can come from instead of the keychain
+    click $SHEET_MORE
+    click $SHEET_ADVANCED # where a key can come from instead of the keychain
     shot 02-form-env-notice
     # Save: the last filled accent button (it moves as the notices change).
-    # shellcheck disable=SC2046
-    click $(button_center 91 63 163)
+    click_button "$ACCENT_RGB" "the sheet's Save"
     check "the account is saved to the config in scratch" wait_for 5 jq_is config/scriptorium/accounts.json \
         '.accounts[] | select(.id == "custom") | .provider == "custom" and .base_url == "http://localhost:1234/v1" and .model == "qwen3"'
     check "with no key in it" sh -c "! grep -qi 'key' '$WORK/config/scriptorium/accounts.json'"
@@ -331,7 +343,8 @@ S10() {
     check "the CLI lists it" jq_is accounts.json '[.. | objects | select(.id? == "custom")] | length > 0'
     shot 03-saved
     key -k Escape
-    LOOK+=("S10: 02 the env-var notice under Advanced (SCRIPTORIUM_CUSTOM_KEY), 03 the saved account")
+    visual "02: the env-var notice under Advanced (SCRIPTORIUM_CUSTOM_KEY)"
+    visual "03: the saved account in the list"
     app_quit 0
 }
 
@@ -416,7 +429,9 @@ S12() {
     check "the CLI's run finishes" wait_for 20 test -f "$WORK/cli-slow.exit"
     check "…exit 0" test "$(cat "$WORK/cli-slow.exit" 2> /dev/null)" = 0
     check "nothing typed in the read-only panel reached the thread" sh -c "! grep -q 'Can I' '$WORK/film.threads/t0001.json'"
-    LOOK+=("S12: 01 the sidebar lists the CLI's review, 02/04 the thread list, 05 the CLI's thread read-only")
+    visual "01: the sidebar lists the CLI's review"
+    visual "02/04: the thread list (\"In use elsewhere\" in 04)"
+    visual "05: the CLI's thread read-only, its note shown once"
     app_quit 0
 }
 
@@ -442,21 +457,23 @@ S13() {
     sleep 1.5
     check "Ctrl+Z in the composer leaves the script's decisions alone" cmp -s "$WORK/film.scriptorium.json" "$WORK/session.accepted"
     type_text "more text"
-    click 27 18 # File
-    click 41 158 # Undo
+    click $FILE_MENU
+    click $MENU_UNDO
     check "File › Undo with the composer focused goes to the composer" log_has "agent panel: menu undo in the composer"
     shot 03-menu-undo-composer
     sleep 1.5
     check "…and leaves the decisions alone" cmp -s "$WORK/film.scriptorium.json" "$WORK/session.accepted"
     key -k Escape # focus back to the card
-    click 27 18
-    click 41 158
+    click $FILE_MENU
+    click $MENU_UNDO
     check "File › Undo with the card focused undoes the accept" \
         wait_for 5 sh -c "! cmp -s '$WORK/film.scriptorium.json' '$WORK/session.accepted'"
     shot 04-menu-undo-card
     check "the agent's suggestions remain" cmp -s "$WORK/$review" "$WORK/review.before"
     check "the thread's review is still attached" jq_is film.scriptorium.json '[.reviews[].id] | index("thread-t0001") != null'
-    LOOK+=("S13: 02 Ctrl+Z emptied the composer, 03 the menu undo removed the composer text, 04 the accept undone")
+    visual "02: Ctrl+Z emptied the composer"
+    visual "03: the menu undo emptied it too"
+    visual "04: the accept undone on the card"
     app_quit 0
 }
 
@@ -485,20 +502,12 @@ S14() {
 
 # ---- the run ------------------------------------------------------------------------
 
-# send TEXT N: focus the composer (Ctrl+L, or a click if it has the focus
-# already), send TEXT and wait for the N-th run to end.
+# send TEXT N: focus the composer, send TEXT and wait for the N-th run to end.
 send() {
-    if [ "$(applog | grep -c 'agent panel: send')" = 0 ]; then ctrl l; else click_composer; fi
+    focus_composer
     type_text "$1"
     key -k Return
     check "\"$1\" sent and answered" wait_run "$2"
-}
-
-# click_composer: the composer's text field, at the foot of the panel.
-click_composer() {
-    local w
-    w=$(SWAYSOCK=$SOCK swaymsg -t get_outputs | jq '.[0].current_mode.width')
-    click $((w - 200)) 868
 }
 
 # wait_run N [seconds]: until the app's log shows N runs ended.
@@ -511,48 +520,53 @@ main() {
     for s in "${picked[@]}"; do
         declare -F "$s" > /dev/null || { echo "no scenario $s (have: ${ALL[*]})" >&2; exit 2; }
     done
-    for t in sway swaymsg wtype grim jq magick dbus-run-session; do
+    for t in sway swaymsg wtype grim jq dbus-run-session setsid; do
         command -v "$t" > /dev/null || { echo "needs $t" >&2; exit 2; }
     done
+    command -v magick > /dev/null || command -v convert > /dev/null || { echo "needs ImageMagick" >&2; exit 2; }
     mkdir -p "$SHOTS" "$OUT/work" "$BIN"
     rm -f "$SHOTS"/*.png
+    echo "scenario output: $OUT"
     if [ -z "${NO_BUILD:-}" ]; then
         echo "building (CARGO_TARGET_DIR=$TARGET)…"
-        (cd "$ROOT" && CARGO_TARGET_DIR=$TARGET cargo build -q -p scriptorium-app -p scriptorium-cli --bins \
-            --example vpointer) || exit 2
+        # Two cargo calls, not one: built together, cargo unifies features
+        # and the CLI would get what only the app's dependencies turn on
+        # (serde_json's preserve_order, from GPUI), hiding S11's differences.
+        (cd "$ROOT" && CARGO_TARGET_DIR=$TARGET cargo build -q -p scriptorium-cli --bins) || exit 2
+        cp "$TARGET/debug/scriptorium" "$CLI.new" || exit 2
+        (cd "$ROOT" && CARGO_TARGET_DIR=$TARGET cargo build -q -p scriptorium-app --bins --example vpointer) || exit 2
+        mv "$CLI.new" "$CLI"
+    else
+        cp "$TARGET/debug/scriptorium" "$CLI" || exit 2
     fi
-    rm -f "$APP" "$CLI" "$VPOINTER"
-    cp "$TARGET/debug/scriptorium-app" "$APP" && cp "$TARGET/debug/scriptorium" "$CLI" &&
-        cp "$TARGET/debug/examples/vpointer" "$VPOINTER" || exit 2
+    cp "$TARGET/debug/scriptorium-app" "$APP" && cp "$TARGET/debug/examples/vpointer" "$VPOINTER" || exit 2
+    # Before anything starts: whatever happens, the compositor, the app and
+    # the binaries' copies go.
+    trap 'app_kill; sway_stop; rm -rf "$BIN"' EXIT
     sway_start 1500x1000
-    trap 'sway_stop' EXIT
-    local results=() failed=0
-    LOOK=()
+    local results=() failed=0 unverified=0
     for s in "${picked[@]}"; do
-        SCEN=$s FAILS=() NOTES=()
+        SCEN=$s FAILS=() VISUAL=() WORK=""
         echo "$s"
         "$s"
         # Never leave an app behind for the next scenario.
-        if [ -n "$WORK" ] && app_running && pgrep -f "^$APP" > /dev/null; then
-            pkill -f "^$APP"
-            wait_for 5 test -f "$WORK/app.exit"
-        fi
+        [ -n "$WORK" ] && app_kill
+        local n=${#VISUAL[@]} also=""
+        [ "$n" -gt 0 ] && also=" ($n visual item$([ "$n" = 1 ] || echo s) unverified)"
+        unverified=$((unverified + n))
         if [ ${#FAILS[@]} -eq 0 ]; then
-            results+=("PASS  $s")
+            results+=("PASS  $s$also")
         else
             failed=1
-            results+=("FAIL  $s")
+            results+=("FAIL  $s$also")
             for f in "${FAILS[@]}"; do results+=("        - $f"); done
         fi
-        for n in "${NOTES[@]}"; do results+=("        note: $n"); done
+        for v in "${VISUAL[@]}"; do results+=("        look: $v"); done
     done
     echo
     echo "==== chat panel scenarios ===="
     printf '%s\n' "${results[@]}"
-    if [ ${#LOOK[@]} -gt 0 ]; then
-        echo "look at (in $SHOTS):"
-        printf '  %s\n' "${LOOK[@]}"
-    fi
+    echo "shots in $SHOTS; $unverified visual item(s) to check by eye"
     exit $failed
 }
 
