@@ -26,10 +26,6 @@ pub const VISIBLE_RIGHT: f32 = 8.0;
 /// The smallest zoom the page ever takes.
 pub const MIN_ZOOM: f32 = 0.5;
 
-/// The smallest zoom the window's minimum width keeps the script at (about
-/// 7 pt Courier: small, but still readable on a laptop screen).
-pub const READABLE_ZOOM: f32 = 0.6;
-
 /// The list width that shows the text column with its marks at zoom `z`
 /// (the inverse of [`zoom_for`]'s column fit).
 pub fn column_width_at(z: f32) -> f32 {
@@ -165,7 +161,8 @@ mod tests {
 
     #[test]
     fn column_width_is_zoom_for_inverted() {
-        assert!((zoom_for(column_width_at(READABLE_ZOOM)) - READABLE_ZOOM).abs() < 1e-4);
+        assert!((zoom_for(column_width_at(0.6)) - 0.6).abs() < 1e-4);
+        assert_eq!(zoom_for(column_width_at(MIN_ZOOM)), MIN_ZOOM);
     }
 
     #[test]

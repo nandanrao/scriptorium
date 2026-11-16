@@ -2218,7 +2218,7 @@ impl ScriptView {
             .children(items)
     }
 
-    fn render_card(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_card(&self, width: f32, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let focused = self.focus.is_focused(window);
         let typing = self.typing(window, cx);
         let mut body: Vec<AnyElement> = vec![];
@@ -2227,7 +2227,7 @@ impl ScriptView {
             .track_focus(&self.focus)
             .key_context("Review")
             .flex_none()
-            .w(px(agent_panel::CARD_WIDTH))
+            .w(px(width))
             .h_full()
             .overflow_y_scroll()
             .bg(PAPER)
@@ -3158,14 +3158,14 @@ impl Focusable for ScriptView {
 impl Render for ScriptView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.expire_notice(cx);
-        let card = self.review().map(|_| self.render_card(window, cx));
         let agent = self.agent.as_ref().filter(|_| self.agent_open).map(|(panel, _)| panel.clone());
         let width = window.viewport_size().width / px(1.);
-        let side = if agent_panel::sidebar_collapsed(agent.is_some(), card.is_some(), width) {
-            self.render_rail(cx)
-        } else {
-            self.render_sidebar(cx)
-        };
+        let cols = agent_panel::columns(width, agent.is_some(), self.review().is_some());
+        let card = self.review().map(|_| self.render_card(cols.card, window, cx));
+        if let Some(panel) = &agent {
+            panel.update(cx, |p, cx| p.set_width(cols.panel, cx));
+        }
+        let side = if cols.rail { self.render_rail(cx) } else { self.render_sidebar(cx) };
         div()
             .key_context("ScriptView")
             .size_full()
@@ -3201,7 +3201,16 @@ impl Render for ScriptView {
                     .min_h_0()
                     .flex()
                     .child(side)
-                    .child(div().flex_1().min_w_0().h_full().child(self.editor.clone()))
+                    // Too narrow for every column: the script gives way to the card.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .when(!cols.script, |d| d.flex_none().w(px(0.)))
+                            .child(self.editor.clone()),
+                    )
                     .children(card)
                     .children(agent),
             )

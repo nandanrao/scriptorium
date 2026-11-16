@@ -226,6 +226,8 @@ pub struct ThreadList {
     confirming: Option<String>,
     /// Why the last action didn't happen, or what it did.
     note: Option<String>,
+    /// The panel's width.
+    width: f32,
 }
 
 impl ThreadList {
@@ -245,6 +247,15 @@ impl ThreadList {
             selected: 0,
             confirming: None,
             note: None,
+            width: super::WIDTH,
+        }
+    }
+
+    /// The panel's width, for the list's.
+    pub fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        if self.width != width {
+            self.width = width;
+            cx.notify();
         }
     }
 
@@ -584,7 +595,7 @@ impl ThreadList {
                 .absolute()
                 .top(px(30.))
                 .left(px(-8.))
-                .w(px(super::WIDTH - 16.))
+                .w(px(self.width - 16.))
                 .max_h(px(440.))
                 .occlude()
                 .p_1()
