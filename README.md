@@ -100,8 +100,9 @@ a script, a card tells you what goes out: your messages, and the parts of the
 script the agent reads (scenes, search results, sometimes the whole script),
 to your provider's server with your key. The review files attached to the
 script can go too, including collaborators' notes, and the agent writes its
-suggestions to a review file next to the script. Scriptorium has no server of
-its own.
+suggestions to a review file next to the script. Agents only write into review
+files in the script's folder that start with `SCRIPT REVIEW`; other attached
+reviews are read-only for them. Scriptorium has no server of its own.
 The saved conversation next to the script contains excerpts of it, so keep that
 folder as private as the script. If the agent wants to read the whole script,
 it asks first, with an estimated cost. Your provider's own terms apply to

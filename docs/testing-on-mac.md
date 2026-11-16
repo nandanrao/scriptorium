@@ -11,6 +11,10 @@ be rough. Everything you notice helps, including the small things.
   decide as usual. Nothing in your script changes until you accept it.
 - **You bring your own API key.** See section 9 for getting one, setting it
   up and the Mac's Keychain questions.
+- **Agents only write into review files in the script's folder.** A review
+  you attached from another folder, or one whose first line isn't
+  `SCRIPT REVIEW v1`, is read-only for the AI: it can read it but adds its
+  suggestions to its own review instead.
 
 Please do section 9 on a copy of your script.
 

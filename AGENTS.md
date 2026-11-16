@@ -86,9 +86,13 @@ GPL-3.0 — read them for ideas, never copy code from them.
    suggestions only into an attached file inside the folder that starts
    with `SCRIPT REVIEW` and isn't a script, session or lock file
    (`opened::agent_may_write`), so a session file listing `run.sh` or a
-   review elsewhere can't aim its writes. The same goes for what the host
+   review elsewhere can't aim its writes. Attached reviews without the
+   `SCRIPT REVIEW` line (or outside the folder) are read-only for agents,
+   and are never re-attached as a thread's own review. MCP `write_script`
+   replaces no existing `.fdx` but the script's own default output. The same goes for what the host
    reads from files beside the script: a thread's planned review name must
-   be a plain `*.review.txt` (`plain_review_name`), the `<stem>.threads`
+   be a plain `*.review.txt` (`plain_review_name`: no `/`, `\`, `:`, no
+   leading `.`), the `<stem>.threads`
    folder must not be a link, the session file is never written through a
    link, and a script must be a regular `.fdx` before anything (the lock)
    is written beside it (`check_script`). Only commands a person runs
