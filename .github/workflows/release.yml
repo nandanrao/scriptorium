@@ -39,6 +39,14 @@ jobs:
           UNIVERSAL: ${{ inputs.universal && '1' || '0' }}
         run: script/bundle-mac.sh
 
+      # The CLI in the bundle is what agents run (`scriptorium mcp`): check it
+      # starts from there, signed, and answers an MCP handshake.
+      - name: Smoke-test the bundled CLI
+        timeout-minutes: 2
+        run: |
+          codesign --verify --strict target/bundle/Scriptorium.app/Contents/MacOS/scriptorium
+          script/smoke-cli.sh target/bundle/Scriptorium.app/Contents/MacOS/scriptorium
+
       - name: Zip
         id: zip
         run: |
@@ -57,8 +65,6 @@ jobs:
           path: ${{ steps.zip.outputs.zip }}
           if-no-files-found: error
 
-      # TODO(G1): sign the bundled CLI (Contents/MacOS/scriptorium) before the
-      # app, smoke-test `scriptorium mcp` from the bundle, and new release notes.
       - name: GitHub Release
         if: github.ref_type == 'tag'
         env:
@@ -67,4 +73,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             "${{ steps.zip.outputs.zip }}" \
             --title "Scriptorium $GITHUB_REF_NAME" \
-            --notes "Unsigned (ad-hoc) macOS build, macOS 13+. First launch: see docs/testing-on-mac.md (it covers the xattr quarantine step). New: translation versions. Ask the in-app chat or use File > New version (Cmd+T) to make a version of your script in another language, lined up row by row with the original shown on the left; the agent fills it with suggestions you decide as usual, and Write .fdx saves the version file itself (testing-on-mac.md section 7). Also new: AI chat. Ctrl/Cmd+L opens a chat panel where an agent proposes edits as suggestions you decide as usual; add your own API key (Anthropic, OpenAI, OpenRouter or a custom endpoint) under AI accounts. macOS asks to use the Keychain: choose Always Allow (testing-on-mac.md section 9). The chat is also in the CLI: scriptorium chat, threads, accounts. Chat sends your messages and the parts of the script the agent reads to your provider; the first use shows what. Work on a copy of your script. Sharing a folder needs the same Scriptorium version."
+            --notes-file .github/release-notes.md

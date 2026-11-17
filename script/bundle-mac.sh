@@ -5,7 +5,9 @@
 #   UNIVERSAL=1 script/bundle-mac.sh    # arm64 + x86_64 merged with lipo
 #
 # Output: target/bundle/Scriptorium.app, containing the app binary and the
-# `scriptorium` CLI (so agents on the Mac can use it), ad-hoc signed.
+# `scriptorium` CLI next to it (Contents/MacOS/scriptorium: the command line,
+# and `scriptorium mcp`, the connector agents run), ad-hoc signed.
+# Check the bundled CLI with script/smoke-cli.sh.
 # Not notarized: on first launch, right-click > Open, or
 #   xattr -dr com.apple.quarantine Scriptorium.app
 set -euo pipefail
@@ -110,8 +112,13 @@ PLIST
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 # Ad-hoc signature: arm64 binaries won't run unsigned. Not notarized.
-codesign --force --deep -s - "$APP"
+# Inside out, not --deep: the bundled CLI (the agent connector, which Claude
+# and other agents run straight from the bundle) first, then the app, which
+# seals the bundle around it.
+codesign --force -s - --identifier org.scriptorium.cli "$APP/Contents/MacOS/scriptorium"
+codesign --force -s - "$APP"
+codesign --verify --strict "$APP/Contents/MacOS/scriptorium"
 codesign --verify --deep --strict "$APP"
 
 echo "Built $APP ($VERSION, ${TARGETS[*]})"
-lipo -info "$APP/Contents/MacOS/scriptorium-app"
+lipo -info "$APP/Contents/MacOS/scriptorium-app" "$APP/Contents/MacOS/scriptorium"
