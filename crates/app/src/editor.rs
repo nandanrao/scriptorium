@@ -31,6 +31,7 @@ use scriptorium_core::{FIXED_MESSAGE, ParaId, Paragraph, Pos, Selection};
 
 use crate::elements::{InputArea, ParaElement};
 use crate::layout;
+use crate::links_view::Columns;
 
 actions!(
     editor,
@@ -85,6 +86,9 @@ pub struct Decor {
     /// Hints shown dimmed in blank lines: on a version, the original's line
     /// of the row (what is left to translate).
     pub ghosts: Rc<HashMap<ParaId, String>>,
+    /// The other member of the script's pair lined up on the left, row by
+    /// row: each paragraph's band. `None`: one column.
+    pub columns: Option<Rc<Columns>>,
 }
 
 /// Whether `p` differs from the file: new, retyped, or with other text.
@@ -291,6 +295,28 @@ impl ScriptEditor {
         changed
     }
 
+    /// Set what is painted over the script. Two columns shown or hidden, or
+    /// a pair loaded again, measure every paragraph again; rows laid out
+    /// again measure only the paragraphs whose band changed (with the rest
+    /// of their row's run, which the left cell flows over).
+    pub fn set_decor(&mut self, decor: Decor) {
+        match (&self.decor.columns, &decor.columns) {
+            (None, None) => {}
+            (Some(a), Some(b)) if Rc::ptr_eq(a, b) => {}
+            (Some(a), Some(b)) if Rc::ptr_eq(&a.left, &b.left) => {
+                let changed: Vec<usize> = (self.doc.paragraphs().iter().enumerate())
+                    .filter(|(_, p)| a.bands.get(&p.id) != b.bands.get(&p.id))
+                    .map(|(k, _)| k)
+                    .collect();
+                for range in runs_of(self.doc.paragraphs(), b, changed) {
+                    self.list.remeasure_items(range);
+                }
+            }
+            _ => self.list.remeasure(),
+        }
+        self.decor = decor;
+    }
+
     /// Tell the list which items changed, by comparing with what it showed before.
     fn sync_list(&mut self) {
         let new = self.doc.paragraphs();
@@ -300,6 +326,14 @@ impl ScriptEditor {
         let suffix = old.iter().rev().zip(new.iter().rev()).take(max_suffix).take_while(|(a, b)| a == b).count();
         if prefix + suffix < old.len().max(new.len()) || old.len() != new.len() {
             self.list.splice(prefix..old.len() - suffix, new.len() - prefix - suffix);
+            // In two columns a paragraph's height moves the left cell for
+            // the rest of its row's run: measure those again too. (Bands
+            // for new paragraphs come with the next `set_decor`.)
+            if let Some(c) = &self.decor.columns {
+                for range in runs_of(new, c, prefix..new.len() - suffix) {
+                    self.list.remeasure_items(range);
+                }
+            }
         }
         self.shown = new.to_vec();
     }
@@ -307,7 +341,21 @@ impl ScriptEditor {
     fn remeasure_head(&mut self) {
         if let Some(ix) = self.doc.index_of(self.sel.head.para) {
             self.list.splice(ix..ix + 1, 1);
+            // A composition's height moves the left cell for the rest of the
+            // head's row's run.
+            if let Some(c) = &self.decor.columns {
+                for range in runs_of(self.doc.paragraphs(), c, [ix]) {
+                    self.list.remeasure_items(range);
+                }
+            }
         }
+    }
+
+    /// Whether `position` is on the left column (the script lined up there,
+    /// read-only) or the gutter.
+    fn on_left(&self, position: Point<Pixels>) -> bool {
+        self.decor.columns.is_some()
+            && position.x < self.viewport.left() + px(layout::two_columns(f32::from(self.viewport.size.width)).right_x)
     }
 
     fn reveal_head(&self) {
@@ -557,6 +605,23 @@ impl ScriptEditor {
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         let Some(pos) = self.hit_test(event.position) else { return };
+        // A click on the left only puts the cursor at the start of the row's
+        // first line here: nothing there to select.
+        if self.on_left(event.position) {
+            let first = (self.decor.columns.as_ref())
+                .and_then(|c| c.bands.get(&pos.para))
+                .and_then(|b| b.above.first().copied())
+                .unwrap_or(pos.para);
+            cx.emit(EditorEvent::Clicked(first));
+            self.goal_x = None;
+            if self.marked.take().is_some() {
+                self.remeasure_head();
+            }
+            self.sel = Selection::cursor(Pos::new(first, 0));
+            self.selecting = false;
+            cx.notify();
+            return;
+        }
         cx.emit(EditorEvent::Clicked(pos.para));
         self.goal_x = None;
         if self.marked.take().is_some() {
@@ -627,6 +692,33 @@ impl ScriptEditor {
         let (a, h) = (self.sel.anchor, self.sel.head);
         if a.para == h.para { a.offset.min(h.offset)..a.offset.max(h.offset) } else { h.offset..h.offset }
     }
+}
+
+/// The list ranges covering the paragraphs at `changed` (positions in
+/// `paras`, ascending) and, for each, the rest of its row's run in `c`.
+fn runs_of(paras: &[Paragraph], c: &Columns, changed: impl IntoIterator<Item = usize>) -> Vec<Range<usize>> {
+    let mut out: Vec<Range<usize>> = vec![];
+    for k in changed {
+        let Some(b) = paras.get(k).and_then(|p| c.bands.get(&p.id)) else {
+            out.push(k..k + 1);
+            continue;
+        };
+        let mut end = k + 1;
+        if !b.last {
+            while let Some(n) = paras.get(end).and_then(|p| c.bands.get(&p.id)) {
+                end += 1;
+                if n.last || n.slice == 0 {
+                    break;
+                }
+            }
+        }
+        let start = k.saturating_sub(b.slice);
+        match out.last_mut() {
+            Some(r) if r.end >= start => r.end = r.end.max(end),
+            _ => out.push(start..end),
+        }
+    }
+    out
 }
 
 impl Focusable for ScriptEditor {
@@ -774,6 +866,9 @@ impl Render for ScriptEditor {
         // Fit the page to the space the editor has (the window minus side panels).
         let width =
             if self.viewport.size.width > px(0.) { self.viewport.size.width } else { window.viewport_size().width };
+        // Two columns share one zoom, fitted to the right one.
+        let width =
+            if self.decor.columns.is_some() { px(layout::two_columns(f32::from(width)).right_w) } else { width };
         if layout::fit_width(width) {
             self.list.remeasure();
         }
@@ -846,6 +941,35 @@ mod tests {
         assert!(is_changed(&originals, &Paragraph { kind: Dialogue, ..orig.clone() }));
         assert!(is_changed(&originals, &Paragraph::plain(ParaId(0), Action, "Hello!")));
         assert!(is_changed(&originals, &Paragraph::plain(ParaId(9), Action, "Hello.")));
+    }
+
+    /// A changed paragraph inside a row's run measures the rest of the run
+    /// again (the left cell flows over it), and nothing else.
+    #[test]
+    fn a_change_measures_its_rows_run_again() {
+        use scriptorium_core::ElementKind::Action;
+        use scriptorium_versions::{LaidRow, RowStatus};
+        let row = |this: &[u64], other: &[u64]| LaidRow {
+            cells: vec![this.iter().map(|&i| ParaId(i)).collect(), other.iter().map(|&i| ParaId(i)).collect()],
+            status: RowStatus::InSync,
+            needs: false,
+            note: None,
+            suggestions: vec![],
+        };
+        let rows = [row(&[0], &[10]), row(&[1, 2, 3], &[11]), row(&[4], &[12])];
+        let paras: Vec<Paragraph> = (0..5).map(|i| Paragraph::plain(ParaId(i), Action, "x")).collect();
+        let ids: Vec<ParaId> = paras.iter().map(|p| p.id).collect();
+        let bands = crate::links_view::bands(&rows, 0, &ids);
+        let c = Columns { bands: ids.iter().copied().zip(bands).collect(), left: Rc::default() };
+        assert_eq!(runs_of(&paras, &c, [0]), vec![0..1]);
+        assert_eq!(runs_of(&paras, &c, [1]), vec![1..4]);
+        assert_eq!(runs_of(&paras, &c, [2]), vec![1..4]);
+        assert_eq!(runs_of(&paras, &c, [0, 4]), vec![0..1, 4..5]);
+        assert_eq!(runs_of(&paras, &c, [3, 4]), vec![1..5]);
+        // A paragraph with no band yet (just made): itself.
+        let mut more = paras.clone();
+        more.push(Paragraph::plain(ParaId(9), Action, "y"));
+        assert_eq!(runs_of(&more, &c, [5]), vec![5..6]);
     }
 
     #[test]

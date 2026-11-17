@@ -41,6 +41,10 @@ use crate::layout;
 use crate::links_view::{LinksView, RowCard, Stale, pair_note};
 use crate::theme::*;
 
+// The pair in the sidebar and the toolbar, choosing what is lined up on the
+// left, Mark in sync, making a version (plan step B3).
+mod pair_ui;
+
 actions!(
     review,
     [
@@ -961,7 +965,10 @@ impl ScriptView {
                             w.links_task = None;
                             let doc = &w.editor.read(cx).doc;
                             w.links.lay_out(&w.fdx, &w.session, doc);
-                            cx.notify();
+                            // The new statuses to the two columns. They lag
+                            // typing (and keep or rewrite, text-only
+                            // changes) by this pause: acceptable.
+                            w.refresh(cx);
                         })
                         .ok();
                     });
@@ -972,7 +979,7 @@ impl ScriptView {
     }
 
     /// The pair, its rows and the "Lined up on the left" choice.
-    #[allow(dead_code)] // B2 and B3 read it.
+    #[allow(dead_code)] // For tests and later steps.
     pub(crate) fn links_view(&self) -> &LinksView {
         &self.links
     }
@@ -991,7 +998,11 @@ impl ScriptView {
         let doc = self.doc(cx);
         self.numbers = self.session.reviews.iter().map(|review| item_numbers(doc, &review.items)).collect();
         let protect = self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para);
-        let mut decor = Decor { originals: self.originals.clone(), ghosts: self.links.ghosts(), ..Decor::default() };
+        // Two columns (B2): the original lined up on the left replaces its
+        // dimmed lines in blank ones.
+        let columns = self.links.columns(doc);
+        let ghosts = if columns.is_some() { Rc::default() } else { self.links.ghosts() };
+        let mut decor = Decor { originals: self.originals.clone(), ghosts, columns, ..Decor::default() };
         // Lines move under blocks (accepting one gives its lines new ids), so
         // which item a line belongs to is worked out again each time.
         self.item_by_para = (0..self.session.reviews.len()).map(|r| items_by_para(&self.session, doc, r)).collect();
@@ -1007,7 +1018,7 @@ impl ScriptView {
             }
         }
         self.editor.update(cx, |e, cx| {
-            e.decor = decor;
+            e.set_decor(decor);
             e.protect = protect;
             cx.notify();
         });
@@ -1406,6 +1417,7 @@ impl ScriptView {
                 self.seen_session = Seen::wrote(&json);
                 self.synced = len;
                 self.attached_since_sync.clear();
+                self.links.left_saved();
                 true
             }
             Err(e) => {
@@ -1564,8 +1576,9 @@ impl ScriptView {
         // `ROW:` suggestions (an agent may just have appended some) too.
         self.links.set_pair(pair, &self.dir, &script_name);
         notes.extend(self.links.note());
-        // The session file's choice: the app writes its own as it changes.
-        self.links.set_left_choice(left);
+        // The session file's choice: the app writes its own as it changes
+        // (one not saved yet is kept).
+        self.links.left_from_session(left);
         let rows = self.links.pair().resolver(&self.fdx, &replayed.doc);
         let mut still = vec![];
         for p in std::mem::take(&mut self.attached_since_sync) {
@@ -2363,6 +2376,7 @@ impl ScriptView {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let pair_rows = self.pair_section(cx);
         let doc = self.doc(cx);
         let changed = self.changed_lines(cx);
         let mut views = vec![section_label("Script")];
@@ -2406,6 +2420,7 @@ impl ScriptView {
                     .into_any_element(),
             );
         }
+        views.extend(pair_rows);
 
         // The lower list: the selected review's changes, or the script's scenes.
         let (title, rows): (String, Rc<Vec<Row>>) = match self.view {
@@ -2564,6 +2579,7 @@ impl ScriptView {
             .border_r_1()
             .border_color(RULE)
             .children(items)
+            .children(self.pair_rail(cx))
     }
 
     fn render_card(&self, width: f32, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -4046,7 +4062,10 @@ mod version_tests {
         let p = Pair::new("original");
         let opened = Opened::load(&p.at("film.fdx"), &[]).unwrap();
         assert!(
-            opened.notices.iter().any(|n| n == "Lined up with film.es.fdx: open that file to translate."),
+            opened
+                .notices
+                .iter()
+                .any(|n| n == "Lined up with film.es.fdx: open it (Swap, in the toolbar) to translate."),
             "{:?}",
             opened.notices
         );

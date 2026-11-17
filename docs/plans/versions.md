@@ -1006,6 +1006,33 @@ text column and the mark; the minimum is `READABLE_ZOOM` (0.6).
   a session-only id. Not on the undo stack; the status bar says "Marked
   row 37 in sync (Edit › Not in sync takes it back)".
 - `links join <row>` (CLI) for rows a merge left empty on one side.
+- The choice under "Lined up on the left" is view-only state (the
+  session's `links` field): no CLI command sets it (decided after the B1
+  reviews). It is saved the moment it changes (a reload reads it back from
+  the session file; one not saved yet is kept). A `links` value is used
+  only as a plain `*.links.txt` name (or `"none"`); one naming a file that
+  isn't the pair's falls back to the pair.
+
+*As built:* `versions::edit` (`sync_row`, `unsync_row`, `join_rows`) and
+`fsio::versions::edit_row` (hash checks of the links file and both files on
+disk, links lock) serve the app and `scriptorium links <script>
+sync|unsync <row>` / `join <row> [up|down]`; no MCP tool yet (the `links`
+tool is Phase C). Mark in sync acts on the row of the line the card shows
+(card focused) or else the cursor's line; after a Mark the pair is loaded
+again at once (the rows are never edited in place). Mark not in sync takes
+away the original's `=` stamps only: the row reads "English changed" and
+needs a suggestion again (a `~` that Mark in sync replaced isn't put back;
+a blank version line reads "not yet translated" anyway). `join` without a
+direction joins the neighbour that has lines on the side the row lacks,
+and refuses when both or neither do; a join that would leave the row
+one-sided is refused; every stamp stays. The header reads "English |
+**Español**" (column order, the open file bold) with Swap; the sidebar's
+pair row shows the language, the count under it, and a status legend while
+it is on the left. New version… on a script that already has a version is
+refused before the sheet opens ("one version per script for now"); the
+sheet offers blank lines only (no "copy of the text" until Phase F). Cmd/
+Ctrl+T is New version… except in the agent panel, where it opens the
+conversations. Edit menu: "Mark in sync" / "Mark not in sync".
 
 ### B4. Five columns (`crates/app/src/agent_panel/mod.rs`, `script_view.rs`). After B2.
 

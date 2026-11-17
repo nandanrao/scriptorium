@@ -20,6 +20,10 @@ pub use version_new::{Made, NewVersion, check_version_args, default_version_name
 mod in_place;
 pub use in_place::{InPlaceError, WrittenInPlace, blocked, write_in_place, write_in_place_with};
 
+// Changing the links file row by row (B3): Mark in sync, Not in sync, join.
+mod edit;
+pub use edit::{RowEdit, RowEdited, edit_row};
+
 // Opening a script with its pair (A5c, I1): found, re-found first, the
 // resolver for `ROW:` suggestions, the rows.
 mod pair;

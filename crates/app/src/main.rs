@@ -11,6 +11,7 @@ mod layout;
 mod links_view;
 mod log;
 mod menus;
+mod new_version;
 mod script_view;
 mod settings;
 mod theme;
@@ -70,6 +71,8 @@ fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", Escape, ctx),
         KeyBinding::new(sec!("o"), Open, Some("Workspace")),
         KeyBinding::new(sec!("shift-o"), AddReview, Some("Workspace")),
+        // In the agent panel Cmd/Ctrl+T opens its conversations instead.
+        KeyBinding::new(sec!("t"), new_version::NewVersion, Some("Workspace")),
         KeyBinding::new(sec!("s"), ApplyToFdx, Some("Workspace")),
         KeyBinding::new(sec!("q"), SaveAndQuit, Some("Workspace")),
         KeyBinding::new(sec!("0"), ShowScript, Some("Workspace")),
@@ -277,6 +280,16 @@ mod tests {
         let sheet_field = ["Workspace", "AccountsSheet", "Input"];
         assert_eq!(action_in(sec!("."), &sheet_field), name(&agent_panel::Stop));
         assert_eq!(action_for(sec!("o"), "ScriptEditor"), name(&Open));
+        // File › New version… from the script, the card or nothing focused.
+        for focus in ["ScriptEditor", "Review"] {
+            assert_eq!(action_for(sec!("t"), focus), name(&new_version::NewVersion));
+        }
+        // In the agent panel it stays the panel's: its conversations, from
+        // the composer and from the conversation's title.
+        let title = ["Workspace", "ScriptView", "AgentPanel", "ThreadTitle"];
+        for stack in [&composer[..], &panel[..], &title[..]] {
+            assert_eq!(action_in(sec!("t"), stack), name(&agent_panel::threads::OpenThreads), "{stack:?}");
+        }
         assert_ne!(action_in(sec!("."), &composer), name(&Open));
         assert_eq!(action_in(sec!("z"), &composer), name(&gpui_base::input::Undo));
         // Disabled: gpui-base's search has no UI here.

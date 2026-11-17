@@ -7,6 +7,7 @@
 //! `scriptorium_fsio::versions`. The plan is `docs/plans/versions.md`.
 
 pub mod align;
+pub mod edit;
 pub mod links;
 pub mod placeholder;
 pub mod resolve;
@@ -15,6 +16,7 @@ pub mod view;
 pub mod written;
 
 pub use align::{Alignment, by_text, refind};
+pub use edit::{EditError, Toward, join_rows, sync_row, unsync_row};
 pub use links::{Links, LinksError, Member, Para, Row, Stamp, language_name, stamp_text};
 pub use placeholder::{BlankCopyError, blank_copy};
 pub use resolve::{NotFound, Resolver, RowQuery};

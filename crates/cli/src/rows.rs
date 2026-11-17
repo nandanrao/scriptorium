@@ -46,7 +46,7 @@ pub fn command(cmd: &str, args: &[&str], notes: &mut Vec<String>) -> Result<Stri
 /// Open `script` read-only with its pair (loaded and re-found when it was
 /// opened). `Ok(None)`: no links file beside it names it; a links file that
 /// names it but can't be used is an error.
-fn open(script: &str, notes: &mut Vec<String>) -> Result<Option<Opened>, String> {
+pub(crate) fn open(script: &str, notes: &mut Vec<String>) -> Result<Option<Opened>, String> {
     let o = Opened::open_read_only(script, notes)?;
     match o.pair() {
         PairState::None => Ok(None),
@@ -70,7 +70,7 @@ fn ctx(o: &Opened) -> LinksCtx<'_> {
     LinksCtx::from(pair(o).view(&o.fdx, &o.session, &o.doc))
 }
 
-fn no_pair(script: &str) -> String {
+pub(crate) fn no_pair(script: &str) -> String {
     format!("no version is lined up with {script}: no *.links.txt beside it names it")
 }
 

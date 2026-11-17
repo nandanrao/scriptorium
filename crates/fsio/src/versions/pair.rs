@@ -76,7 +76,7 @@ pub fn lock_links(links: &Path, notes: &mut Vec<String>) -> Result<LinksGuard, S
 }
 
 /// [`lock_links`], waiting up to `wait`.
-fn lock_links_within(links: &Path, wait: Duration, notes: &mut Vec<String>) -> Result<LinksGuard, String> {
+pub(super) fn lock_links_within(links: &Path, wait: Duration, notes: &mut Vec<String>) -> Result<LinksGuard, String> {
     let name = crate::opened::file_name(links);
     let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
     let lock = match SessionLock::acquire(&links.with_file_name(format!("{stem}.lock")), wait) {

@@ -422,3 +422,54 @@ fn the_read_tools_print_what_versions_and_rows_print() {
     let e = p.run(&["tool", &en, "read_rows", r#"{"needs": true}"#]).unwrap_err();
     assert!(e.contains("it is the original"), "{e}");
 }
+
+/// `links sync|unsync|join` (plan B3): stamps written and taken back in the
+/// links file, refused for lines it doesn't list, and a one-sided row
+/// joined onto the row above.
+#[test]
+fn links_marks_rows_in_sync_and_joins_one_sided_rows() {
+    let p = Pair::new("links-edit");
+    let es = p.path("film.es.fdx");
+    let links_path = p.0.join("film.es.links.txt");
+    let status = |row: usize| p.json(&["rows", &es, "--json"])[row - 1]["status"].as_str().unwrap().to_string();
+
+    // A translation typed into a blank line (not through a suggestion)
+    // reads changed on this side until marked in sync.
+    p.run(&["edit", &es, "1", "Laura sonríe."]).unwrap();
+    assert_eq!(status(2), "this_changed");
+    let (out, _) = p.run(&["links", &es, "sync", "2"]).unwrap();
+    assert!(out.starts_with("marked row 2 in sync in film.es.links.txt"), "{out}");
+    assert_eq!(status(2), "in_sync");
+    let text = std::fs::read_to_string(&links_path).unwrap();
+    assert!(text.contains("  b1 action = Laura sonríe."), "{text}");
+
+    let (out, _) = p.run(&["links", &es, "unsync", "2"]).unwrap();
+    assert!(out.starts_with("marked row 2 not in sync"), "{out}");
+    assert_eq!(status(2), "other_changed");
+
+    // A line split off in the session isn't listed: refused.
+    p.run(&["split", &es, "1", "--offset", "5"]).unwrap();
+    let e = p.run(&["links", &es, "sync", "2"]).unwrap_err();
+    assert!(e.contains("Write .fdx first"), "{e}");
+    assert!(p.run(&["links", &es, "sync", "99"]).unwrap_err().contains("there is no row 99"));
+
+    // A row left with nothing on the version side (as after a merge in
+    // Final Draft, done here by hand in the links file) joins the row above.
+    let mut l = links::parse(&std::fs::read_to_string(&links_path).unwrap()).unwrap();
+    let gone = l.rows[3].cells[1].clone();
+    l.rows[3].cells[1].clear();
+    for id in gone {
+        l.paras[1].remove(&id);
+    }
+    std::fs::write(&links_path, links::write(&l).unwrap()).unwrap();
+    let e = p.run(&["links", &es, "join", "3"]).unwrap_err();
+    assert!(e.contains("lines on both sides"), "{e}");
+    // Both neighbours have a version line: the writer says which.
+    let e = p.run(&["links", &es, "join", "4"]).unwrap_err();
+    assert!(e.contains("could join row 3 above or row 5 below"), "{e}");
+    let (out, _) = p.run(&["links", &es, "join", "4", "down"]).unwrap();
+    assert!(out.starts_with("joined rows 4 and 5 into row 4"), "{out}");
+    let l = links::parse(&std::fs::read_to_string(&links_path).unwrap()).unwrap();
+    assert_eq!(l.rows.len(), 5);
+    assert_eq!(l.rows[3].cells[0].len(), 2);
+}

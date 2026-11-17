@@ -146,7 +146,20 @@ VERSIONS
         note?, this: [{id, kind, text}], other: [...], suggestions: [{review,
         n, status}]}]; status is in_sync, this_changed, other_changed,
         both_changed, blank or one_sided, from the script called on.
-  Both re-find first: a file changed outside Scriptorium (Final Draft saved
+  scriptorium links <script.fdx> sync|unsync <row>
+        mark row <row> in sync (its lines' texts now become the links file's
+        \"=\" stamps, so it reads in sync until either side changes), or not
+        in sync (the original's stamps go: it reads changed in the original
+        and needs a suggestion again). Refused for a row with lines the links file doesn't list
+        yet (split off or typed in Scriptorium): Write .fdx first. The app's
+        Edit › Mark in sync and Mark not in sync do the same; not undoable
+  scriptorium links <script.fdx> join <row> [up|down]
+        join a row left with nothing on one side (lines merged in Final
+        Draft or here) with the row above or below it; without up or down,
+        with the one that has lines on the side the row lacks
+  Which file the app lines up on the left is a view setting of the app's
+  window (kept in the session), not a command.
+  These all re-find first: a file changed outside Scriptorium (Final Draft saved
   it) is found again and the links file updated, with a note. `apply` on
   the version Scriptorium made needs -o (it is written from the app).
 
@@ -311,6 +324,7 @@ fn run_other(args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
         ["dump", path, "--json"] => dump(path, true, notes),
         ["roundtrip", path] => load(path).and_then(|f| roundtrip(&f)),
         ["version", "new", rest @ ..] => crate::version_new::command(rest, notes),
+        [cmd, rest @ ..] if crate::links::COMMANDS.contains(cmd) => crate::links::command(cmd, rest, notes),
         [cmd, rest @ ..] if crate::rows::COMMANDS.contains(cmd) => crate::rows::command(cmd, rest, notes),
         [cmd, rest @ ..] if crate::structure::COMMANDS.contains(cmd) => crate::structure::command(cmd, rest, notes),
         [cmd, rest @ ..] if REVIEW_COMMANDS.contains(cmd) => review_command(cmd, rest, notes),

@@ -105,6 +105,29 @@ fn page_left_at(width: f32, z: f32) -> f32 {
     (width / 2. - visible_mid).max(width - page).min(0.)
 }
 
+/// The gap between the two columns (the script lined up on the left, the
+/// open one on the right), where each row's status dot sits.
+pub const GUTTER: f32 = 28.0;
+
+/// Where the two columns go in a list `width` wide, in px from its left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TwoColumns {
+    pub left_w: f32,
+    pub right_x: f32,
+    pub right_w: f32,
+}
+
+/// The two columns in a list `width` wide: an even split around the
+/// [`GUTTER`] for now. Both share one zoom, fitted to the right column
+/// ([`zoom_for`]). B4 sizes the script area for two columns at
+/// [`READABLE_ZOOM`] (`agent_panel::columns`, `lined_up`) and decides when
+/// the left gives way; this split is what it hands the columns.
+pub fn two_columns(width: f32) -> TwoColumns {
+    let left_w = ((width - GUTTER) / 2.).max(0.).floor();
+    let right_x = left_w + GUTTER;
+    TwoColumns { left_w, right_x, right_w: (width - right_x).max(0.) }
+}
+
 /// Blank space above the first paragraph (the page's top margin).
 pub fn page_top() -> Pixels {
     inch(1.0)
@@ -221,6 +244,15 @@ mod tests {
             assert!(all_visible(w, zoom_for(w)), "{w}");
             w += 3.0;
         }
+    }
+
+    #[test]
+    fn two_columns_split_evenly_around_the_gutter() {
+        let c = two_columns(1000.0);
+        assert_eq!(c.left_w + GUTTER + c.right_w, 1000.0);
+        assert!((c.left_w - c.right_w).abs() <= 1.0);
+        assert_eq!(c.right_x, c.left_w + GUTTER);
+        assert_eq!(two_columns(10.0).left_w, 0.0);
     }
 
     #[test]

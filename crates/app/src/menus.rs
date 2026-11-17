@@ -8,6 +8,7 @@
 use gpui::{Action, Menu, MenuItem};
 
 use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
+use crate::new_version::{MarkInSync, MarkNotInSync, NewVersion};
 use crate::script_view::{ApplyToFdx, NextView, PrevView, RedoAny, SaveAndQuit, ShowScript, UndoAny};
 use crate::workspace::{About, AddReview, Open};
 
@@ -51,6 +52,7 @@ pub fn definition() -> Vec<MenuDef> {
             items: vec![
                 entry("Open…", || Box::new(Open), Some("o"), false),
                 entry("Add review…", || Box::new(AddReview), Some("shift-o"), true),
+                entry("New version…", || Box::new(NewVersion), Some("t"), true),
                 Item::Separator,
                 entry("Write .fdx", || Box::new(ApplyToFdx), Some("s"), true),
             ],
@@ -60,6 +62,9 @@ pub fn definition() -> Vec<MenuDef> {
             items: vec![
                 entry("Undo", || Box::new(UndoAny), Some("z"), true),
                 entry("Redo", || Box::new(RedoAny), Some("shift-z"), true),
+                Item::Separator,
+                entry("Mark in sync", || Box::new(MarkInSync), None, true),
+                entry("Mark not in sync", || Box::new(MarkNotInSync), None, true),
             ],
         },
         MenuDef {
@@ -161,11 +166,15 @@ mod tests {
             [
                 "Open…",
                 "Add review…",
+                "New version…",
                 "-",
                 "Write .fdx",
                 "-",
                 "Undo",
                 "Redo",
+                "-",
+                "Mark in sync",
+                "Mark not in sync",
                 "Agent panel",
                 "-",
                 "About Scriptorium",

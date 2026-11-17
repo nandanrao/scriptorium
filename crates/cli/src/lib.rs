@@ -19,6 +19,7 @@ pub mod commands;
 /// Moved to the `scriptorium-fsio` crate; re-exported so `scriptorium_cli::fsio`
 /// paths keep working. New code depends on `scriptorium-fsio` directly.
 pub use scriptorium_fsio as fsio;
+mod links;
 mod rows;
 pub mod structure;
 mod version_new;

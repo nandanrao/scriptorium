@@ -16,6 +16,7 @@ use gpui::{
 use crate::agent_panel::accounts::{AccountsSheet, Dismissed};
 use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
 use crate::menus::{self, Item};
+use crate::new_version::{MarkInSync, MarkNotInSync, NewVersion, NewVersionSheet, SheetEvent, Swap};
 use crate::script_view::{
     ApplyToFdx, NextView, Opened, PrevView, RedoAny, Reopen, SaveAndQuit, ScriptView, ShowReview1, ShowReview2,
     ShowReview3, ShowScript, UndoAny, file_name, has_extension,
@@ -40,6 +41,8 @@ pub struct Workspace {
     notice: SharedString,
     /// The AI accounts sheet while it's open, and what had focus before.
     accounts: Option<(Entity<AccountsSheet>, Option<FocusHandle>, Subscription)>,
+    /// File › New version…'s sheet while it's open, and what had focus before.
+    new_version: Option<(Entity<NewVersionSheet>, Option<FocusHandle>, Subscription)>,
     _observe: Option<Subscription>,
     /// The view's [`Reopen`]: Write .fdx wrote the version in place.
     _reopen: Option<Subscription>,
@@ -54,6 +57,7 @@ impl Workspace {
             menu_focus: cx.focus_handle(),
             notice: "".into(),
             accounts: None,
+            new_version: None,
             _observe: None,
             _reopen: None,
         };
@@ -296,6 +300,111 @@ impl Workspace {
         cx.notify();
     }
 
+    // ---- the pair: New version, Swap, Mark in sync (plan B3) --------------------
+
+    fn on_new_version(&mut self, _: &NewVersion, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        if self.accounts.is_some() || self.new_version.is_some() {
+            return;
+        }
+        let Some(view) = self.view.clone() else {
+            self.set_notice("Open a script first, then make a version of it.", cx);
+            return;
+        };
+        let (script, refused) = {
+            let v = view.read(cx);
+            (file_name(v.script_path()), v.new_version_refusal())
+        };
+        if let Some(why) = refused {
+            self.set_notice(why, cx);
+            return;
+        }
+        let back = window.focused(cx);
+        let sheet = cx.new(|cx| NewVersionSheet::new(script, window, cx));
+        let sub = cx.subscribe_in(&sheet, window, |this, sheet, e: &SheetEvent, window, cx| match e {
+            SheetEvent::Cancel => this.close_new_version(window, cx),
+            SheetEvent::Create { lang, from, name } => {
+                this.create_version(sheet.clone(), lang.clone(), from.clone(), name.clone(), window, cx)
+            }
+        });
+        self.new_version = Some((sheet, back, sub));
+        cx.notify();
+    }
+
+    fn close_new_version(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, back, _)) = self.new_version.take() {
+            window.focus(&back.unwrap_or_else(|| self.focus.clone()), cx);
+        }
+        cx.notify();
+    }
+
+    /// The sheet's Create and open: make the version of the open script and
+    /// open it with the original lined up on the left. Refused: said in the
+    /// status bar and on the sheet, which stays open.
+    fn create_version(
+        &mut self,
+        sheet: Entity<NewVersionSheet>,
+        lang: String,
+        from: Option<String>,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.view.clone() else { return self.close_new_version(window, cx) };
+        let original = file_name(view.read(cx).script_path());
+        match view.update(cx, |v, cx| v.make_version(&lang, from.as_deref(), name.as_deref(), cx)) {
+            Ok(made) => {
+                self.close_new_version(window, cx);
+                let said = made.summary().lines().next().unwrap_or_default().to_string();
+                let mut chars = said.chars();
+                let said: String = chars.next().into_iter().flat_map(char::to_uppercase).chain(chars).collect();
+                self.open_lined_up(made.version, window, cx);
+                if self.showing(&original, cx) {
+                    return;
+                }
+                self.set_notice(format!("{said}. {original} is lined up on the left."), cx);
+            }
+            Err(e) => {
+                crate::log::warn(&format!("new version: {e}"));
+                sheet.update(cx, |s, cx| s.set_error(e.clone(), cx));
+                self.set_notice(format!("No version made: {e}"), cx);
+            }
+        }
+    }
+
+    /// Whether the open script is the file named `name`.
+    fn showing(&self, name: &str, cx: &App) -> bool {
+        self.view.as_ref().is_some_and(|v| file_name(v.read(cx).script_path()) == name)
+    }
+
+    /// Open `path` in place of the current script, with the file of its pair
+    /// lined up on the left (even if "Nothing" was chosen there before).
+    fn open_lined_up(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = file_name(&path);
+        self.open_script(path, vec![], window, cx);
+        if self.showing(&name, cx) {
+            self.with_view(cx, |v, cx| v.line_up_pair(cx));
+        }
+    }
+
+    /// Swap: open the file lined up on the left, with this one lined up.
+    fn on_swap(&mut self, _: &Swap, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        match self.view.as_ref().and_then(|v| v.read(cx).swap_target()) {
+            Some(other) => self.open_lined_up(other, window, cx),
+            None => self.set_notice("Nothing is lined up on the left to swap with.", cx),
+        }
+    }
+
+    fn on_mark(&mut self, sync: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        if self.view.is_none() {
+            self.set_notice("Open a script first.", cx);
+            return;
+        }
+        self.with_view(cx, |v, cx| v.mark_row(sync, window, cx));
+    }
+
     // ---- the Linux File dropdown ---------------------------------------------
 
     fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -397,13 +506,31 @@ impl Workspace {
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let show_file_button = !cfg!(target_os = "macos");
-        let (name, state) = match &self.view {
+        let (name, state, header) = match &self.view {
             Some(v) => {
                 let v = v.read(cx);
-                (file_name(v.script_path()), v.save_state(cx))
+                (file_name(v.script_path()), v.save_state(cx), v.pair_header())
             }
-            None => ("Scriptorium".to_string(), String::new()),
+            None => ("Scriptorium".to_string(), String::new(), None),
         };
+        // The columns in their order, the open file's bold: "English |
+        // **Español**", and Swap.
+        let header = header.map(|h| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .text_color(INK_2)
+                .child(div().truncate().child(h.left))
+                .child(div().flex_none().text_color(RULE).child("|"))
+                .child(div().truncate().font_weight(FontWeight::SEMIBOLD).text_color(INK).child(h.right))
+                .child(
+                    crate::script_view::button("swap", "Swap", None, false)
+                        .flex_none()
+                        .on_click(cx.listener(|this, _, window, cx| this.on_swap(&Swap, window, cx))),
+                )
+        });
         div()
             .flex_none()
             .h(px(38.))
@@ -425,7 +552,8 @@ impl Workspace {
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))),
                 )
             })
-            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(INK).child(name))
+            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(INK).child(name))
+            .children(header)
             .child(div().flex_1())
             .child(div().text_color(INK_2).child(state))
             .when(self.view.is_some(), |d| {
@@ -508,6 +636,7 @@ impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let menu = self.menu.is_some().then(|| self.render_menu(cx));
         let accounts = self.accounts.as_ref().map(|(sheet, _, _)| sheet.clone());
+        let new_version = self.new_version.as_ref().map(|(sheet, _, _)| sheet.clone());
         let body = match &self.view {
             Some(v) => div().flex_1().min_h_0().flex().flex_col().child(v.clone()),
             None => div().flex_1().min_h_0().flex().flex_col().child(self.render_empty(cx)).child(self.render_status()),
@@ -533,6 +662,10 @@ impl Render for Workspace {
                 cx.listener(|this, _: &crate::agent_panel::Stop, _, cx| this.with_view(cx, |v, cx| v.stop_agent(cx))),
             )
             .on_action(cx.listener(Self::on_open_accounts))
+            .on_action(cx.listener(Self::on_new_version))
+            .on_action(cx.listener(Self::on_swap))
+            .on_action(cx.listener(|this, _: &MarkInSync, window, cx| this.on_mark(true, window, cx)))
+            .on_action(cx.listener(|this, _: &MarkNotInSync, window, cx| this.on_mark(false, window, cx)))
             .on_action(
                 cx.listener(|this, _: &UndoAny, window, cx| this.with_view(cx, |v, cx| v.undo_any(false, window, cx))),
             )
@@ -566,6 +699,7 @@ impl Render for Workspace {
             .child(self.render_toolbar(cx))
             .child(body)
             .children(accounts)
+            .children(new_version)
             .children(menu)
     }
 }
