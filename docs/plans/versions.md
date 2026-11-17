@@ -88,7 +88,10 @@ re-find for every "file and links disagree" case. Write in place app-only.
 - **New lines in the original get rows of their own** (C4); D3 is only for
   the version's own lines.
 - **Updates go into a new dated review** (C5), since a decided line can't
-  take a second suggestion in the same review.
+  take a second suggestion in the same review. *Superseded in A9
+  (orchestrator, 2026-11-17): updates go into the same review. Once the
+  original's line changed, the decided entry is not found (its `ROW TEXT`
+  is gone), so a new suggestion on the row is no duplicate.*
 - **The links file is used only against the bytes it describes** (C6).
 - **"The original's text" is its file** (C8), everywhere.
 - **`needs` skips rows with any suggestion** (C9).
@@ -115,7 +118,7 @@ re-find for every "file and links disagree" case. Write in place app-only.
 | review fields `ROW:`, `ROW TEXT:`; marker `[empty]` | — |
 | tools `list_versions`, `new_version`, `read_rows` | same |
 | CLI `version new`, `versions`, `rows` | same |
-| the agent's review files | "Translation from English", then "Translation from English · updates 2026-11-20" |
+| the agent's review file | "Translation from <original's label>", e.g. "Translation from English" (updates go in it too) |
 
 Language labels come from a small table in `versions` (about 20 codes: en
 English, es Español, fr Français, de Deutsch, it Italiano, pt Português,
@@ -259,7 +262,8 @@ ROW TEXT: Watch me.
   normalized text then. An empty paragraph is `ROW TEXT:` with nothing
   after it; no `ROW TEXT:` lines means the other side was empty.
 - `BEFORE: [empty]` is one blank line. Valid only with `ROW:`. In a block,
-  a typed blank line is `DIALOGUE:` with nothing after it.
+  a typed blank line is its type with nothing after it (`BEFORE:` then
+  `  DIALOGUE: `).
 - No header change. Builds up to 0.4 read `ROW` lines as continuations of
   `WHY` and `[empty]` as text, so they show these entries as not found.
   The writer always puts a `WHY:` line (empty if need be) right before
@@ -380,6 +384,15 @@ the version's line reads none of the texts).
   "Yes." rows): they read the same on both sides, so the suggestion means
   the same on each; a decided entry only finds rows that read its option,
   so it stays on an accepted row. `PARA` picks among them when it can.
+- The row `PARA` names, when its original reads `ROW TEXT` but its
+  version side reads none of the entry's texts (the line was typed into,
+  split or joined since), is the only candidate: a line split by Enter
+  keeps a line suggestion on its `PARA` line, which reads as split (so
+  Write .fdx refuses while it is pending); otherwise the entry is not
+  found ("its line was changed, split or joined since this suggestion").
+  It never moves to an identical row. A stale `PARA` (after a Final Draft
+  save renumbered the file) that lands on another identical row whose
+  version side reads none of the texts makes the entry not found too.
 - Without a usable links file (missing, broken, or not for these bytes),
   `ROW:` entries are not found, with that reason.
 
@@ -731,16 +744,50 @@ hash mismatch; a pending suggestion over a split line refuses the write;
 the `.fdx` write failing midway (simulated) leaves the old file, links and
 session usable; undecide after the write → `Blank`.
 
+As built (after review): the app saves its session first, then calls
+`write_in_place(script, opened_raw)`, which reopens everything from disk
+(refused unless the `.fdx` and the saved session are for `opened_raw`).
+Also refused while a suggestion's line was removed (pending, or decided and
+then deleted), since the written file could place it on another line that
+reads the same. Refused while a review file it may not write must change
+(its decisions, or only its `PARA` hints). A failed `.fdx` write puts the
+review files back; a failed links or session write after the `.fdx` is
+`WrittenButIncomplete` (the host reopens the written file). Entries not
+placed lose their `PARA`. Known limits: a crash between the progress write
+and the `.fdx` write leaves `PARA` hints at positions the old file doesn't
+have. `ROW:` entries are placed by row content and stay put, but a plain
+(non-`ROW:`) suggestion may then show on another line that reads the same
+(a repeated cue, say), and any plain entry not found whose `BEFORE` text
+later appears on another line can be placed there (text matching, as for
+any review). A crash after the `.fdx` with typing in the old session: the
+app sets that session aside; the CLI refuses with the message naming the
+app.
+
 ### A8. Read tools (`crates/tools`, the three hosts). After A2, A5c, A6b.
 
-- `list_versions`: what `versions` prints.
+- `list_versions`: the same JSON as `versions --json`, `{"pair": null}` or
+  `{"pair": {links, id, this, other, version, rows, status, needs,
+  new_in_original}}`; each member `{file, path, language, label, made,
+  is_version}`, every path absolute; the top-level `version` is the
+  version's absolute path (the file translated and suggested on).
 - `read_rows {scene?, from_row?, limit?, needs?}`: `scene` is a scene
   number (1 = the first) or part of its heading, as `read_scene` takes it;
   `from_row` is a row number as `read_rows` and `rows` print it (rows are
-  numbered from 1 in script order, after re-find); `limit` defaults to 200.
-  JSON rows `{row, status, needs, note?, this: [{id, kind, text}], other:
-  [{id, kind, text}], suggestion?: {review, n, status}}`. Blank paragraphs
-  are shown. Called on the original: rows shown, nothing `needs`.
+  numbered from 1 in script order, after re-find); `limit` defaults to 200
+  (at most 500), and a page stops early at about 80 kB (whole rows, at
+  least one). `{"rows": [...], "next_from_row": n | null}`, one row per
+  line; each row is the same JSON as `rows --json` gives it: `{row,
+  status, label, needs, note?, this: [{id, kind, text}], other: [{id,
+  kind, text}], suggestions: [{review, n, status}]}` (a row can hold an
+  old decided suggestion and a new pending one). `this` ids are the
+  called script's paragraph_ids; `other` ids are the other file's. Heading
+  text for `scene` is looked for on this side, then the other. Blank
+  paragraphs are shown. Called on the original: rows shown, nothing
+  `needs`, and a one-sided row names the version's side; `needs: true`
+  there is refused, naming the version (an empty list would read as
+  "nothing left"). Hosts lay the pair out only for these two tools
+  (`uses_links`), from fsio's `PairView` (`Opened::pair_view`,
+  `PairState::view`).
 
 Hosts: `LinksCtx` built in `commands::tool` (`cli/src/commands.rs:1229`),
 the chat agent (`chat/src/exec/mod.rs:521`), and through `tool` for MCP;
@@ -749,7 +796,8 @@ both tools added to the read-only lists (`mcp/src/tools.rs:64`,
 
 Tests: a new version: every blank row `needs`; a kept or pending row isn't;
 called on the original: nothing `needs`; MCP and the chat catalogue list
-both tools; the MCP instructions test (`mcp/src/tools.rs:448`) passes.
+both tools; the MCP instructions test (`mcp/src/tools.rs:448`) passes
+once A9 adds `new_version` (A11's instructions line names it).
 
 ### A9. Write tools (`crates/tools`, the three hosts). After A6b, A8.
 
@@ -758,21 +806,36 @@ both tools; the MCP instructions test (`mcp/src/tools.rs:448`) passes.
   this path as `script`"). `original_language` is required in the tool
   (Claude can tell from the script).
 - `suggest_change` / each `suggest_changes` item: optional `row` (a row
-  number from `read_rows`). Only on the made member ("rows are suggested on
-  the version, PURPLE LIST.es.fdx; this is the original"). The target must
-  be the version side of that row: the host checks with `LinksCtx`. A blank
-  target is allowed only with `row` on a `Blank` row: `check_line`
-  (`suggest.rs:46-48`), `validate` (`:107`, which builds `[empty]` instead
-  of `text.trim()`), and `block.rs:125-132` (including a blank
-  `insert_after` anchor) relaxed for that case. The entry gets `ROW:` and
-  `ROW TEXT:` from the original's file now.
-- **Updates (C5):** a review holds one suggestion per line
-  (`check_duplicate`, `suggest.rs:62-84`, any status). A `row` suggestion
-  refused there because the line was decided says: "this line was decided
-  in <review>; put updates in a new review, e.g. \"Translation from English
-  · updates 2026-11-20\"". The skill does that for rows reading "English
-  changed" or "both changed". (The chat agent writes to its own thread's
-  review, so a new conversation is a new review.)
+  number from `read_rows`; a digit string is accepted). Rows only on the
+  version ("rows are suggested on the version, PURPLE LIST.es.fdx; this is
+  the original"). The target must be exactly one row's version side: the
+  host checks with `LinksCtx`. A blank target is allowed only on a `Blank`
+  row: `check_line`, `validate` (which builds `[empty]` instead of
+  `text.trim()`) and `block.rs` relaxed for that case. The entry gets
+  `ROW:` and `ROW TEXT:` from the original's file now.
+- As built (orchestrator decisions after review, 2026-11-17):
+  - **The row is found from the lines.** On the version of a usable pair,
+    every suggestion is a row suggestion: without `row`, the row whose
+    version side is exactly the target ids is used; targets touching part
+    of a row, or several rows, are refused naming the rows and their ids
+    ("¶3 is in row 4 (¶3, ¶4): …"). `insert_after` is refused on a version
+    (a list option changes the number of lines). `uses_links` is by name
+    only and includes the suggesting tools.
+  - **An unusable links file stops suggestions** on a script that may be
+    the version (`PairState::maybe_made`): hosts pass `Some(Err)` to the
+    suggesting tools only then (the chat store's `may_be_version`, default
+    yes), and the tools refuse with the reason.
+  - **Updates go in the same review** (C5 superseded). `check_duplicate`
+    refuses a row whose decided entry is still placed ("row N is already
+    decided in review X (#n, accepted 1); nothing to update") and a row
+    with a pending entry for the same row text that isn't placed right now
+    ("row N already has a suggestion in review X (eK) not found right now:
+    …").
+  - `new_version` on a pair made before says "already made" without the
+    links file's stale counts, pointing to `read_rows` with `needs`; called
+    on the version of that language it gives the version's path. The
+    built-in agent can make a version, but stays on the original: its
+    result tells the writer to open the version and ask there.
 - `write_script` (MCP) description: "For a version Scriptorium made, the
   writer saves it in the app with Write .fdx; here, give `output`."
 - The built-in prompt (`tools/src/prompt.rs`) and descriptions: "Give one
@@ -788,8 +851,9 @@ both tools; the MCP instructions test (`mcp/src/tools.rs:448`) passes.
 
 Tests: a batch on blank rows → `[empty]` entries with `ROW`; a target not
 in the row refused with the row's ids; `row` on the original refused; a
-blank target without `row` still refused; a re-suggestion on a decided
-row → the message naming a new review, and it succeeds there;
+blank target outside a version still refused; a re-suggestion on a decided
+row → "nothing to update", and once the original's line changed it
+succeeds in the same review;
 `write_script` on the version without `output` refused; `new_version`
 returns the absolute path; the prompt names only real tools.
 
@@ -822,7 +886,7 @@ notice; the chat agent's `read_rows` works in the panel.
   returns from then on; read `brief.<lang>.md` next to it and `glossary.md`
   in the folder if they exist (as files); then scene by scene: `read_rows`
   with `needs`, `suggest_changes` with `row`, into `Translation from
-  <Language>.review.txt`; updates into a new dated review. Rows with any
+  <original's label>.review.txt`; updates into the same review. Rows with any
   suggestion are skipped. One option when obvious, two or three for real
   choices, each with a short note. Suggest on cue rows for generic cues
   and typed extensions. Report rows new in the original and say how to add
@@ -855,6 +919,16 @@ notice; the chat agent's `read_rows` works in the panel.
     `version new` again.
   - Keep together when sharing: the two scripts, the links file, review
     files and session files.
+
+A11 notes (built early, before A8–A10): the skill, the MCP instructions
+line and the docs are written against the tool names and arguments above.
+The `CHECK` comments they carried were resolved and removed after A9 (the
+skill now follows A9 as built: rows found from the lines, updates in the
+same review, the review named from the original's label in
+`list_versions`); the release reminder for "What's new in 0.5.0" (Phase B
+items) is in "Release v0.5.0" below, not in the docs. The docs' "Your first day"
+(D5) asks for an optional `brief.<lang>.md` and `glossary.md`, read by
+Claude as plain files until Phase D.
 
 ### A12. End to end (`crates/fsio/tests`, integration). After A7b, A9.
 
@@ -1002,8 +1076,7 @@ attaches `Scriptorium-0.5.0-mac.zip` and `Scriptorium-plugin-0.5.0-mac.zip`.
 - **Renamed or moved files:** the missing message with the hand-edit fix.
 - **The English changes after a suggestion:** the card says so with a
   diff; the suggestion is no longer placed (its `ROW TEXT` is gone) and the
-  row `needs` a new one, which goes in a new dated review if the line was
-  decided.
+  row `needs` a new one, which goes in the same review.
 - **A broken links file:** shown broken with its line; nothing writes it.
 
 # Work breakdown
@@ -1074,8 +1147,8 @@ On copies, in a scratch folder, not in iCloud. Screenshot each result.
 5. In Final Draft: reword an English line and insert a new English line
    near the top; save. `rows` on the Spanish: the reworded row "English
    changed" and `needs`; the new line a row of its own with the note; every
-   other row unchanged. Ask Claude to update: its suggestions go into a new
-   dated review.
+   other row unchanged. Ask Claude to update: its suggestions go into the
+   same review.
 6. Chat panel (Cmd+L) on the Spanish: ask it to translate scene 3; the
    suggestions appear on the card.
 7. (B) Open the Spanish: English on the left, rows lined up; a two-line

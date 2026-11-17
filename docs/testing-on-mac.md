@@ -3,6 +3,20 @@
 Thank you for testing this. Scriptorium is an early version, so things may
 be rough. Everything you notice helps, including the small things.
 
+## What's new in 0.5.0
+
+- **Translating with Claude.** Ask Claude (through the plugin) to make a
+  Spanish (or other language) version of your script. It makes a second
+  Final Draft file next to yours, `MY SCRIPT.es.fdx`, lined up line by line
+  with the English, and fills it with suggestions you decide in Scriptorium
+  as usual, with the English line shown on each card. See section 7,
+  "Translating with Claude".
+- **Write .fdx saves the translation itself.** For a version Scriptorium
+  made, `Cmd+S` writes that file (`MY SCRIPT.es.fdx`), not a
+  `(scriptorium)` copy. Your original is still never changed.
+- **The AI chat** (`Cmd+L`, below under 0.4.0) ships in this same release, so
+  if you haven't tried it yet, it's new to you too.
+
 ## What's new in 0.4.0
 
 - **AI chat.** Press `Cmd+L` to open a chat column at the right. You talk
@@ -216,6 +230,101 @@ Scriptorium version. Don't send the `.scriptorium.set-aside-*.json` or
 
 Claude Desktop and Cowork: when your version supports plugins, add the
 `scriptorium-plugin` folder in its plugin settings.
+
+### Translating with Claude (0.5.0)
+
+Claude makes a translation of your script as a second Final Draft file, lined
+up with the original line by line, and proposes each translated line as a
+suggestion. You decide them in Scriptorium as usual. Work on a copy of your
+script the first time.
+
+**Before you start.**
+
+- **Keep the project folder out of iCloud.** Put the script in a plain
+  folder that iCloud doesn't sync, for example a new folder in your home
+  folder (in Finder, **Go › Home**), not on the Desktop or in Documents if
+  "Desktop & Documents Folders" is turned on in iCloud settings. Not in
+  Dropbox either. Work on it on **one computer**.
+- **Update the plugin.** If you had an earlier plugin, delete the old
+  `scriptorium-plugin` folder and put the new one from
+  `Scriptorium-plugin-0.5.0-mac.zip` in the same place. Run the `xattr`
+  step (step 3 above) again on the new folder, start Claude with
+  `claude --plugin-dir ` and the folder (step 4), and check with `/mcp` that
+  `scriptorium` is connected. Install the new app too: both must be 0.5.0.
+
+**Your first day.**
+
+1. Optional but worth it: in the script's folder, write a short brief for
+   Claude in a text file named `brief.es.md` (for Spanish; `brief.fr.md` for
+   French and so on): who the audience is, which Spanish (Spain, Mexico,
+   Argentina…), formal or informal address, how to write scene headings
+   (keep INT./EXT.? translate DAY/NIGHT?), names not to translate. If you
+   have agreed translations for words that come back often, list them in a
+   file named `glossary.md` in the same folder. Claude reads both when they
+   are there. Without a brief, Claude makes its own choices and tells you
+   what it chose for scene headings.
+2. Drag the English `.fdx` into the Claude chat and ask:
+   "Make a Spanish version of this script and translate scene 1."
+3. Claude makes, next to your script:
+   - `MY SCRIPT.es.fdx`: the Spanish version. Scene headings and character
+     names are copied from the English (Claude still suggests a translation
+     for each scene heading); every other line starts empty.
+   - `MY SCRIPT.es.links.txt`: how the lines of the two files line up.
+     Leave it alone.
+   - `Translation from English.review.txt`: Claude's suggestions.
+4. Open `MY SCRIPT.es.fdx` in Scriptorium (**File › Open…**). The review
+   "Translation from English" is in the sidebar; press `Cmd+1`. Each card
+   shows the English line and Claude's Spanish. Accept, pick another option,
+   keep the empty line, or rewrite it, as with any review. Claude gives one
+   option when the line is obvious and two or three, with a short note, when
+   there's a real choice.
+5. Ask Claude for more ("Translate scenes 2 to 5"). It skips lines that
+   already have a suggestion, so asking twice doesn't duplicate anything. If
+   Scriptorium is open, the new suggestions appear while you watch.
+
+**How to work.**
+
+- **Decide in Scriptorium first, polish in Final Draft after.** When you are
+  ready, **close `MY SCRIPT.es.fdx` in Final Draft** if it is open there,
+  then press `Cmd+S` (**Write .fdx**) in Scriptorium. That saves the Spanish
+  file itself (no `(scriptorium)` copy). Undo starts again from there. Then
+  open it in Final Draft to polish, and reopen it in Scriptorium whenever you
+  like: Scriptorium finds the lines again.
+- Decisions are never lost, but **lines you type straight into the Spanish
+  in Scriptorium** (not through a card) are lost if Final Draft saves the
+  file before you press Write .fdx. Write first, then go to Final Draft.
+- **The title page and scene summaries stay in English**, and the English
+  script notes aren't copied. That's on purpose: change the title page (and
+  the summaries, if you use them) in Final Draft. Same for "(CONT'D)" and
+  "(MORE)": set them once in Final Draft's Mores and Continueds settings.
+- **When the English changes** (you edit it in Final Draft): ask Claude to
+  "update the Spanish". Lines whose English changed get new suggestions in
+  the same review, "Translation from English"; the earlier suggestion on such
+  a line was for the old English, so it no longer shows, and what you decided
+  then stays in the Spanish text until you pick the new one.
+- **A new English line** has no Spanish line to fill yet; Claude lists them.
+  For each, add an empty line of the same type (Action, Dialogue…) in the
+  Spanish in Final Draft at that place, save, close, and ask Claude again: it
+  fills it. (A later version will do this for you.)
+- Never edit `MY SCRIPT.es.links.txt` or the review files by hand.
+- **The AI chat in Scriptorium** (`Cmd+L`) can make the version too, but a
+  conversation stays on the script it was started on: open
+  `MY SCRIPT.es.fdx` and ask there to translate.
+
+**Sharing.** Keep these together in one folder: both scripts, the
+`.links.txt` file, the `.review.txt` files and the `.scriptorium.json` files.
+
+**Starting over.** Quit Scriptorium, then delete `MY SCRIPT.es.fdx`,
+`MY SCRIPT.es.links.txt`, `MY SCRIPT.es.scriptorium.json` and the
+`Translation from English.review.txt` file (and, if there,
+`MY SCRIPT.es.scriptorium.lock`, `MY SCRIPT.es.links.lock` and any
+`MY SCRIPT.es.scriptorium.set-aside-*.json`). Your English script is untouched; ask Claude again.
+
+**From Terminal** (optional): the plugin folder's `bin/scriptorium` does the
+same without Claude. `scriptorium version new "MY SCRIPT.fdx" --lang es
+--from en` makes the version (`--from en` names the original as English, so
+the review and labels say "English"); `scriptorium rows "MY SCRIPT.es.fdx"
+--scene 1` shows each line next to its English and what it needs.
 
 ## 8. Checking files in Final Draft (please do this before relying on 0.3.0)
 

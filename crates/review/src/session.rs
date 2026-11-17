@@ -1909,6 +1909,79 @@ impl Session {
     /// ends of a line carry nothing in screenplay text (layout comes from the
     /// element type), and the review grammar can't tell them from indentation.
     pub fn save_progress(&self, doc: &Document, r: usize) -> String {
+        self.progress_file(doc, r, None).serialize()
+    }
+
+    /// [`Self::save_progress`] for a script about to be written over its own
+    /// file, whose paragraph ids then change: `position` maps each live id to
+    /// its id in the written file. Each entry placed as an item gets `PARA`
+    /// at the new ids of its lines (a pending suggestion's lines, a decided
+    /// one's as its decision left them), or none when any of them is gone or
+    /// they don't line up one per `BEFORE` line. Every other entry (not
+    /// found, or changing nothing visible) loses its `PARA`: its ids would
+    /// name other lines in the written file. Invalid entries are written as
+    /// they were, `PARA` included: such an entry is never placed, so its
+    /// `PARA` is never read (until someone fixes the entry by hand).
+    pub fn save_progress_at(&self, doc: &Document, r: usize, position: &HashMap<ParaId, ParaId>) -> String {
+        self.progress_file(doc, r, Some(position)).serialize()
+    }
+
+    fn progress_file(&self, doc: &Document, r: usize, position: Option<&HashMap<ParaId, ParaId>>) -> ReviewFile {
+        let mut file = self.progress_entries(doc, r);
+        let Some(position) = position else { return file };
+        let review = &self.reviews[r];
+        let mut placed = vec![None; file.entries.len()];
+        for (i, item) in review.items.iter().enumerate() {
+            let ids = match self.status(doc, r, i) {
+                Status::Pending | Status::Removed if item.block => item.before_ids(),
+                Status::Pending | Status::Removed => vec![item.para],
+                _ => self.live_run(doc, r, i),
+            };
+            if let Some(slot) = placed.get_mut(item.entry) {
+                *slot = Some(ids);
+            }
+        }
+        for (entry, ids) in file.entries.iter_mut().zip(placed) {
+            if entry.invalid.is_some() {
+                continue;
+            }
+            let at: Option<Vec<ParaId>> = ids.unwrap_or_default().iter().map(|id| position.get(id).copied()).collect();
+            entry.para = match at {
+                Some(at) if !at.is_empty() && at.len() == entry.before.len() => at,
+                _ => vec![],
+            };
+        }
+        file
+    }
+
+    /// The suggestions that keep the script from being written over its own
+    /// file, as (review, item, how its line changed): a pending one whose
+    /// line was split or joined since it was made (accepting it later would
+    /// write a whole-line text into part of the line, and the written file's
+    /// session has no record of the split), and one whose line is gone (a
+    /// line suggestion, decided or not; a pending block with every line
+    /// gone), which the written file could otherwise place on another line
+    /// that reads the same.
+    pub fn blocking_write(&self, doc: &Document) -> Vec<(usize, usize, LineChange)> {
+        let mut out = vec![];
+        for (r, review) in self.reviews.iter().enumerate() {
+            for (i, item) in review.items.iter().enumerate() {
+                let status = self.status(doc, r, i);
+                let change = self.line_change(doc, r, i);
+                let blocks = match change {
+                    Some(LineChange::Split | LineChange::Joined) => status == Status::Pending,
+                    Some(LineChange::Removed) => !item.block || status == Status::Removed,
+                    _ => false,
+                };
+                if let (true, Some(change)) = (blocks, change) {
+                    out.push((r, i, change));
+                }
+            }
+        }
+        out
+    }
+
+    fn progress_entries(&self, doc: &Document, r: usize) -> ReviewFile {
         let review = &self.reviews[r];
         let item_of: HashMap<usize, usize> = review.items.iter().enumerate().map(|(i, it)| (it.entry, i)).collect();
         let entries: Vec<Entry> = review
@@ -1943,6 +2016,5 @@ impl Session {
             })
             .collect();
         ReviewFile { script: review.file.script.clone(), id: Some(review.id.clone()), entries, warnings: vec![] }
-            .serialize()
     }
 }

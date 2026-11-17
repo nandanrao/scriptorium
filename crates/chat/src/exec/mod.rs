@@ -5,8 +5,8 @@
 //! The program supplies the files through two traits:
 //!
 //! - [`Script`] opens the script as it is now, once per tool call. A call
-//!   that may add suggestions ([`scriptorium_tools::may_append`]) opens it
-//!   for writing: the store then holds the session lock (or whatever the
+//!   that may change files ([`scriptorium_tools::writes`]: adding
+//!   suggestions, making a version) opens it for writing: the store then holds the session lock (or whatever the
 //!   program uses instead) until it is dropped.
 //! - [`ReviewStore`] is one such opening: the live document and session, and
 //!   the few file operations the apply path needs (attach, create, reload,
@@ -42,7 +42,8 @@ use scriptorium_providers::Price;
 use scriptorium_review::file::{FORMAT_HEADER, insert_id, is_review_text};
 use scriptorium_review::sessionfile::{resolve_path, stored_path};
 use scriptorium_review::{ReviewFile, RowResolver, Session};
-use scriptorium_tools::{Append, Applied, Ctx, Failed, Outcome, Target};
+use scriptorium_tools::{Append, Applied, Ctx, Failed, LinksCtx, Outcome, Target};
+use scriptorium_versions::PairView;
 
 use crate::naming;
 
@@ -124,6 +125,37 @@ pub trait ReviewStore {
     /// the original; `ROW:` suggestions are then not placed.
     fn row_resolver(&self) -> Option<Box<RowResolver<'static>>> {
         None
+    }
+
+    /// The pair of versions the store opened with, its rows laid out over
+    /// the document as it is now, for the tools' `Ctx::links`
+    /// (`list_versions`, `read_rows`): `None` without one, the reason when a
+    /// links file names the script but can't be used. Over fsio's pair:
+    /// `Opened::pair_view`, or `PairState::view` with the store's own session.
+    fn pair_view(&self) -> Option<Result<PairView<'_>, String>> {
+        None
+    }
+
+    /// Whether the script may be the version of its pair (fsio's
+    /// `PairState::maybe_made`): a links file naming it that can't be used
+    /// then stops suggestions on it, since they are placed by its rows. The
+    /// default says yes, refusing rather than writing suggestions that could
+    /// be lost.
+    fn may_be_version(&self) -> bool {
+        true
+    }
+
+    /// `new_version`: make a version of the script in `language` beside it
+    /// (or find the one made before), the script's own language being
+    /// `original_language` (`scriptorium_fsio::versions::version_new`, under
+    /// the session lock this store holds); the tool result. The default
+    /// refuses: only a store over the script's files makes one.
+    fn new_version(&mut self, language: &str, original_language: &str) -> Result<String, ReviewError> {
+        let _ = (language, original_language);
+        Err(ReviewError::Failed(format!(
+            "a version can't be made here: the writer makes it with `scriptorium version new {} --lang <code>`",
+            self.script_name()
+        )))
     }
 
     /// The lines the writer is rewriting right now (the app's; every line
@@ -521,7 +553,7 @@ pub fn run_call(script: &mut dyn Script, file: &mut ThreadFile, call: &ToolCall)
     if let Err(e) = scriptorium_tools::check_args(spec, &call.input) {
         return CallDone::new(call, e.to_string(), true);
     }
-    let writes = scriptorium_tools::may_append(&call.name);
+    let writes = scriptorium_tools::writes(&call.name);
     let mut store = match script.open(writes) {
         Ok(s) => s,
         Err(e) => return CallDone::failed(call, &e),
@@ -533,13 +565,27 @@ pub fn run_call(script: &mut dyn Script, file: &mut ThreadFile, call: &ToolCall)
             script_name: store.script_name(),
             is_caps: store.is_caps(),
             default_review: thread_review(&*store, file),
+            links: scriptorium_tools::uses_links(&call.name)
+                .then(|| match store.pair_view()? {
+                    // A links file that can't be used stops suggestions
+                    // only on a script that may be the version.
+                    Err(_) if scriptorium_tools::may_append(&call.name) && !store.may_be_version() => None,
+                    v => Some(v.map(LinksCtx::from)),
+                })
+                .flatten(),
         };
         scriptorium_tools::call(&ctx, &call.name, &call.input)
     };
     match outcome {
         Err(e) => CallDone::new(call, e.to_string(), true),
         Ok(Outcome::Text(text)) => CallDone::new(call, text, false),
-        Ok(Outcome::Append(_)) if !writes => CallDone::new(call, format!("{} can't change anything", call.name), true),
+        Ok(Outcome::Append(_) | Outcome::NewVersion(_)) if !writes => {
+            CallDone::new(call, format!("{} can't change anything", call.name), true)
+        }
+        Ok(Outcome::NewVersion(v)) => match store.new_version(&v.language, &v.original_language) {
+            Ok(text) => CallDone::new(call, text, false),
+            Err(e) => CallDone::failed(call, &e),
+        },
         Ok(Outcome::Append(append)) => match apply_append(&mut *store, file, append) {
             Ok(applied) => {
                 let added = applied.numbers.iter().any(Option::is_some).then(|| Added {

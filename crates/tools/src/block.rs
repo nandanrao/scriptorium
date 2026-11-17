@@ -118,11 +118,12 @@ fn line(v: &Value) -> Result<Line, String> {
 }
 
 /// The run of paragraphs `spot` names, checked: live, consecutive, editable,
-/// at most [`MAX_LINES`].
-fn run(doc: &Document, spot: &Spot) -> Result<Vec<ParaId>, String> {
+/// at most [`MAX_LINES`]. `blank_ok`: blank lines may be the whole run (a
+/// version's row not yet translated, named with `row`).
+fn run(doc: &Document, spot: &Spot, blank_ok: bool) -> Result<Vec<ParaId>, String> {
     let index = |id: u64| doc.index_of(ParaId(id)).ok_or(format!("no paragraph {id}"));
     let paras = doc.paragraphs();
-    let empty = |i: usize| paras[i].text().trim().is_empty();
+    let empty = |i: usize| !blank_ok && paras[i].text().trim().is_empty();
     let ids: Vec<ParaId> = match spot {
         Spot::Para(id) | Spot::InsertAfter(id) => {
             let i = index(*id)?;
@@ -230,7 +231,22 @@ pub fn block_entry(
     options: Vec<Vec<Line>>,
     why: &str,
 ) -> Result<Entry, String> {
-    let ids = run(doc, spot)?;
+    block_entry_for(doc, is_caps, spot, options, why, false)
+}
+
+/// [`block_entry`], where `blank_ok` lets blank lines be the run (or the
+/// `insert_after` anchor): a version's row not yet translated, named with
+/// `row`; the caller adds the `ROW:` fields, without which the entry can't
+/// be written.
+pub(crate) fn block_entry_for(
+    doc: &Document,
+    is_caps: &dyn Fn(&ElementKind) -> bool,
+    spot: &Spot,
+    options: Vec<Vec<Line>>,
+    why: &str,
+    blank_ok: bool,
+) -> Result<Entry, String> {
+    let ids = run(doc, spot, blank_ok)?;
     let before: Vec<Line> = ids
         .iter()
         .map(|id| {
@@ -300,7 +316,10 @@ pub fn block_entry(
         }
     }
     let entry = Entry { para: ids, before, options, why: why.to_string(), ..Entry::default() };
-    entry.check().map_err(|e| format!("the suggestion can't be written to a review file: {e}"))?;
+    // A blank run is checked once its `ROW:` fields are set.
+    if !blank_ok {
+        entry.check().map_err(|e| format!("the suggestion can't be written to a review file: {e}"))?;
+    }
     Ok(entry)
 }
 

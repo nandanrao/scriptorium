@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::ToolError;
 use crate::block::MAX_LINES;
 use crate::read::{MIN_READ_BUDGET, READ_BUDGET};
+use crate::rows::{MAX_ROWS_PAGE, ROWS_PAGE};
 
 /// The element types a suggested line can have (any case is accepted).
 pub const KINDS: [&str; 8] =
@@ -38,7 +39,8 @@ pub fn catalogue() -> Vec<ToolSpec> {
             { "type": "array", "maxItems": MAX_LINES, "items": line },
         ] },
         "description": format!(
-            "One to three options, best first. With paragraph_id, each option can be a string: the line's new \
+            "One to three options, best first: one when the line is obvious, two or three only for a real choice \
+             (meaning, formality, an idiom, a pun, length), with a short why saying how they differ. With paragraph_id, each option can be a string: the line's new \
              text, no newlines. Otherwise each option is a list of lines [{{kind, text}}] that replaces every \
              target line (at most {MAX_LINES}); an option `[]` cuts the lines. With insert_after, each \
              option is just the new lines."
@@ -54,7 +56,15 @@ pub fn catalogue() -> Vec<ToolSpec> {
                         so you can include them.",
     });
     let insert_after = json!({ "type": "integer", "description": "Add lines after this one (it stays as it is); the options are the new lines." });
-    let target = json!({ "paragraph_id": paragraph_id, "paragraph_ids": paragraph_ids, "insert_after": insert_after, "options": options, "why": why });
+    let row = json!({
+        "type": "integer", "minimum": 1,
+        "description": "On a version: the row this suggestion is for, as read_rows numbers it (optional: the row is \
+                        found from the lines). A suggestion on a version names one row's lines on this side (its \
+                        `this` ids), all of them: paragraph_id, or paragraph_ids when there are several, never \
+                        insert_after; to change the number of lines, give each option as a list of {kind, text} \
+                        lines. A row not yet translated takes a suggestion on its blank lines.",
+    });
+    let target = json!({ "paragraph_id": paragraph_id, "paragraph_ids": paragraph_ids, "insert_after": insert_after, "row": row, "options": options, "why": why });
     vec![
         spec(
             "script_info",
@@ -126,11 +136,58 @@ pub fn catalogue() -> Vec<ToolSpec> {
             &[],
         ),
         spec(
+            "list_versions",
+            "The version lined up with the script (a translation, another draft), as JSON: {\"pair\": null} when \
+             there is none. Otherwise both files (`this`, the script called on, and `other`) with their absolute \
+             `path`, language and label; `is_version` marks the version, the file that is translated and gets \
+             suggestions (`made`: Scriptorium made it), and the top-level `version` is its absolute path. Also \
+             the links file, how many rows there are by status, how many need work (`needs`), and rows new in \
+             the original.",
+            json!({}),
+            &[],
+        ),
+        spec(
+            "read_rows",
+            &format!(
+                "The rows of the script and the version lined up with it: {{\"rows\": [...], \"next_from_row\": \
+                 n}}, one row per line: {{row, status, label, needs, note?, this: [{{id, kind, text}}], other: \
+                 [{{id, kind, text}}], suggestions: [{{review, n, status}}]}}. `this` is the script called on: \
+                 its ids are paragraph_ids for suggest_change. `other` is the file lined up with it: its ids belong \
+                 to that file, never pass them as paragraph_id. Empty lines are shown (text \"\"). status: \
+                 in_sync, this_changed, other_changed, both_changed, blank (not yet translated), one_sided. \
+                 `needs`: the row needs a translation or an update; false once the row has any suggestion \
+                 (pending or decided, listed in `suggestions`), and always false on the original. Rows with a \
+                 `note`, or nothing on the version's side, can't take a suggestion: they are for the writer. At \
+                 most `limit` rows (default {ROWS_PAGE}), fewer if long; `next_from_row` is the from_row of the \
+                 next page, null when there are no more rows."
+            ),
+            json!({
+                "scene": { "type": ["integer", "string"], "description": "Only this scene's rows: a scene number (1 is the first) or part of its heading (ignoring case), as read_scene takes it; heading text is looked for in this script's headings, then the other file's." },
+                "from_row": { "type": "integer", "minimum": 1, "description": "Start at this row number (rows are numbered from 1 in script order)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": MAX_ROWS_PAGE, "description": format!("At most this many rows (default {ROWS_PAGE}).") },
+                "needs": { "type": "boolean", "description": "Only rows that need work (on the version)." },
+            }),
+            &[],
+        ),
+        spec(
+            "new_version",
+            "Make a version of the script in another language, lined up with it row by row (a links file beside \
+             them): scene headings and character names copied, every other line blank, to fill with suggestions \
+             (read_rows, then suggest_changes with row). If it was made before, finds it. Returns the version's \
+             absolute path: suggestions go on the version, never on the original. One version per script for now.",
+            json!({
+                "language": { "type": "string", "description": "The version's language code, e.g. \"es\"." },
+                "original_language": { "type": "string", "description": "The script's own language code, e.g. \"en\" (tell from the script)." },
+            }),
+            &["language", "original_language"],
+        ),
+        spec(
             "suggest_change",
             "Propose a change: to one line (paragraph_id), to lines that go together (paragraph_ids), or new lines \
              (insert_after); give exactly one of these. The writer accepts an option, keeps their lines, or \
              rewrites them. Checks that the lines exist, are consecutive and can be changed, and that the change \
-             would be visible. A line is in at most one suggestion per review.",
+             would be visible. A line is in at most one suggestion per review. On a version, a suggestion covers \
+             one row's lines (read_rows).",
             target.clone(),
             &["options"],
         ),

@@ -1020,3 +1020,86 @@ fn disclosure_names_the_provider() {
     assert_eq!(host::provider_label("openrouter.ai"), "OpenRouter (openrouter.ai)");
     assert_eq!(host::provider_label("localhost:8080"), "localhost:8080");
 }
+
+/// The in-app chat host's tools see the pair the script opened with
+/// (`ReviewStore::links`): the catalogue offers both read tools, and they
+/// read the rows without taking the lock or writing anything.
+#[test]
+fn the_chat_host_reads_a_pair_of_versions() {
+    let names: Vec<String> = scriptorium_tools::catalogue().into_iter().map(|s| s.name).collect();
+    assert!(names.contains(&"list_versions".to_string()) && names.contains(&"read_rows".to_string()));
+    assert!(!scriptorium_tools::may_append("list_versions") && !scriptorium_tools::may_append("read_rows"));
+    let f = Folder::new("versions");
+    scriptorium_fsio::versions::version_new(&f.script(), "es", Some("en"), None, &mut vec![]).unwrap();
+    let mut file: ThreadFile = serde_json::from_value(json!({
+        "version": 1, "id": "t0001", "title": "Translate", "created": "", "updated": "", "account": "work",
+        "model": "m", "system": "", "tools_hash": "", "thread": { "messages": [] },
+    }))
+    .unwrap_or_else(|e| panic!("thread file: {e}"));
+    let call = |name: &str, input: Value| ToolCall {
+        id: "a".into(),
+        name: name.into(),
+        input,
+        input_error: None,
+        raw_input: None,
+        extra: None,
+    };
+    let mut es = FileScript::new(&f.0.join("film.es.fdx")).unwrap();
+    let done = exec::run_call(&mut es, &mut file, &call("read_rows", json!({ "needs": true })));
+    assert!(!done.result.is_error, "{}", done.result.content);
+    let rows: Value = serde_json::from_str(&done.result.content).unwrap();
+    assert_eq!(rows["next_from_row"], Value::Null);
+    let rows = &rows["rows"];
+    assert!(rows.as_array().unwrap().iter().all(|r| r["needs"] == true && r["this"].is_array()), "{rows}");
+    assert!(!rows.as_array().unwrap().is_empty());
+    let mut en = FileScript::new(&f.script()).unwrap();
+    let done = exec::run_call(&mut en, &mut file, &call("list_versions", json!({})));
+    let v: Value = serde_json::from_str(&done.result.content).unwrap();
+    assert_eq!(v["pair"]["version"], f.0.join("film.es.fdx").to_string_lossy().as_ref());
+    assert_eq!(v["pair"]["this"]["is_version"], false);
+    assert!(!f.0.join("film.es.scriptorium.json").exists() && !f.0.join("film.scriptorium.json").exists());
+}
+
+/// The chat host carries out `new_version` under the original's lock and
+/// says the conversation stays on the original; on the version, row
+/// suggestions go into the thread's own review, attached to the version.
+#[test]
+fn the_chat_host_makes_a_version_and_suggests_on_its_rows() {
+    assert!(scriptorium_tools::writes("new_version") && !scriptorium_tools::may_append("new_version"));
+    let f = Folder::new("new-version");
+    let mut file: ThreadFile = serde_json::from_value(json!({
+        "version": 1, "id": "t0001", "title": "Translate", "created": "", "updated": "", "account": "work",
+        "model": "m", "system": "", "tools_hash": "", "thread": { "messages": [] },
+    }))
+    .unwrap_or_else(|e| panic!("thread file: {e}"));
+    let call = |name: &str, input: Value| ToolCall {
+        id: "a".into(),
+        name: name.into(),
+        input,
+        input_error: None,
+        raw_input: None,
+        extra: None,
+    };
+    let mut en = FileScript::new(&f.script()).unwrap();
+    let args = json!({ "language": "es", "original_language": "en" });
+    let done = exec::run_call(&mut en, &mut file, &call("new_version", args.clone()));
+    assert!(!done.result.is_error, "{}", done.result.content);
+    let es = f.0.join("film.es.fdx");
+    assert!(done.result.content.contains(&format!("The version: {}", es.display())), "{}", done.result.content);
+    assert!(done.result.content.contains("the writer opens film.es.fdx in Scriptorium"), "{}", done.result.content);
+    assert!(es.is_file());
+    let again = exec::run_call(&mut en, &mut file, &call("new_version", args));
+    assert!(again.result.content.contains("was already made"), "{}", again.result.content);
+
+    let mut es_script = FileScript::new(&es).unwrap();
+    let rows = exec::run_call(&mut es_script, &mut file, &call("read_rows", json!({ "needs": true })));
+    let rows: Value = serde_json::from_str(&rows.result.content).unwrap();
+    let row = rows["rows"].as_array().unwrap().iter().find(|r| r["other"][0]["text"] == "Laura smiles.").unwrap();
+    let item = json!({ "row": row["row"], "paragraph_id": row["this"][0]["id"], "options": ["Laura sonríe."] });
+    let done = exec::run_call(&mut es_script, &mut file, &call("suggest_changes", json!({ "suggestions": [item] })));
+    let v: Value = serde_json::from_str(&done.result.content).unwrap_or_else(|_| panic!("{}", done.result.content));
+    assert_eq!(v["added"], 1, "{v}");
+    let session: Value = serde_json::from_str(&f.read("film.es.scriptorium.json")).unwrap();
+    assert_eq!(session["reviews"].as_array().map(Vec::len), Some(1), "{session}");
+    assert!(f.read("Translate.review.txt").contains("BEFORE: [empty]"));
+}

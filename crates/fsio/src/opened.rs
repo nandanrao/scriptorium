@@ -332,6 +332,12 @@ impl Opened {
         self.pair.loaded().map(|p| p.lay_out(&self.fdx, &self.session, &self.doc))
     }
 
+    /// The pair's rows for the tools' `Ctx::links`
+    /// ([`PairState::view`] over this script, its session and live document).
+    pub fn pair_view(&self) -> Option<Result<scriptorium_versions::PairView<'_>, String>> {
+        self.pair.view(&self.fdx, &self.session, &self.doc)
+    }
+
     /// Save the session (and pin new reviews' ids into their files first).
     /// For the version Scriptorium made (or one that may be, its links file
     /// broken), each attached review's progress is written into its file

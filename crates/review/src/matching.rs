@@ -721,8 +721,13 @@ impl Ctx<'_, '_> {
     ) -> Result<Found, &'static str> {
         const MOVED: &str = "the row's lines were split, removed or moved apart since this suggestion";
         if e.is_line() {
-            let [id] = cell else {
-                return Err("the row now has several lines here, and this suggestion is for one");
+            // Several lines: only the line the entry names (`PARA`, or where
+            // its decision is), which the resolver gives this way when that
+            // line was split since; it then reads as split.
+            let id = match (cell, now) {
+                ([id], _) => id,
+                (_, [p]) if cell.contains(p) => p,
+                _ => return Err("the row now has several lines here, and this suggestion is for one"),
             };
             let &li = self.live_at.get(id).ok_or(MOVED)?;
             let lp = &self.live[li].para;

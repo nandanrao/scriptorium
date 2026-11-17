@@ -8,7 +8,7 @@ use crate::ToolSpec;
 /// app (through `scriptorium_chat::host::new_thread`). `{script}` is
 /// replaced with the script's file name ([`system`]). Plain text, no
 /// provider-specific markup, so it reads the same over the Anthropic and
-/// OpenAI protocols. About 3.9k bytes, ~950 tokens; a test caps it.
+/// OpenAI protocols. About 4.2k bytes, ~1k tokens; a test caps it.
 ///
 /// A thread stores the prompt it started with and sends that unchanged on
 /// every turn, so editing this changes new threads only. It isn't part of
@@ -38,9 +38,13 @@ Proposing:
   together (a cue and its dialogue, an exchange, a beat) go in one suggestion with paragraph_ids, listing every \
   line of the run. A list option of {kind, text} lines replaces all the listed lines and may have more or fewer \
   of them; `[]` cuts them. insert_after adds lines.
-- Usually give one option. Give two or three, best first, only on real doubt: about meaning (one per reading; \
-  the why says what each assumes), or between a natural wording and one that keeps the original's flavour. No \
-  alternatives for a plain typo, punctuation or grammar fix; never an option identical to the line or another.
+- Give one option when the line is obvious. Give two or three, best first, only for a real choice: about \
+  meaning (one per reading; the why says what each assumes), between a natural wording and one that keeps the \
+  original's flavour, or in a translation (formality, an idiom, a pun, length), each with a short why saying how \
+  it differs. No alternatives for a plain typo, punctuation or grammar fix; never an option identical to the line \
+  or another.
+- Translating: if this script is a version lined up with its original (list_versions), work scene by scene \
+  with read_rows and suggest_changes, giving each suggestion its row.
 - The why is short and specific, for a writer who wants to learn: \"arrive at, not arrive to\"; \"article \
   missing\".
 - Send many lines together with suggest_changes; it reports which failed, so fix and resend those.

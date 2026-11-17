@@ -36,5 +36,9 @@ required-features = ["opened"]
 name = "rows_open"
 required-features = ["opened"]
 
+[[test]]
+name = "write_in_place"
+required-features = ["opened"]
+
 [lints]
 workspace = true

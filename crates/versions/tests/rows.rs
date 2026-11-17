@@ -447,3 +447,29 @@ fn resolver_multi_paragraph_rows_and_one_sided() {
     let e = r.candidates(&query(&strings(&["Gone."]), &texts(&[&[]]), &[]));
     assert_eq!(e, Err(NotFound::VersionReadsNone));
 }
+
+#[test]
+fn resolver_keeps_an_entry_on_its_own_row_when_its_line_changed() {
+    // Two identical rows, both still blank in the original's terms: a
+    // translation typed on each. The entry was made for row 1 (`PARA: 1`).
+    let l =
+        links("1 | 1\n  a1 action = Laura smiles.\n  b1 action ~\n2 | 2\n  a2 action = Laura smiles.\n  b2 action ~\n");
+    let a = script(&[(1, Action, "Laura smiles."), (2, Action, "Laura smiles.")]);
+    let row_text = strings(&["Laura smiles."]);
+    let t = texts(&[&["Laura sonrie y se va."], &["Laura sonríe y se marcha."]]);
+    // Split by Enter: still only its own row (review keeps it on the PARA line).
+    // The tail is unlisted; D3 puts it in row 1.
+    let b = script(&[(1, Action, "Laura sonrie"), (30, Action, " y se va."), (2, Action, "Laura sonrie y se va.")]);
+    let r = Resolver::new(&l, &a, &b, &caps);
+    assert_eq!(r.candidates(&query(&row_text, &t, &ids(&[1]))), Ok(vec![ids(&[1, 30])]));
+    // Without PARA the identical row is found, as before.
+    assert_eq!(r.candidates(&query(&row_text, &t, &[])), Ok(vec![ids(&[2])]));
+    // Typed into (or joined): not found, never moved to row 2.
+    let b = script(&[(1, Action, "Laura se va."), (2, Action, "Laura sonrie y se va.")]);
+    let r = Resolver::new(&l, &a, &b, &caps);
+    assert_eq!(r.candidates(&query(&row_text, &t, &ids(&[1]))), Err(NotFound::LineChanged));
+    // Its own row reading an option (accepted by another entry): ranked as before.
+    let b = script(&[(1, Action, "Laura sonríe y se marcha."), (2, Action, "Laura sonrie y se va.")]);
+    let r = Resolver::new(&l, &a, &b, &caps);
+    assert_eq!(r.candidates(&query(&row_text, &t, &ids(&[1]))), Ok(vec![ids(&[2]), ids(&[1])]));
+}

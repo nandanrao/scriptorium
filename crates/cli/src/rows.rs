@@ -11,7 +11,6 @@
 //! swapped for this/other, and no row needs work there. `rows --json` prints
 //! the rows as the `read_rows` tool does ([`scriptorium_tools::RowView`]).
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use scriptorium_fsio::opened::Opened;
@@ -68,9 +67,7 @@ fn pair(o: &Opened) -> &LoadedPair {
 
 /// `o`'s rows laid out, as the tools see them.
 fn ctx(o: &Opened) -> LinksCtx<'_> {
-    let pair = pair(o);
-    let laid = pair.lay_out(&o.fdx, &o.session, &o.doc);
-    LinksCtx::new(&pair.links, pair.this, laid.rows, laid.scripts, laid.placed.iter().map(|p| (p.review, p.item)))
+    LinksCtx::from(pair(o).view(&o.fdx, &o.session, &o.doc))
 }
 
 fn no_pair(script: &str) -> String {
@@ -93,20 +90,11 @@ fn versions(script: &str, json: bool, notes: &mut Vec<String>) -> Result<String,
     };
     let pair = pair(&o);
     let ctx = ctx(&o);
-    let on_version = pair.this_is_version();
-    let member = |m: usize| {
-        let x = &pair.links.members[m];
-        json!({
-            "file": x.file,
-            "language": x.language,
-            "label": pair.links.label(m),
-            "made": x.created.is_some(),
-        })
-    };
-    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for r in &ctx.rows {
-        *counts.entry(ctx.status_key(r.status)).or_default() += 1;
+    if json {
+        let v = json!({ "pair": ctx.summary() });
+        return Ok(serde_json::to_string_pretty(&v).expect("json") + "\n");
     }
+    let on_version = pair.this_is_version();
     let needs = if on_version { ctx.rows.iter().filter(|r| r.needs).count() } else { 0 };
     // Rows with nothing listed on the version's side: lines new in the
     // original (or version lines removed on purpose).
@@ -117,24 +105,7 @@ fn versions(script: &str, json: bool, notes: &mut Vec<String>) -> Result<String,
         .filter(|(_, r)| r.note == Some(Note::NothingOnVersionSide))
         .map(|(n, _)| n + 1)
         .collect();
-    let links = pair.path.display().to_string();
-    if json {
-        let v = json!({
-            "pair": {
-                "links": links,
-                "id": pair.links.id,
-                "this": member(pair.this),
-                "other": member(pair.other_index()),
-                "other_path": pair.other_path.display().to_string(),
-                "this_is_version": on_version,
-                "rows": ctx.rows.len(),
-                "status": counts,
-                "needs": needs,
-                "new_in_original": new_rows,
-            }
-        });
-        return Ok(serde_json::to_string_pretty(&v).expect("json") + "\n");
-    }
+    let links = &ctx.links_path;
     let describe = |m: usize| {
         let x = &pair.links.members[m];
         let mut out = x.file.clone();
@@ -219,7 +190,7 @@ fn rows(
         for sg in &v.suggestions {
             let _ = writeln!(out, "    suggestion: {} #{} ({})", sg.review, sg.n, sg.status);
         }
-        if let Some(note) = v.note {
+        if let Some(note) = &v.note {
             let _ = writeln!(out, "    note: {note}");
         }
     }

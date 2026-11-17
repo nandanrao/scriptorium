@@ -13,6 +13,8 @@ Before starting, make sure you have the script's path; if you don't, ask the
 writer for it, and pass it as an absolute path. If the writer asks for
 feedback, notes or opinions rather than changes, answer in chat and don't
 propose anything.
+To translate a script into another language, use the translate-version skill
+instead.
 
 ## Running a pass
 

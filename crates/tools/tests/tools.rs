@@ -8,7 +8,7 @@ use scriptorium_tools::prompt::{SYSTEM, system, unknown_tools};
 use scriptorium_tools::{
     Append, Applied, Ctx, Failed, HostField, MAX_BATCH, Outcome, Proposal, Target, ToolError, add_before,
     add_host_fields, apply, call, catalogue, check_args, find_review, item_numbered, item_numbers, may_append,
-    script_size,
+    script_size, writes,
 };
 use serde_json::{Value, json};
 
@@ -94,6 +94,7 @@ impl Fixture {
             script_name: "film.fdx",
             is_caps: &is_caps,
             default_review: self.default_review,
+            links: None,
         };
         call(&ctx, name, &args)
     }
@@ -180,6 +181,9 @@ fn catalogue_lists_every_tool_with_base_schemas() {
             "read_script",
             "list_reviews",
             "list_suggestions",
+            "list_versions",
+            "read_rows",
+            "new_version",
             "suggest_change",
             "suggest_changes"
         ]
@@ -866,7 +870,14 @@ fn read_scene_skips_empty_lines_and_reads_number_headings() {
 fn read_scene_capitals_follow_is_caps() {
     let f = Fixture::new();
     let read = |is_caps: &dyn Fn(&ElementKind) -> bool| {
-        let ctx = Ctx { doc: &f.doc, session: &f.session, script_name: "film.fdx", is_caps, default_review: None };
+        let ctx = Ctx {
+            doc: &f.doc,
+            session: &f.session,
+            script_name: "film.fdx",
+            is_caps,
+            default_review: None,
+            links: None,
+        };
         match call(&ctx, "read_scene", &json!({ "scene": 2 })).unwrap() {
             Outcome::Text(t) => t,
             o => panic!("{o:?}"),
@@ -1055,17 +1066,27 @@ fn the_system_prompt_names_only_tools_in_the_catalogue() {
 }
 
 /// The tools that only read. Every catalogued tool is either here or in
-/// `may_append`, never both, so a new tool must be sorted before it ships:
-/// hosts take the session lock only for `may_append` tools.
-const READS: &[&str] =
-    &["script_info", "list_paragraphs", "read_scene", "read_script", "list_reviews", "list_suggestions"];
+/// `writes`, never both, so a new tool must be sorted before it ships:
+/// hosts take the session lock only for `writes` tools (`may_append` ones
+/// and `new_version`).
+const READS: &[&str] = &[
+    "script_info",
+    "list_paragraphs",
+    "read_scene",
+    "read_script",
+    "list_reviews",
+    "list_suggestions",
+    "list_versions",
+    "read_rows",
+];
 
 #[test]
 fn every_tool_that_can_append_is_in_may_append() {
     let f = Fixture::new();
     for spec in catalogue() {
         let name = spec.name.as_str();
-        assert!(READS.contains(&name) != may_append(name), "{name}: sort it into READS or may_append");
+        assert!(READS.contains(&name) != writes(name), "{name}: sort it into READS or writes");
+        assert!(!may_append(name) || writes(name), "{name}");
         // Read tools never append, whatever their arguments.
         if READS.contains(&name) {
             for args in [json!({}), json!({ "scene": 1 }), json!({ "summary": true }), json!({ "from": 1, "to": 3 })] {

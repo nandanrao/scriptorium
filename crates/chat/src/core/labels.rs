@@ -34,6 +34,15 @@ pub fn running(tool: &str, args: &Value, bytes_so_far: Option<usize>) -> String 
         "list_paragraphs" => "Finding lines…".into(),
         "list_reviews" => "Looking at the reviews…".into(),
         "list_suggestions" => "Looking at the suggestions…".into(),
+        "list_versions" => "Looking at the versions…".into(),
+        "read_rows" => match rows_scene(args) {
+            Some(scene) => format!("Reading the rows of {scene}…"),
+            None => "Reading rows…".into(),
+        },
+        "new_version" => match language(args) {
+            Some(name) => format!("Making the {name} version…"),
+            None => "Making a version…".into(),
+        },
         "suggest_change" => "Writing a suggestion…".into(),
         "suggest_changes" => {
             let size = bytes_so_far.map(|b| format!(" ({})", bytes_text(b))).unwrap_or_default();
@@ -64,6 +73,23 @@ pub fn done(tool: &str, args: &Value, result: &str, review: Option<&str>) -> Str
             let name = args.get("review").and_then(Value::as_str).unwrap_or(review_name);
             format!("Listed suggestions in {name}")
         }
+        "list_versions" => "Looked at the versions".into(),
+        "read_rows" => {
+            // `{"rows": [...], "next_from_row": n}`.
+            let json: Option<Value> = serde_json::from_str(result).ok();
+            let n = json.as_ref().and_then(|j| j.get("rows")?.as_array().map(Vec::len));
+            match (n.map(|n| format!("{n} {}", plural(n, "row", "rows"))), rows_scene(args)) {
+                (Some(rows), Some(scene)) => format!("Read {rows} of {scene}"),
+                (Some(rows), None) => format!("Read {rows}"),
+                (None, Some(scene)) => format!("Read the rows of {scene}"),
+                (None, None) => "Read rows".into(),
+            }
+        }
+        // Made now or found again: the result says which.
+        "new_version" => match language(args) {
+            Some(name) => format!("Lined up the {name} version"),
+            None => "Lined up the version".into(),
+        },
         "suggest_change" => format!("{} → {review_name}", change_text(args)),
         "suggest_changes" => {
             let json: Option<Value> = serde_json::from_str(result).ok();
@@ -99,11 +125,22 @@ pub fn failed(tool: &str, _reason: &str) -> String {
         "list_paragraphs" => "find lines",
         "list_reviews" => "list reviews",
         "list_suggestions" => "list suggestions",
+        "list_versions" => "look at the versions",
+        "read_rows" => "read the rows",
+        "new_version" => "make the version",
         "suggest_change" => "write the suggestion",
         "suggest_changes" => "write the suggestions",
         _ => "finish a step",
     };
     format!("Couldn't {what}")
+}
+
+/// The name of `new_version`'s language (`Español`; an unknown code as
+/// itself), if it reads as a code.
+fn language(args: &Value) -> Option<&str> {
+    let code = args.get("language")?.as_str()?.trim();
+    (!code.is_empty() && code.len() <= 35 && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .then(|| scriptorium_versions::language_name(code))
 }
 
 enum Scene {
@@ -123,6 +160,22 @@ fn scene_ref(args: &Value) -> Option<Scene> {
         _ => {}
     }
     args.get("paragraph_id").and_then(Value::as_u64).map(Scene::Around)
+}
+
+/// The scene `read_rows` was asked for, as words ("scene 12", "the scene
+/// matching \"kitchen\"").
+fn rows_scene(args: &Value) -> Option<String> {
+    match args.get("scene") {
+        Some(Value::Number(n)) => n.as_u64().map(|n| format!("scene {n}")),
+        Some(Value::String(s)) if !s.trim().is_empty() => {
+            let s = s.trim();
+            Some(match s.parse::<u64>() {
+                Ok(n) => format!("scene {n}"),
+                Err(_) => format!("the scene matching \"{s}\""),
+            })
+        }
+        _ => None,
+    }
 }
 
 fn read_scene_done(args: &Value, result: &str) -> String {
@@ -358,6 +411,30 @@ mod tests {
             done("list_suggestions", &json!({}), "[]", None),
             "Listed suggestions in this conversation's review"
         );
+    }
+
+    #[test]
+    fn versions_and_rows() {
+        assert_eq!(running("list_versions", &json!({}), None), "Looking at the versions…");
+        assert_eq!(done("list_versions", &json!({}), "{}", None), "Looked at the versions");
+        assert_eq!(running("read_rows", &json!({"scene": 3}), None), "Reading the rows of scene 3…");
+        assert_eq!(
+            running("read_rows", &json!({"scene": "barn"}), None),
+            "Reading the rows of the scene matching \"barn\"…"
+        );
+        assert_eq!(running("read_rows", &json!({}), None), "Reading rows…");
+        let two = "{\"rows\": [\n{\"row\":1},\n{\"row\":2}\n],\n\"next_from_row\": null}";
+        assert_eq!(done("read_rows", &json!({"scene": "2"}), two, None), "Read 2 rows of scene 2");
+        assert_eq!(done("read_rows", &json!({}), "{\"rows\": [], \"next_from_row\": null}", None), "Read 0 rows");
+        assert_eq!(done("read_rows", &json!({"scene": 4}), "not json", None), "Read the rows of scene 4");
+        assert_eq!(failed("read_rows", "no version"), "Couldn't read the rows");
+        let es = json!({"language": "es", "original_language": "en"});
+        assert_eq!(running("new_version", &es, None), "Making the Español version…");
+        assert_eq!(done("new_version", &es, "made film.es.fdx (Español)", None), "Lined up the Español version");
+        let xx = json!({"language": "xx", "original_language": "en"});
+        assert_eq!(done("new_version", &xx, "", None), "Lined up the xx version");
+        assert_eq!(running("new_version", &Value::Null, None), "Making a version…");
+        assert_eq!(failed("new_version", "x"), "Couldn't make the version");
     }
 
     #[test]

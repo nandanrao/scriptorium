@@ -59,6 +59,7 @@ impl F {
             script_name: "film.fdx",
             is_caps: &is_caps,
             default_review: Some(0),
+            links: None,
         };
         call(&ctx, name, &args)
     }

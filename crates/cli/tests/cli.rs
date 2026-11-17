@@ -429,7 +429,7 @@ fn tool_numbers_by_script_position_like_suggestions_and_decide() {
 fn tool_list_prints_the_catalogue() {
     let f = Folder::new("toollist");
     let list = f.ok(&["tool", "--list"]);
-    assert_eq!(list.lines().count(), 8, "{list}");
+    assert_eq!(list.lines().count(), 11, "{list}");
     assert!(list.lines().any(|l| l.starts_with("suggest_change ") && l.contains("Propose")), "{list}");
     assert_eq!(f.ok(&["tool", "film.fdx", "--list"]), list);
     let specs: serde_json::Value = serde_json::from_str(&f.ok(&["tool", "--list", "--json"])).unwrap();

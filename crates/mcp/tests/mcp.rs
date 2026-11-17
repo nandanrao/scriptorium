@@ -136,6 +136,64 @@ fn handshake_and_tool_list() {
 }
 
 #[test]
+fn the_versions_read_tools_are_read_only_and_read_the_pair() {
+    let mut s = Server::start("versions");
+    let tools = s.request("tools/list", json!({}));
+    for name in ["list_versions", "read_rows"] {
+        let t = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap();
+        assert_eq!(t["annotations"]["readOnlyHint"], true, "{name}");
+        assert!(t["inputSchema"]["required"].as_array().unwrap().contains(&json!("script")), "{name}");
+    }
+    let en = s.dir.join("film.fdx").to_string_lossy().into_owned();
+    assert_eq!(
+        serde_json::from_str::<Value>(&s.ok("list_versions", json!({ "script": en }))).unwrap()["pair"],
+        Value::Null
+    );
+    scriptorium_cli::run(&["version", "new", &en, "--lang", "es", "--from", "en"], &mut vec![]).unwrap();
+    let v: Value = serde_json::from_str(&s.ok("list_versions", json!({ "script": en }))).unwrap();
+    let es = v["pair"]["version"].as_str().unwrap().to_string();
+    assert!(Path::new(&es).is_absolute() && es.ends_with("film.es.fdx"), "{es}");
+    let rows: Value = serde_json::from_str(&s.ok("read_rows", json!({ "script": es, "needs": true }))).unwrap();
+    let rows = &rows["rows"];
+    assert_eq!(rows.as_array().unwrap().len(), 3, "heading, action, dialogue: {rows}");
+    assert_eq!(rows[1]["other"][0]["text"], "Laura smiles.");
+    assert!(!s.dir.join("film.es.scriptorium.json").exists(), "reading wrote no session");
+}
+
+#[test]
+fn new_version_then_rows_suggested_on_the_version_and_written_only_with_an_output() {
+    let mut s = Server::start("new-version");
+    let tools = s.request("tools/list", json!({}));
+    let t = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "new_version").unwrap();
+    assert_eq!(t["annotations"]["readOnlyHint"], false);
+    assert_eq!(t["inputSchema"]["required"], json!(["script", "language", "original_language"]));
+    let en = s.dir.join("film.fdx").to_string_lossy().into_owned();
+    let args = json!({ "script": en, "language": "es", "original_language": "en" });
+    let out = s.ok("new_version", args.clone());
+    let es = out.lines().find_map(|l| l.strip_prefix("The version: ")).expect(&out).to_string();
+    assert!(Path::new(&es).is_absolute() && es.ends_with("film.es.fdx"), "{out}");
+    let again = s.ok("new_version", args);
+    assert!(again.contains("was already made") && again.contains(&format!("The version: {es}")), "{again}");
+
+    let rows: Value = serde_json::from_str(&s.ok("read_rows", json!({ "script": es, "needs": true }))).unwrap();
+    let row = &rows["rows"][1];
+    let batch = json!({
+        "script": es,
+        "review_file": "Translation from English.review.txt",
+        "suggestions": [{ "row": row["row"], "paragraph_id": row["this"][0]["id"], "options": ["Laura sonríe."] }],
+    });
+    let added: Value = serde_json::from_str(&s.ok("suggest_changes", batch)).unwrap();
+    assert_eq!(added["added"], 1, "{added}");
+    let reviews = s.ok("list_reviews", json!({ "script": es }));
+    assert!(reviews.contains("Translation from English.review.txt"), "{reviews}");
+
+    let (text, err) = s.call("write_script", json!({ "script": es }));
+    assert!(err && text.contains("Write .fdx") && text.contains("give `output`"), "{text}");
+    s.ok("write_script", json!({ "script": es, "output": "copy.fdx" }));
+    assert!(s.dir.join("copy.fdx").is_file());
+}
+
+#[test]
 fn propose_decide_undo_write() {
     let mut s = Server::start("review");
 

@@ -21,7 +21,7 @@ use scriptorium_review::file::{Line, RowRef};
 use scriptorium_review::sessionfile::{self, ResumedSession, ReviewSource, RowResolverFactory};
 use scriptorium_review::{RowResolver, Session, Status};
 use scriptorium_versions::links::{self, Links, member_letter};
-use scriptorium_versions::{Alignment, LaidRow, Placed, PlacedState, Resolver, RowQuery, lay_out, refind};
+use scriptorium_versions::{Alignment, LaidRow, PairView, Placed, PlacedState, Resolver, RowQuery, lay_out, refind};
 
 use crate::{LOCK_WAIT, LockError, SessionLock, write_atomic_no_link};
 
@@ -120,6 +120,23 @@ impl PairState {
             PairState::None => false,
             PairState::Loaded(p) => p.maybe_made,
             PairState::Unusable { maybe_made, .. } => *maybe_made,
+        }
+    }
+
+    /// The pair's rows for the tools ([`LoadedPair::view`]): `None` without
+    /// a pair, the reason when a links file names the script but can't be
+    /// used. `this`, `session` and `doc`: the script's file as opened, its
+    /// session and live document (the app passes its own).
+    pub fn view<'a>(
+        &'a self,
+        this: &FdxFile,
+        session: &Session,
+        doc: &'a Document,
+    ) -> Option<Result<PairView<'a>, String>> {
+        match self {
+            PairState::None => None,
+            PairState::Unusable { reason, .. } => Some(Err(reason.clone())),
+            PairState::Loaded(pair) => Some(Ok(pair.view(this, session, doc))),
         }
     }
 
@@ -322,6 +339,20 @@ impl LoadedPair {
             let q = RowQuery { links_id: &row.id, row_text: &row.texts, texts: &texts, para };
             resolver.candidates(&q).map_err(|e| e.text())
         })
+    }
+
+    /// The rows laid out ([`Self::lay_out`]) as one value for the tools
+    /// (`scriptorium_tools::LinksCtx::from`).
+    pub fn view<'a>(&'a self, this: &FdxFile, session: &Session, doc: &'a Document) -> PairView<'a> {
+        let laid = self.lay_out(this, session, doc);
+        PairView {
+            links: &self.links,
+            path: &self.path,
+            this: self.this,
+            rows: laid.rows,
+            scripts: laid.scripts,
+            placed: laid.placed.iter().map(|p| (p.review, p.item)).collect(),
+        }
     }
 
     /// [`Self::resolver`] for review's open path (`sessionfile::resume`).

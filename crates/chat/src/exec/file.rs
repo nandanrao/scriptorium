@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use scriptorium_core::{Document, ElementKind};
-use scriptorium_fsio::opened::Opened;
+use scriptorium_fsio::opened::{Opened, file_name};
+use scriptorium_fsio::versions::Made;
 use scriptorium_fsio::{LockError, SessionLock};
 use scriptorium_review::{RowResolver, Session};
+use scriptorium_versions::PairView;
 
 use super::{ReviewError, ReviewStore, Script, create_new};
 
@@ -135,8 +137,41 @@ impl ReviewStore for FileStore<'_> {
         self.o.row_resolver()
     }
 
+    fn pair_view(&self) -> Option<Result<PairView<'_>, String>> {
+        self.o.pair_view()
+    }
+
     fn reload(&mut self) -> Result<(), ReviewError> {
         self.reopen(&[])
+    }
+
+    fn new_version(&mut self, language: &str, original_language: &str) -> Result<String, ReviewError> {
+        if !self.writes {
+            return Err(ReviewError::Failed("opened for reading only".into()));
+        }
+        let mut more = vec![];
+        let made = scriptorium_fsio::versions::version_new(
+            Path::new(self.script),
+            language,
+            Some(original_language),
+            None,
+            &mut more,
+        );
+        more.into_iter().for_each(|n| note(self.notes, n));
+        let made = made.map_err(ReviewError::Failed)?;
+        // No counts for a version made before: its links file's stamps don't
+        // give them as they are now.
+        let (version, links) = (file_name(&made.version), file_name(&made.links));
+        let first = match &made.made {
+            Made::Already => scriptorium_tools::already_made(&version, &links, &[]),
+            Made::Refound(msgs) => scriptorium_tools::already_made(&version, &links, msgs),
+            Made::New | Made::Adopted => made.summary().lines().next().unwrap_or_default().to_string(),
+        };
+        Ok(scriptorium_tools::new_version_message(&first, &made.version.display().to_string(), false))
+    }
+
+    fn may_be_version(&self) -> bool {
+        self.o.pair().maybe_made()
     }
 
     fn attach(&mut self, path: &Path) -> Result<usize, ReviewError> {

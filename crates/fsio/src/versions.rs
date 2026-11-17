@@ -16,6 +16,10 @@ use crate::write_atomic;
 mod version_new;
 pub use version_new::{Made, NewVersion, check_version_args, default_version_name, links_name, version_new};
 
+// Writing the made version over its own file (A7b): the app's Write .fdx.
+mod in_place;
+pub use in_place::{InPlaceError, WrittenInPlace, blocked, write_in_place, write_in_place_with};
+
 // Opening a script with its pair (A5c, I1): found, re-found first, the
 // resolver for `ROW:` suggestions, the rows.
 mod pair;

@@ -6,14 +6,16 @@ use std::collections::HashMap;
 use scriptorium_core::text::{looks_same, normalize, similarity};
 use scriptorium_core::{Document, ElementKind, ParaId};
 use scriptorium_review::matching::FUZZY_THRESHOLD;
-use scriptorium_review::{Entry, Item, Line, RowResolver, Session, Shape, Unplaced};
+use scriptorium_review::{Entry, FileStatus, Item, Line, RowRef, RowResolver, Session, Shape, Status, Unplaced};
+use scriptorium_versions::stamp_text;
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::args::Args;
-use crate::block::{LINE_BREAKS, Opts, Spot, block_entry, opts, spot, still_reads};
+use crate::block::{LINE_BREAKS, Opts, Spot, block_entry_for, opts, spot, still_reads};
 use crate::catalogue::MAX_BATCH;
 use crate::reviews::{find_review, item_numbers};
+use crate::rows::row_for;
 use crate::{Append, Applied, Ctx, Failed, Outcome, Proposal, Target, ToolError};
 
 /// Where the suggestions go, and the attached review to check duplicates
@@ -30,21 +32,26 @@ fn target(ctx: &Ctx, a: &Args) -> Result<(Target, Option<(usize, bool)>), ToolEr
 }
 
 /// The checks that depend only on the line as it is now: it exists, can be
-/// changed, has text, and the options are single non-empty lines of which at
-/// least one would visibly change it. Returns the line's live text.
+/// changed, has text (or is a blank line `blank_ok`: a version's line not yet
+/// translated, named with `row`), and the options are single non-empty lines
+/// of which at least one would visibly change it. Returns the line's live text.
 fn check_line(
     doc: &Document,
     is_caps: &dyn Fn(&ElementKind) -> bool,
     id: u64,
     options: &[String],
+    blank_ok: bool,
 ) -> Result<String, String> {
     let p = doc.paragraph(ParaId(id)).ok_or_else(|| format!("no paragraph {id}"))?;
     if !p.kind.is_editable() {
         return Err(format!("paragraph {id} ({}) isn't editable", p.kind.name()));
     }
     let text = p.text();
-    if text.trim().is_empty() {
-        return Err(format!("paragraph {id} is empty: suggest changes to lines with text"));
+    if text.trim().is_empty() && !blank_ok {
+        return Err(format!(
+            "paragraph {id} is empty: suggest changes to lines with text (a version's line not yet translated \
+             takes one with its `row` from read_rows)"
+        ));
     }
     if options.iter().any(|o| o.contains(LINE_BREAKS)) {
         return Err("options can't contain newlines: one paragraph per suggestion".into());
@@ -59,25 +66,93 @@ fn check_line(
     Ok(text)
 }
 
+/// The row a suggestion is for, for [`check_duplicate`]: its `ROW:` fields
+/// and, when known, its number in `read_rows`.
+struct OnRow<'a> {
+    n: Option<usize>,
+    row: &'a RowRef,
+}
+
+impl OnRow<'_> {
+    fn name(&self) -> String {
+        self.n.map_or("this row".into(), |n| format!("row {n}"))
+    }
+
+    /// Whether `other` is a suggestion for the same row: the same pair, and
+    /// the original's side read the same when it was made.
+    fn same(&self, other: &RowRef) -> bool {
+        let fold = |t: &[String]| t.iter().map(|t| stamp_text(t, true)).collect::<Vec<_>>();
+        other.id == self.row.id && fold(&other.texts) == fold(&self.row.texts)
+    }
+}
+
 /// A review holds one suggestion per line (the matcher can show only one), so
 /// a suggestion on a paragraph another suggestion of the review already
 /// covers (a line suggestion's line, a block's lines where it was made and
 /// where it is now) is refused, whatever its status. `explicit`: the review
 /// was named (MCP's `review_file`) rather than being the host's own.
-fn check_duplicate(session: &Session, doc: &Document, r: usize, ids: &[ParaId], explicit: bool) -> Result<(), String> {
+///
+/// `row`: the suggestion is for a row of a version. A decided suggestion
+/// still placed on the row (the original's line unchanged since) leaves
+/// nothing to update; once the original's line changed, the decided one is
+/// not found any more and a new suggestion goes in the same review. A
+/// pending suggestion for the same row that isn't placed right now (the
+/// version's line was typed into, say) is refused too, so it isn't doubled.
+fn check_duplicate(
+    session: &Session,
+    doc: &Document,
+    r: usize,
+    ids: &[ParaId],
+    explicit: bool,
+    row: Option<OnRow>,
+) -> Result<(), String> {
     let review = &session.reviews[r];
     for (i, it) in review.items.iter().enumerate() {
         let covered: Vec<ParaId> =
             std::iter::once(it.para).chain(it.paras.iter().copied()).chain(session.live_run(doc, r, i)).collect();
         let Some(id) = ids.iter().find(|id| covered.contains(id)) else { continue };
         let status = session.status_label(doc, r, i);
+        let n = item_numbers(doc, &review.items)[i];
+        if let Some(row) = row.as_ref().filter(|_| it.row.is_some()) {
+            let decided =
+                matches!(session.status(doc, r, i), Status::Accepted(_) | Status::Rejected | Status::Rewritten);
+            return Err(if decided {
+                format!(
+                    "{} is already decided in {} (#{n}, {status}); nothing to update",
+                    row.name(),
+                    whose(&review.name, explicit)
+                )
+            } else {
+                format!("{} already has a suggestion in {} (#{n}, {status})", row.name(), whose(&review.name, explicit))
+            });
+        }
         return Err(format!(
-            "{} already has a suggestion on ¶{} (#{}, {status}): one suggestion per line per review; the writer \
+            "{} already has a suggestion on ¶{} (#{n}, {status}): one suggestion per line per review; the writer \
              can ask for a new one in a new conversation",
             whose(&review.name, explicit),
             id.0,
-            item_numbers(doc, &review.items)[i]
         ));
+    }
+    if let Some(row) = &row {
+        for u in &review.unmatched {
+            let Some(e) = review.file.entries.get(u.entry) else { continue };
+            // Pending: not decided in its file, nor in the document (a
+            // decision not yet written to the file is in its metadata).
+            let decided_here = doc.meta(&format!("review/{}/{}", review.id, u.entry)).is_some();
+            if e.status != FileStatus::Pending || decided_here || !e.row.as_ref().is_some_and(|other| row.same(other)) {
+                continue;
+            }
+            let why = match &u.why {
+                Some(Unplaced::NoRow(why)) => why.clone(),
+                _ => "its line doesn't read as it did".into(),
+            };
+            return Err(format!(
+                "{} already has a suggestion in {} (e{}) not found right now: {why}",
+                row.name(),
+                whose(&review.name, explicit),
+                u.entry
+            ));
+        }
     }
     Ok(())
 }
@@ -101,11 +176,23 @@ fn changed(id: u64) -> String {
 /// Check one suggestion against the live document and the target review,
 /// and build its review-file entry (`para` and the live text as `before`):
 /// a line entry for `paragraph_id` with string options, else a block
-/// ([`block_entry`]).
-fn validate(ctx: &Ctx, review: Option<(usize, bool)>, spot: &Spot, options: Opts, why: &str) -> Result<Entry, String> {
-    let entry = match (spot, options) {
+/// ([`block_entry`]). On the version of a pair, the target must be one
+/// row's lines on this side, that of `row` if given ([`row_for`]); blank
+/// lines of a row not yet translated may take it (`BEFORE: [empty]`), and
+/// the entry gets `ROW:` and `ROW TEXT:` from the original's file.
+fn validate(
+    ctx: &Ctx,
+    review: Option<(usize, bool)>,
+    spot: &Spot,
+    options: Opts,
+    why: &str,
+    row: Option<&Value>,
+) -> Result<Entry, String> {
+    let target = row_for(ctx, row, spot)?;
+    let blank_ok = target.as_ref().is_some_and(|t| t.blank_ok);
+    let mut entry = match (spot, options) {
         (Spot::Para(id), Opts::Strings(options)) => {
-            let text = check_line(ctx.doc, ctx.is_caps, *id, &options)?;
+            let text = check_line(ctx.doc, ctx.is_caps, *id, &options, blank_ok)?;
             Entry { para: vec![ParaId(*id)], why: why.to_string(), ..Entry::single(text.trim(), options) }
         }
         (_, Opts::Strings(_)) => {
@@ -113,10 +200,16 @@ fn validate(ctx: &Ctx, review: Option<(usize, bool)>, spot: &Spot, options: Opts
                         [{\"kind\": ..., \"text\": ...}]"
                 .into());
         }
-        (spot, Opts::Lines(options)) => block_entry(ctx.doc, ctx.is_caps, spot, options, why)?,
+        (spot, Opts::Lines(options)) => block_entry_for(ctx.doc, ctx.is_caps, spot, options, why, blank_ok)?,
     };
+    let n = target.as_ref().map(|t| t.n);
+    if let Some(t) = target {
+        entry.row = Some(t.row);
+        entry.check().map_err(|e| format!("the suggestion can't be written to a review file: {e}"))?;
+    }
     if let Some((r, explicit)) = review {
-        check_duplicate(ctx.session, ctx.doc, r, &entry.para, explicit)?;
+        let on_row = entry.row.as_ref().map(|row| OnRow { n, row });
+        check_duplicate(ctx.session, ctx.doc, r, &entry.para, explicit, on_row)?;
     }
     Ok(entry)
 }
@@ -186,7 +279,7 @@ fn find_by_text(ctx: &Ctx, review: Option<(usize, bool)>, before: &str) -> Resul
         return Err(ToolError::Invalid(format!("¶{id} isn't editable")));
     }
     if let Some((r, explicit)) = review {
-        check_duplicate(ctx.session, ctx.doc, r, &[ParaId(id)], explicit).map_err(ToolError::Invalid)?;
+        check_duplicate(ctx.session, ctx.doc, r, &[ParaId(id)], explicit, None).map_err(ToolError::Invalid)?;
     }
     Ok((id, fuzzy))
 }
@@ -195,6 +288,7 @@ pub(crate) fn suggest_change(ctx: &Ctx, a: &Args) -> Result<Outcome, ToolError> 
     let (target, review) = target(ctx, a)?;
     let options = opts(a.get("options")).map_err(ToolError::Args)?;
     let why = a.opt_str("why")?.unwrap_or("");
+    let row = a.get("row");
     let (spot, fuzzy) = match a.opt_str("before")? {
         Some(b) => {
             if ["paragraph_id", "paragraph_ids", "insert_after"].iter().any(|k| a.get(k).is_some()) {
@@ -207,7 +301,7 @@ pub(crate) fn suggest_change(ctx: &Ctx, a: &Args) -> Result<Outcome, ToolError> 
         }
         None => (spot(|k| a.get(k)).map_err(ToolError::Args)?, false),
     };
-    let entry = validate(ctx, review, &spot, options, why).map_err(ToolError::Invalid)?;
+    let entry = validate(ctx, review, &spot, options, why, row).map_err(ToolError::Invalid)?;
     Ok(Outcome::Append(Append {
         target,
         proposals: vec![Proposal { index: 0, entry, fuzzy }],
@@ -287,7 +381,7 @@ pub(crate) fn suggest_changes(ctx: &Ctx, a: &Args) -> Result<Outcome, ToolError>
                 None => "",
                 Some(w) => w.as_str().ok_or("`why` must be a string")?,
             };
-            let entry = validate(ctx, review, &spot, options, why)?;
+            let entry = validate(ctx, review, &spot, options, why, get("row"))?;
             if let Some((id, k)) = entry.para.iter().find_map(|p| seen.get(&p.0).map(|k| (p.0, *k))) {
                 return Err(in_batch(id, k));
             }
@@ -373,11 +467,14 @@ pub fn apply(
     for (k, Proposal { index, entry, fuzzy }) in append.proposals.into_iter().enumerate() {
         let id = entry.para.first().map(|p| p.0);
         let before = Line::join(&entry.before);
+        // A blank line takes only a `ROW:` suggestion, placed by its row
+        // (`validate` checked the row is not yet translated).
+        let blank_ok = entry.row.is_some() && rows.is_some();
         let checked = (|| {
             let id = id.ok_or("the suggestion names no paragraph")?;
             if entry.is_line() {
                 let options: Vec<String> = entry.options.iter().map(|o| Line::join(o)).collect();
-                let live = check_line(doc, is_caps, id, &options)?;
+                let live = check_line(doc, is_caps, id, &options, blank_ok)?;
                 // The review's PARA pass would also take a line that now reads as
                 // one of the options (a decided entry); a new suggestion is only
                 // for the line as it was read.
@@ -392,9 +489,10 @@ pub fn apply(
                     return Err(changed_run(&entry.para));
                 }
                 let spot = Spot::List(entry.para.iter().map(|p| p.0).collect());
-                block_entry(doc, is_caps, &spot, entry.options.clone(), &entry.why)?;
+                block_entry_for(doc, is_caps, &spot, entry.options.clone(), &entry.why, blank_ok)?;
             }
-            check_duplicate(session, doc, r, &entry.para, explicit)?;
+            let on_row = entry.row.as_ref().map(|row| OnRow { n: None, row });
+            check_duplicate(session, doc, r, &entry.para, explicit, on_row)?;
             if let Some((id, j)) = entry.para.iter().find_map(|p| seen.get(&p.0).map(|j| (p.0, *j))) {
                 return Err(in_batch(id, j));
             }

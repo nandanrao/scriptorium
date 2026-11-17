@@ -426,8 +426,14 @@ fn an_argument_not_offered_is_refused() {
 /// (what `review_file` would give if a host passed one on).
 fn to_file(m: &mut Mem, file: &mut ThreadFile, path: &str) -> Result<Applied, ReviewError> {
     let append = {
-        let ctx =
-            Ctx { doc: &m.doc, session: &m.session, script_name: "film.fdx", is_caps: &*m.caps, default_review: None };
+        let ctx = Ctx {
+            doc: &m.doc,
+            session: &m.session,
+            script_name: "film.fdx",
+            is_caps: &*m.caps,
+            default_review: None,
+            links: None,
+        };
         let args = json!({"paragraph_id": 1, "options": ["Laura grins."], "review_file": path});
         match scriptorium_tools::call(&ctx, "suggest_change", &args).unwrap() {
             Outcome::Append(a) => a,

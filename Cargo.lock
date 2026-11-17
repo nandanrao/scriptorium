@@ -5345,6 +5345,7 @@ dependencies = [
  "scriptorium-providers",
  "scriptorium-review",
  "scriptorium-tools",
+ "scriptorium-versions",
  "serde_json",
  "unicode-segmentation",
 ]

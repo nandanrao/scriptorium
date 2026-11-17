@@ -61,8 +61,16 @@ const ATTACHED: &str = "Attached review files: paths relative to the script's fo
                         shows them.";
 
 /// The shared tools that only read.
-const READ_ONLY: &[&str] =
-    &["script_info", "list_paragraphs", "read_scene", "read_script", "list_reviews", "list_suggestions"];
+const READ_ONLY: &[&str] = &[
+    "script_info",
+    "list_paragraphs",
+    "read_scene",
+    "read_script",
+    "list_reviews",
+    "list_suggestions",
+    "list_versions",
+    "read_rows",
+];
 
 /// The shared catalogue with MCP's fields: `script` on every tool,
 /// `review_file` on the suggesting tools, `before` on `suggest_change`.
@@ -166,7 +174,9 @@ pub fn list() -> Vec<Value> {
             "write_script",
             "Write the script with every decision and edit so far to a new .fdx (default: \"<name> (scriptorium).fdx\" \
              next to the original, replaced without warning if it exists, so the writer shouldn't keep editing \
-             that file). The original, and any other existing .fdx, is never overwritten: give a new file name.",
+             that file). The original, and any other existing .fdx, is never overwritten: give a new file name. \
+             For a version Scriptorium made (new_version), the writer saves it in the app with Write .fdx; here, \
+             give `output`.",
             json!({
                 "script": script,
                 "output": { "type": "string", "description": "Where to write, instead of the default: a .fdx in the script's folder (relative to it, or absolute)." },
@@ -265,7 +275,20 @@ pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
             // (the default name too: a link planted there is refused).
             let output = match a.opt_str("output") {
                 Some(o) => expand_home(&o),
-                None => own.to_string_lossy().into_owned(),
+                None => {
+                    // The version Scriptorium made is written in place from
+                    // the app; here only to a file named (as the CLI's `apply`).
+                    let o = scriptorium_fsio::opened::Opened::open_read_only(&script, &mut notes)?;
+                    if o.pair().is_made() || o.pair().maybe_made() {
+                        return Err(format!(
+                            "{} is the version Scriptorium made: the writer saves it in the app with Write .fdx. \
+                             To write a copy here, give `output`",
+                            o.script_name
+                        )
+                        .into());
+                    }
+                    own.to_string_lossy().into_owned()
+                }
             };
             let out = scriptorium_fsio::agent_file_in_folder(&dir, &output, ".fdx", Folders::MustExist)?;
             // The model never replaces another screenplay: an existing .fdx

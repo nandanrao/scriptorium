@@ -27,6 +27,9 @@ scriptorium-fsio = { workspace = true, optional = true, features = ["opened"] }
 scriptorium-providers = { workspace = true, optional = true, default-features = false, features = ["shell"] }
 scriptorium-review = { workspace = true, optional = true }
 scriptorium-tools = { workspace = true, optional = true }
+# `PairView` (the pair's rows a store hands the tools), and language names
+# for the labels (pure, like the core).
+scriptorium-versions.workspace = true
 
 [lints]
 workspace = true

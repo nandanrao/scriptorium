@@ -148,7 +148,7 @@ fn on_the_original_nothing_needs_work() {
     assert_eq!(v["pair"]["this"]["file"], "film.fdx");
     assert_eq!(v["pair"]["other"]["file"], "film.es.fdx");
     assert_eq!(v["pair"]["other"]["made"], true);
-    assert_eq!(v["pair"]["this_is_version"], false);
+    assert_eq!(v["pair"]["this"]["is_version"], false);
     assert_eq!(v["pair"]["needs"], 0);
 }
 
@@ -204,6 +204,17 @@ fn a_broken_links_file_is_an_error_and_left_alone() {
         let e = p.run(&[cmd, &es]).unwrap_err();
         assert!(e.contains("film.es.links.txt") && e.contains("line"), "{e}");
     }
+    // The read tools: the reason is the error, not said again as a note.
+    for tool in ["list_versions", "read_rows"] {
+        let mut notes = vec![];
+        let e = scriptorium_cli::run(&["tool", &es, tool], &mut notes).unwrap_err();
+        assert!(e.contains("film.es.links.txt") && e.contains("line"), "{e}");
+        assert!(notes.iter().all(|n| !e.contains(n.as_str())), "{notes:?}");
+    }
+    // Other tools don't lay the pair out; opening still notes the broken file.
+    let mut notes = vec![];
+    scriptorium_cli::run(&["tool", &es, "script_info"], &mut notes).unwrap();
+    assert!(notes.iter().any(|n| n.contains("film.es.links.txt")), "{notes:?}");
     assert_eq!(std::fs::read_to_string(&at).unwrap(), broken);
 }
 
@@ -373,4 +384,41 @@ fn a_broken_links_file_still_opens_other_commands_and_apply_needs_an_output() {
     let e = p.run(&["apply", &es]).unwrap_err();
     assert!(e.contains("may be the version Scriptorium made"), "{e}");
     assert!(!p.0.join("film.es (scriptorium).fdx").exists());
+}
+
+#[test]
+fn the_read_tools_print_what_versions_and_rows_print() {
+    let p = Pair::new("tools");
+    let review = "SCRIPT REVIEW v1\nScript: film.es.fdx\nId: tr-1\n\n---\nBEFORE: [empty]\nAFTER: Mañana voy al \
+                  pueblo.\nWHY:\nROW: lk-test\nROW TEXT: I am going to town tomorrow.\n";
+    std::fs::write(p.0.join("tr.review.txt"), review).unwrap();
+    let (es, en) = (p.path("film.es.fdx"), p.path("film.fdx"));
+    p.run(&["reviews", &es, "add", &p.path("tr.review.txt")]).unwrap();
+    let session = std::fs::read(p.0.join("film.es.scriptorium.json")).unwrap();
+    for script in [&es, &en] {
+        let rows = p.json(&["tool", script, "read_rows"])["rows"].clone();
+        assert_eq!(rows, p.json(&["rows", script, "--json"]), "{script}");
+        assert_eq!(p.json(&["tool", script, "list_versions"]), p.json(&["versions", script, "--json"]));
+    }
+    // The pending suggestion is on the dialogue's row, which then needs nothing.
+    let rows = p.json(&["tool", &es, "read_rows", r#"{"needs": true}"#])["rows"].clone();
+    let listed: Vec<u64> = rows.as_array().unwrap().iter().map(|r| r["row"].as_u64().unwrap()).collect();
+    assert_eq!(listed, [1, 2, 5, 6]);
+    let row4 = &p.json(&["tool", &es, "read_rows", r#"{"from_row": 4, "limit": 1}"#])["rows"][0];
+    assert_eq!(row4["row"], 4);
+    assert_eq!(row4["needs"], false);
+    assert_eq!(row4["suggestions"], serde_json::json!([{ "review": "tr.review.txt", "n": 1, "status": "pending" }]));
+
+    // The version and every path, absolute.
+    let v = p.json(&["tool", &en, "list_versions"]);
+    let dir = p.0.canonicalize().unwrap();
+    assert_eq!(v["pair"]["version"], dir.join("film.es.fdx").to_string_lossy().as_ref());
+    assert_eq!(v["pair"]["this"]["path"], dir.join("film.fdx").to_string_lossy().as_ref());
+    assert_eq!(v["pair"]["links"], dir.join("film.es.links.txt").to_string_lossy().as_ref());
+    assert_eq!(v["pair"]["other"]["made"], true);
+    // Reading never writes a session.
+    assert_eq!(std::fs::read(p.0.join("film.es.scriptorium.json")).unwrap(), session);
+    assert!(!p.0.join("film.scriptorium.json").exists());
+    let e = p.run(&["tool", &en, "read_rows", r#"{"needs": true}"#]).unwrap_err();
+    assert!(e.contains("it is the original"), "{e}");
 }

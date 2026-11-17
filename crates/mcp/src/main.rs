@@ -32,7 +32,10 @@ Propose, don't edit: use suggest_changes or suggest_change; decide or edit (deci
 only when the writer asks you to.
 When the writer asks for feedback rather than changes, answer in chat instead of proposing.
 Always give review_file when proposing, named for the pass (e.g. dialogue-pass.review.txt).
-Pass the script as an absolute path; if you don't know where the script is, ask the writer for its path.";
+Pass the script as an absolute path; if you don't know where the script is, ask the writer for its path.
+To translate: list_versions, then new_version makes (or finds) the version and returns its absolute path, used as script \
+from then on; read_rows by scene, then suggest_changes with row (each item covering all of its row's this ids) into \
+\"Translation from <the original's label from list_versions>.review.txt\"; updates go in the same review.";
 
 fn main() {
     let stdin = std::io::stdin();

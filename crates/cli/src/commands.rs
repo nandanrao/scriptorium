@@ -24,7 +24,9 @@ use scriptorium_review::file::{Case, FORMAT_HEADER, append_block, insert_id, par
 use scriptorium_review::matching::{Para, match_entries};
 use scriptorium_review::sessionfile::{self, SessionFile};
 use scriptorium_review::{Decision, Entry, Line, Review, Session, Shape, Status, Unplaced};
-use scriptorium_tools::{Ctx, Outcome, Spot, Target, block_entry, item_numbered, item_numbers, suggestion_rows};
+use scriptorium_tools::{
+    Ctx, LinksCtx, Outcome, Spot, Target, block_entry, item_numbered, item_numbers, suggestion_rows, uses_links,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -1158,10 +1160,42 @@ fn review_location(dir: &Path, file: &str) -> PathBuf {
     }
 }
 
+/// The first line of `new_version`'s result: `version new`'s summary for a
+/// version made now, [`scriptorium_tools::already_made`] for one made
+/// before (the links file's stamps don't give its counts as they are now).
+fn made_line(made: &scriptorium_fsio::versions::NewVersion) -> String {
+    use scriptorium_fsio::opened::file_name;
+    use scriptorium_fsio::versions::Made;
+    let (version, links) = (file_name(&made.version), file_name(&made.links));
+    match &made.made {
+        Made::Already => scriptorium_tools::already_made(&version, &links, &[]),
+        Made::Refound(msgs) => scriptorium_tools::already_made(&version, &links, msgs),
+        Made::New | Made::Adopted => made.summary().lines().next().unwrap_or_default().to_string(),
+    }
+}
+
+/// The pair for a tool's `Ctx::links`. A links file that can't be used is
+/// passed to a suggesting tool only when the script may be the version (it
+/// then refuses: a version's suggestions are placed by its rows).
+fn links_for<'a>(o: &'a Opened, name: &str) -> Option<Result<LinksCtx<'a>, String>> {
+    match o.pair_view()? {
+        Err(_) if scriptorium_tools::may_append(name) && !o.pair().maybe_made() => None,
+        v => Some(v.map(LinksCtx::from)),
+    }
+}
+
 /// The tools that only read: run on a read-only open, so a session that
 /// can't be used is a note (the script as written), as for `info` and `dump`.
-const READ_ONLY_TOOLS: &[&str] =
-    &["script_info", "list_paragraphs", "read_scene", "read_script", "list_reviews", "list_suggestions"];
+const READ_ONLY_TOOLS: &[&str] = &[
+    "script_info",
+    "list_paragraphs",
+    "read_scene",
+    "read_script",
+    "list_reviews",
+    "list_suggestions",
+    "list_versions",
+    "read_rows",
+];
 
 /// The tool specs `tool` accepts: the agent's catalogue, plus `before` on
 /// `suggest_change` and `review_file` on the suggesting tools.
@@ -1276,12 +1310,32 @@ pub fn tool(
             script_name: &o.script_name,
             is_caps: &caps,
             default_review: (o.session.reviews.len() == 1).then_some(0),
+            links: uses_links(name).then(|| links_for(&o, name)).flatten(),
         };
+        if let Some(Err(reason)) = &ctx.links {
+            // The tool's error is the reason: not said again as notes (it
+            // may join several broken links files' notes).
+            notes.retain(|n| n.is_empty() || !reason.contains(n.as_str()));
+        }
         scriptorium_tools::call(&ctx, name, &args).map_err(|e| e.to_string())?
     };
     let append = match outcome {
         Outcome::Text(t) => return Ok(t + "\n"),
         Outcome::Append(a) => a,
+        Outcome::NewVersion(v) => {
+            // Under this script's lock (taken above: `new_version` writes),
+            // as `version new` runs; it opens the script again from its files.
+            drop(o);
+            let made = scriptorium_fsio::versions::version_new(
+                Path::new(script),
+                &v.language,
+                Some(&v.original_language),
+                None,
+                notes,
+            )?;
+            let first = made_line(&made);
+            return Ok(scriptorium_tools::new_version_message(&first, &made.version.display().to_string(), true) + "\n");
+        }
     };
     // Never reached for a read-only open (only suggesting tools append), but
     // a session discarded by one must never be saved over.

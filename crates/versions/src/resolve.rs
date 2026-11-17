@@ -1,10 +1,13 @@
 //! The resolver: where a `ROW:` suggestion goes (C1, C7). By row content
 //! alone: the rows whose original side reads the entry's `ROW TEXT` and
 //! whose version side reads one of its texts (`BEFORE`, an option, `MINE`).
-//! Never by `PARA` or by matching text elsewhere. Rows that still read
-//! the entry's `BEFORE` come first (so a pending entry never takes a row
-//! already accepted with its option), and `PARA` only orders candidates
-//! within that. Rules: `docs/plans/versions.md`, "The resolver".
+//! Never by matching text elsewhere. Rows that still read the entry's
+//! `BEFORE` come first (so a pending entry never takes a row already
+//! accepted with its option), and `PARA` orders candidates within that,
+//! except that a row `PARA` names whose original reads `ROW TEXT` but whose
+//! version side reads none of the entry's texts is the only candidate (its
+//! line split) or none ([`NotFound::LineChanged`]): the entry never moves to
+//! an identical row because its own line changed. Rules: `docs/plans/versions.md`, "The resolver".
 //!
 //! Review knows nothing about links: the host wraps a [`Resolver`] in the
 //! closure review's open path takes, turning an entry into a [`RowQuery`].
@@ -53,6 +56,11 @@ pub enum NotFound {
     /// Rows read its `ROW TEXT`, but their version side reads none of its
     /// texts (typed into by hand since, or split or joined).
     VersionReadsNone,
+    /// The row its `PARA` names reads its `ROW TEXT`, but the version's side
+    /// there reads none of its texts: the line was typed into, split or
+    /// joined since. Identical rows elsewhere are not tried: the suggestion
+    /// was made for this one.
+    LineChanged,
 }
 
 impl NotFound {
@@ -61,6 +69,7 @@ impl NotFound {
             NotFound::OtherPair => "this suggestion is for another pair of versions".to_string(),
             NotFound::OriginalChanged { label } => format!("the {label} line changed since this suggestion"),
             NotFound::VersionReadsNone => "the line no longer reads what this suggestion was made for".to_string(),
+            NotFound::LineChanged => "its line was changed, split or joined since this suggestion".to_string(),
         }
     }
 }
@@ -142,6 +151,21 @@ impl Resolver {
         if rows.is_empty() {
             return Err(changed());
         }
+        // The row `PARA` names, when it reads `ROW TEXT`: the row the
+        // suggestion was made for. Reading `BEFORE` (or the decided text) or
+        // another of its texts, it is ranked below with the rest; otherwise
+        // the entry stays there or nowhere: on it when its line was only
+        // split (review keeps a line suggestion on the `PARA` line, which
+        // reads as split), else not found.
+        if let Some(own) = rows.iter().find(|c| q.para.iter().any(|id| c.cell.contains(id)))
+            && !own.cell.is_empty()
+            && !q.texts.iter().any(|t| reads(t, &own.now))
+        {
+            return match q.texts.first() {
+                Some(t) if split_of(t, &own.now) => Ok(vec![own.cell.clone()]),
+                _ => Err(NotFound::LineChanged),
+            };
+        }
         let mut first = Vec::new();
         let mut rest = Vec::new();
         for c in rows.into_iter().filter(|c| !c.cell.is_empty()) {
@@ -162,4 +186,17 @@ impl Resolver {
         first.extend(rest);
         if first.is_empty() { Err(NotFound::VersionReadsNone) } else { Ok(first) }
     }
+}
+
+/// Whether `now` (a cell's lines, `stamp_text`) is `want` (one text's lines)
+/// split by Enter: more lines, reading the same once joined (whitespace
+/// ignored, since a split may leave it at either edge). Never for a blank
+/// text: Enter in a blank line adds a line, it splits nothing.
+fn split_of(want: &[String], now: &[(String, bool)]) -> bool {
+    let squash = |ts: &mut dyn Iterator<Item = String>| -> String {
+        ts.flat_map(|t| t.chars().filter(|c| !c.is_whitespace()).collect::<Vec<_>>()).collect()
+    };
+    let caps = now.first().is_some_and(|(_, c)| *c);
+    let w = squash(&mut want.iter().map(|t| stamp_text(t, caps)));
+    now.len() > want.len() && !w.is_empty() && w == squash(&mut now.iter().map(|(t, _)| t.clone()))
 }

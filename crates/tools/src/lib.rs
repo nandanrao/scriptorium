@@ -4,7 +4,8 @@
 //!
 //! Pure (AGENTS.md rule 1): [`call`] reads a [`Ctx`] (the live document and the
 //! session) and returns a value. Tools that change something don't do it
-//! here: they return an [`Outcome::Append`] the host carries out. For suggestions the
+//! here: they return an [`Outcome::Append`] or [`Outcome::NewVersion`] the
+//! host carries out. For suggestions the
 //! host picks the review the [`Target`] names (creating and attaching one if
 //! needed), calls [`apply`], saves [`Applied::file_text`] (if any) and gives the model
 //! [`Applied::message`] as the tool result.
@@ -34,7 +35,7 @@ pub use catalogue::{
 };
 pub use read::{MIN_READ_BUDGET, NOT_EDITABLE, READ_BUDGET, script_size};
 pub use reviews::{SuggestionRow, find_review, item_numbered, item_numbers, suggestion_rows};
-pub use rows::{LinksCtx, ParaView, RowView, SuggestionView};
+pub use rows::{LinksCtx, MAX_ROWS_PAGE, ParaView, ROWS_BYTES, ROWS_PAGE, RowView, SuggestionView};
 pub use suggest::apply;
 
 /// What a tool call can see.
@@ -50,6 +51,13 @@ pub struct Ctx<'a> {
     /// passes its thread's review (`None` until it exists), MCP the only
     /// attached review.
     pub default_review: Option<usize>,
+    /// The pair of versions the script is in (`list_versions`, `read_rows`):
+    /// `None` when no links file beside it names it; `Some(Err(reason))`
+    /// when one does but can't be used (it doesn't parse, the other file is
+    /// missing...). Every host builds it from the pair it opened the script
+    /// with (`LinksCtx::from` a `scriptorium_versions::PairView`), and only
+    /// for the calls that read it ([`uses_links`]); `None` for the others.
+    pub links: Option<Result<LinksCtx<'a>, String>>,
 }
 
 /// A tool's result.
@@ -61,6 +69,53 @@ pub enum Outcome {
     /// Suggestions for the host to add with [`apply`]; the tool result is then
     /// [`Applied::message`].
     Append(Append),
+    /// `new_version`: the host makes the version beside the script, or finds
+    /// the one made before (`scriptorium_fsio::versions::version_new`, under
+    /// the script's session lock), and tells the model the version's
+    /// absolute path ([`new_version_message`]).
+    NewVersion(NewVersion),
+}
+
+/// A version to make of the script the tool was called on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewVersion {
+    /// The version's language code (`es`).
+    pub language: String,
+    /// The script's own language code (`en`).
+    pub original_language: String,
+}
+
+/// The first line of [`new_version_message`] for a version made before
+/// (found again, with the messages of any file re-found): no counts, which
+/// the links file's stamps can't give as they are now; `read_rows` can.
+pub fn already_made(version_file: &str, links_file: &str, refound: &[String]) -> String {
+    let mut out = format!("{version_file} was already made, with {links_file}.");
+    for m in refound {
+        out.push(' ');
+        out.push_str(m);
+    }
+    out.push_str(" read_rows with needs on it lists the rows left to translate.");
+    out
+}
+
+/// The tool result for a version made or found: the host's one-line
+/// summary, then the version's absolute path `version`. `switch`: the host
+/// takes a `script` argument (MCP, the CLI `tool`), so the model goes on
+/// with that path; otherwise (the built-in agent, bound to its script) the
+/// writer opens the version to translate it there.
+pub fn new_version_message(summary: &str, version: &str, switch: bool) -> String {
+    let next = if switch {
+        "From now on, pass this path as `script`: rows are read and suggestions made on the version, never on \
+         the original."
+            .to_string()
+    } else {
+        let name = version.rsplit(['/', '\\']).next().unwrap_or(version);
+        format!(
+            "This conversation stays on the original, which takes no suggestions for the version: the writer opens \
+             {name} in Scriptorium and asks for the translation there, in a new conversation."
+        )
+    };
+    format!("{summary}\nThe version: {version}\n{next}")
 }
 
 /// Suggestions that passed validation, to add to one review with [`apply`],
@@ -158,10 +213,29 @@ impl fmt::Display for ToolError {
 impl std::error::Error for ToolError {}
 
 /// Whether tool `name` can return [`Outcome::Append`] (the suggesting
-/// tools). Hosts take the session lock only for these; every other tool
-/// only reads.
+/// tools): a host may create the review they write to.
 pub fn may_append(name: &str) -> bool {
     matches!(name, "suggest_change" | "suggest_changes")
+}
+
+/// Whether tool `name` may change files: the suggesting tools
+/// ([`may_append`]) and `new_version` ([`Outcome::NewVersion`]). Hosts take
+/// the script's session lock only for these; every other tool only reads.
+pub fn writes(name: &str) -> bool {
+    may_append(name) || name == "new_version"
+}
+
+/// Whether tool `name` reads [`Ctx::links`]: hosts lay the pair's rows out
+/// only for these: `list_versions`, `read_rows`, `new_version`, and the
+/// suggesting tools (a suggestion on a version goes on one of its rows).
+///
+/// For the suggesting tools, a host passes a links file that can't be used
+/// (`Some(Err)`) only when the script may be the version
+/// (`PairState::maybe_made` in fsio): suggesting on it is then refused,
+/// since its suggestions are placed by rows. On a script that can't be the
+/// version, it passes `None`.
+pub fn uses_links(name: &str) -> bool {
+    matches!(name, "list_versions" | "read_rows" | "new_version") || may_append(name)
 }
 
 /// Run tool `name` with `args` (a JSON object).
@@ -174,8 +248,11 @@ pub fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<Outcome, ToolError> {
         "read_script" => read::read_script(ctx, &a).map(Outcome::Text),
         "list_reviews" => Ok(Outcome::Text(reviews::list_reviews(ctx, a.bool("summary")?))),
         "list_suggestions" => reviews::list_suggestions(ctx, &a).map(Outcome::Text),
+        "list_versions" => rows::list_versions(ctx).map(Outcome::Text),
+        "read_rows" => rows::read_rows(ctx, &a).map(Outcome::Text),
         "suggest_change" => suggest::suggest_change(ctx, &a),
         "suggest_changes" => suggest::suggest_changes(ctx, &a),
+        "new_version" => rows::new_version(ctx, &a),
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }
