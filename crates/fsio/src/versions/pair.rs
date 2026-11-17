@@ -31,6 +31,24 @@ const TRIES: usize = 5;
 /// The pause between tries.
 const RETRY_PAUSE: Duration = Duration::from_millis(100);
 
+/// How long loading a pair may wait: for the links lock, and for files that
+/// keep changing (or a member that doesn't parse yet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Patience {
+    pub lock_wait: Duration,
+    pub tries: usize,
+}
+
+impl Patience {
+    /// The CLI and the tool hosts: wait for the lock ([`LOCK_WAIT`]) and try
+    /// [`TRIES`] times, [`RETRY_PAUSE`] apart.
+    pub const WAIT: Patience = Patience { lock_wait: LOCK_WAIT, tries: TRIES };
+    /// The app, on its UI thread: one try, no waiting. A busy links lock or
+    /// a member mid-save leaves the pair [`PairState::Unusable`] for now;
+    /// the app tries again on a later tick.
+    pub const ONCE: Patience = Patience { lock_wait: Duration::ZERO, tries: 1 };
+}
+
 /// The links lock, held: from reading a links file to writing it
 /// ([`lock_links`]). On a file system without locks it holds nothing (a
 /// note said so) but is still the token [`refind_locked`] asks for.
@@ -54,9 +72,14 @@ impl LinksGuard {
 /// it; `version new` takes it after). On a file system without locks: a
 /// guard holding nothing, with a note.
 pub fn lock_links(links: &Path, notes: &mut Vec<String>) -> Result<LinksGuard, String> {
+    lock_links_within(links, LOCK_WAIT, notes)
+}
+
+/// [`lock_links`], waiting up to `wait`.
+fn lock_links_within(links: &Path, wait: Duration, notes: &mut Vec<String>) -> Result<LinksGuard, String> {
     let name = crate::opened::file_name(links);
     let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
-    let lock = match SessionLock::acquire(&links.with_file_name(format!("{stem}.lock")), LOCK_WAIT) {
+    let lock = match SessionLock::acquire(&links.with_file_name(format!("{stem}.lock")), wait) {
         Ok(l) => Some(l),
         Err(e @ LockError::NoLocks) => {
             notes.push(e.to_string());
@@ -191,7 +214,20 @@ pub fn resume(
     saved: Option<&str>,
     notes: &mut Vec<String>,
 ) -> (ResumedSession, PairState) {
-    let pair = load(dir, name, fdx, notes);
+    resume_with(fdx, dir, name, sources, saved, Patience::WAIT, notes)
+}
+
+/// [`resume`], loading the pair with `patience` (the app: [`Patience::ONCE`]).
+pub fn resume_with(
+    fdx: &FdxFile,
+    dir: &Path,
+    name: &str,
+    sources: Vec<ReviewSource>,
+    saved: Option<&str>,
+    patience: Patience,
+    notes: &mut Vec<String>,
+) -> (ResumedSession, PairState) {
+    let pair = load(dir, name, fdx, patience, notes);
     let caps = |k: &ElementKind| fdx.is_caps(k.name());
     // Always checked: reader 1 also misnumbered files without DualDialogue
     // (nested paragraphs in scene summaries and arc beats), and it's cheap.
@@ -205,7 +241,7 @@ pub fn resume(
 
 /// The pair of the script `this` (its file as read, named `script_name`, in
 /// `dir`), re-found where a member's bytes changed ([`load_pair_at`]).
-fn load(dir: &Path, script_name: &str, this: &FdxFile, notes: &mut Vec<String>) -> PairState {
+fn load(dir: &Path, script_name: &str, this: &FdxFile, patience: Patience, notes: &mut Vec<String>) -> PairState {
     let found = super::find_pair(dir, script_name);
     let maybe_made = found.maybe_made;
     let broken = found.notes.clone();
@@ -216,7 +252,7 @@ fn load(dir: &Path, script_name: &str, this: &FdxFile, notes: &mut Vec<String>) 
         }
         return PairState::None;
     };
-    match load_pair_at(&pair.links, dir, script_name, this, notes) {
+    match load_pair_within(&pair.links, dir, script_name, this, patience, notes) {
         Ok(mut loaded) => {
             loaded.maybe_made = maybe_made;
             PairState::Loaded(Box::new(loaded))
@@ -403,6 +439,7 @@ pub fn placed_items(session: &Session, doc: &Document, links_id: &str) -> Vec<Pl
 /// Errors: a links file that can't be read (nothing is rewritten), the
 /// other member missing (with the fix, and any `.fdx` in the folder holding
 /// the recorded bytes) or not a Final Draft file, `this` changed on disk.
+#[cfg(test)]
 pub(crate) fn load_pair_at(
     at: &Path,
     dir: &Path,
@@ -410,12 +447,24 @@ pub(crate) fn load_pair_at(
     this: &FdxFile,
     notes: &mut Vec<String>,
 ) -> Result<LoadedPair, String> {
+    load_pair_within(at, dir, script_name, this, Patience::WAIT, notes)
+}
+
+/// [`load_pair_at`] with `patience`.
+fn load_pair_within(
+    at: &Path,
+    dir: &Path,
+    script_name: &str,
+    this: &FdxFile,
+    patience: Patience,
+    notes: &mut Vec<String>,
+) -> Result<LoadedPair, String> {
     let links_name = crate::opened::file_name(at);
-    let guard = lock_links(at, notes)?;
+    let guard = lock_links_within(at, patience.lock_wait, notes)?;
     let text = std::fs::read_to_string(at).map_err(|e| format!("{}: {e}", at.display()))?;
     let pair = links::parse(&text).map_err(|e| format!("{links_name} can't be read ({e}); it is left as it is"))?;
     let this_m = pair.member_of(script_name).ok_or_else(|| format!("{links_name} doesn't name {script_name}"))?;
-    let found = refind_locked(&guard, dir, pair, &text, this_m, &dir.join(script_name), this)?;
+    let found = refind_within(&guard, dir, pair, &text, this_m, &dir.join(script_name), this, patience.tries)?;
     drop(guard);
     notes.extend(found.msgs.iter().cloned());
     let other_hash = sessionfile::hash(found.other.raw());
@@ -467,6 +516,21 @@ pub(crate) fn refind_locked(
     this_path: &Path,
     this: &FdxFile,
 ) -> Result<Refound, String> {
+    refind_within(guard, dir, links, text, this_m, this_path, this, TRIES)
+}
+
+/// [`refind_locked`], trying `tries` times (at least once).
+#[allow(clippy::too_many_arguments)]
+fn refind_within(
+    guard: &LinksGuard,
+    dir: &Path,
+    links: Links,
+    text: &str,
+    this_m: usize,
+    this_path: &Path,
+    this: &FdxFile,
+    tries: usize,
+) -> Result<Refound, String> {
     let at = guard.path();
     let links_name = crate::opened::file_name(at);
     let this_name = links.members[this_m].file.clone();
@@ -474,7 +538,7 @@ pub(crate) fn refind_locked(
     let other_file = links.members[other_m].file.clone();
     let other_path = dir.join(&other_file);
     let mut unparsed = String::new();
-    for attempt in 0..TRIES {
+    for attempt in 0..tries.max(1) {
         if attempt > 0 {
             std::thread::sleep(RETRY_PAUSE);
         }
@@ -556,16 +620,32 @@ pub(super) fn missing(dir: &Path, text: &str, links_name: &str, m: usize, pair: 
     out
 }
 
-/// "PURPLE LIST.fdx changed outside Scriptorium: 2,914 lines found again, 3
-/// changed, 4 new, 1 gone."
+/// What re-find says, in plain words: "PURPLE LIST.fdx changed outside
+/// Scriptorium: 3 lines reworded, 4 new, 1 removed; the other lines are
+/// where they were." Only the counts that aren't zero are named.
 pub fn refind_message(file: &str, found: &Alignment) -> String {
-    format!(
-        "{file} changed outside Scriptorium: {} lines found again, {} changed, {} new, {} gone.",
-        thousands(found.exact),
-        thousands(found.changed()),
-        thousands(found.new.len()),
-        thousands(found.gone.len())
-    )
+    let lines = |n: usize| if n == 1 { "1 line".to_string() } else { format!("{} lines", thousands(n)) };
+    let mut parts = vec![];
+    if found.changed() > 0 {
+        parts.push(format!("{} reworded", lines(found.changed())));
+    }
+    if !found.new.is_empty() {
+        let n = found.new.len();
+        let new_lines = if n == 1 { "1 new line".to_string() } else { format!("{} new lines", thousands(n)) };
+        parts.push(if parts.is_empty() { new_lines } else { format!("{} new", thousands(n)) });
+    }
+    if !found.gone.is_empty() {
+        let n = found.gone.len();
+        parts.push(if parts.is_empty() {
+            format!("{} removed", lines(n))
+        } else {
+            format!("{} removed", thousands(n))
+        });
+    }
+    if parts.is_empty() {
+        return format!("{file} changed outside Scriptorium: every line is where it was.");
+    }
+    format!("{file} changed outside Scriptorium: {}; the other lines are where they were.", parts.join(", "))
 }
 
 pub(super) fn thousands(n: usize) -> String {
@@ -583,6 +663,30 @@ pub(super) fn thousands(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refind_messages_name_only_what_changed() {
+        let found = |exact: usize, changed: usize, new: usize, gone: usize| Alignment {
+            pairs: (0..exact + changed).map(|i| (ParaId(i as u64), ParaId(i as u64))).collect(),
+            exact,
+            new: (0..new).map(|i| ParaId(100 + i as u64)).collect(),
+            gone: (0..gone).map(|i| ParaId(200 + i as u64)).collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            refind_message("film.fdx", &found(6, 0, 1, 0)),
+            "film.fdx changed outside Scriptorium: 1 new line; the other lines are where they were."
+        );
+        assert_eq!(
+            refind_message("film.fdx", &found(2914, 1, 2, 1)),
+            "film.fdx changed outside Scriptorium: 1 line reworded, 2 new, 1 removed; the other lines are where they \
+             were."
+        );
+        assert_eq!(
+            refind_message("film.fdx", &found(7, 0, 0, 0)),
+            "film.fdx changed outside Scriptorium: every line is where it was."
+        );
+    }
 
     #[test]
     fn thousands_separators() {

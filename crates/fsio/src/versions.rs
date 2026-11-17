@@ -24,7 +24,8 @@ pub use in_place::{InPlaceError, WrittenInPlace, blocked, write_in_place, write_
 // resolver for `ROW:` suggestions, the rows.
 mod pair;
 pub use pair::{
-    LaidOut, LinksGuard, LoadedPair, PairState, PlacedItem, lock_links, placed_items, refind_message, resume,
+    LaidOut, LinksGuard, LoadedPair, PairState, Patience, PlacedItem, lock_links, placed_items, refind_message, resume,
+    resume_with,
 };
 
 /// A script's place in its pair, as the links file beside it says.

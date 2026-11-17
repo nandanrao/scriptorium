@@ -101,6 +101,8 @@ pub struct ParaElement {
 
 pub struct ParaState {
     line: Option<Rc<WrappedLine>>,
+    /// A blank line's hint ([`crate::editor::Decor::ghosts`]), dimmed.
+    ghost: Option<Rc<WrappedLine>>,
     geometry: layout::Geometry,
     /// x shift inside the column for centred / right-aligned text.
     align_offset: Pixels,
@@ -143,7 +145,7 @@ impl Element for ParaElement {
             let geometry = layout::geometry(&scriptorium_core::ElementKind::Action);
             return (
                 window.request_layout(Style::default(), [], cx),
-                ParaState { line: None, geometry, align_offset: px(0.) },
+                ParaState { line: None, ghost: None, geometry, align_offset: px(0.) },
             );
         };
         let geometry = layout::geometry(&p.kind);
@@ -195,6 +197,7 @@ impl Element for ParaElement {
         let text = if geometry.caps { layout::display_caps(&text) } else { text };
 
         let lh = layout::line_height();
+        let blank = text.is_empty();
         let line = if text.is_empty() {
             None
         } else {
@@ -204,7 +207,19 @@ impl Element for ParaElement {
                 .ok()
                 .and_then(|mut lines| (!lines.is_empty()).then(|| Rc::new(lines.remove(0))))
         };
-        let text_h = line.as_ref().map_or(lh, |l| l.size(lh).height.max(lh));
+        // A blank line with a hint (the original's line on a version): shown
+        // dimmed, and the paragraph made as tall as it.
+        let ghost = ed.decor.ghosts.get(&p.id).filter(|_| blank && marked.is_none()).and_then(|g| {
+            let g = if geometry.caps { layout::display_caps(g) } else { g.clone() };
+            let runs =
+                [TextRun { color: rgb(0xb0b0b8).into(), ..run(g.len(), scriptorium_core::Style::default(), false) }];
+            window
+                .text_system()
+                .shape_text(SharedString::from(g), layout::font_size(), &runs, Some(geometry.width), None)
+                .ok()
+                .and_then(|mut lines| (!lines.is_empty()).then(|| Rc::new(lines.remove(0))))
+        });
+        let text_h = line.as_ref().or(ghost.as_ref()).map_or(lh, |l| l.size(lh).height.max(lh));
         let align_offset = match (&line, geometry.align) {
             (Some(l), Align::Right) => (geometry.width - l.width()).max(px(0.)),
             (Some(l), Align::Center) => ((geometry.width - l.width()) / 2.).max(px(0.)),
@@ -213,7 +228,7 @@ impl Element for ParaElement {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = (self.top_pad() + lh * geometry.space_before + text_h).into();
-        (window.request_layout(style, [], cx), ParaState { line, geometry, align_offset })
+        (window.request_layout(style, [], cx), ParaState { line, ghost, geometry, align_offset })
     }
 
     fn prepaint(
@@ -250,7 +265,7 @@ impl Element for ParaElement {
             point(page_left + g.left + state.align_offset, bounds.top() + self.top_pad() + lh * g.space_before);
         let para_layout =
             ParaLayout { top: bounds.top(), bottom: bounds.bottom(), text_origin, line: state.line.clone() };
-        let text_h = para_layout.line.as_ref().map_or(lh, |l| l.size(lh).height.max(lh));
+        let text_h = para_layout.line.as_ref().or(state.ghost.as_ref()).map_or(lh, |l| l.size(lh).height.max(lh));
 
         // Review decorations: the line under review, a mark in the left margin,
         // and Final Draft's revision `*` in the right margin for changed lines.
@@ -341,6 +356,8 @@ impl Element for ParaElement {
 
         if let Some(line) = &state.line {
             let _ = line.paint(text_origin, lh, TextAlign::Left, None, window, cx);
+        } else if let Some(ghost) = &state.ghost {
+            let _ = ghost.paint(text_origin, lh, TextAlign::Left, None, window, cx);
         }
         if let Some(c) = cursor {
             window.paint_quad(fill(Bounds::new(text_origin + c, size(px(2.), lh)), rgb(0x1d4ed8)));

@@ -17,8 +17,8 @@ use crate::agent_panel::accounts::{AccountsSheet, Dismissed};
 use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
 use crate::menus::{self, Item};
 use crate::script_view::{
-    ApplyToFdx, NextView, Opened, PrevView, RedoAny, SaveAndQuit, ScriptView, ShowReview1, ShowReview2, ShowReview3,
-    ShowScript, UndoAny, file_name, has_extension,
+    ApplyToFdx, NextView, Opened, PrevView, RedoAny, Reopen, SaveAndQuit, ScriptView, ShowReview1, ShowReview2,
+    ShowReview3, ShowScript, UndoAny, file_name, has_extension,
 };
 use crate::theme::*;
 
@@ -41,6 +41,8 @@ pub struct Workspace {
     /// The AI accounts sheet while it's open, and what had focus before.
     accounts: Option<(Entity<AccountsSheet>, Option<FocusHandle>, Subscription)>,
     _observe: Option<Subscription>,
+    /// The view's [`Reopen`]: Write .fdx wrote the version in place.
+    _reopen: Option<Subscription>,
 }
 
 impl Workspace {
@@ -53,6 +55,7 @@ impl Workspace {
             notice: "".into(),
             accounts: None,
             _observe: None,
+            _reopen: None,
         };
         // Closing the window saves, like Quit.
         let ws = cx.entity().downgrade();
@@ -158,16 +161,47 @@ impl Workspace {
                 return;
             }
         };
+        self.show(opened, window, cx);
+        if let Some(a) = set_aside {
+            self.set_notice(a, cx);
+        }
+        cx.notify();
+    }
+
+    /// Show `opened` in place of the current view (dropped as it is).
+    fn show(&mut self, opened: Opened, window: &mut Window, cx: &mut Context<Self>) {
         self.view = None;
         crate::log::info(&format!("opened {}", opened.script_path.display()));
         window.set_window_title(&format!("{} — Scriptorium", file_name(&opened.script_path)));
         let view = cx.new(|cx| ScriptView::new(opened, window, cx));
         // The toolbar shows the view's state, so redraw when it changes.
         self._observe = Some(cx.observe(&view, |_, _, cx| cx.notify()));
+        self._reopen =
+            Some(cx.subscribe_in(&view, window, |this, _, e: &Reopen, window, cx| {
+                this.reopen_written(e.clone(), window, cx)
+            }));
         self.view = Some(view);
         self.notice = "".into();
-        if let Some(a) = set_aside {
-            self.set_notice(a, cx);
+    }
+
+    /// Write .fdx wrote the version in place: drop its view without saving
+    /// it (the write saved a fresh session for the new bytes) and open the
+    /// written file, saying what was written.
+    fn reopen_written(&mut self, reopen: Reopen, window: &mut Window, cx: &mut Context<Self>) {
+        match Opened::load(&reopen.path, &[]) {
+            Ok(opened) => {
+                self.show(opened, window, cx);
+                self.set_notice(reopen.notice, cx);
+            }
+            Err(e) => {
+                // The old view is retired: never left showing as if usable.
+                crate::log::warn(&format!("reopening {}: {e}", reopen.path.display()));
+                self.view = None;
+                self._observe = None;
+                self._reopen = None;
+                window.set_window_title("Scriptorium");
+                self.set_notice(format!("{}  Reopening it failed: {e}", reopen.notice), cx);
+            }
         }
         cx.notify();
     }

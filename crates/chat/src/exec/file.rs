@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use scriptorium_core::{Document, ElementKind};
 use scriptorium_fsio::opened::{Opened, file_name};
-use scriptorium_fsio::versions::Made;
+use scriptorium_fsio::versions::{Made, NewVersion};
 use scriptorium_fsio::{LockError, SessionLock};
 use scriptorium_review::{RowResolver, Session};
 use scriptorium_versions::PairView;
@@ -75,6 +75,20 @@ impl Script for FileScript {
         let caps = caps(&o);
         Ok(Box::new(FileStore { o, caps, writes, script: &self.script, notes: &mut self.notes, _lock: lock }))
     }
+}
+
+/// The `new_version` tool result for what `version_new` made or found: the
+/// same text from every store (the CLI's and the app's).
+pub fn new_version_result(made: &NewVersion) -> String {
+    // No counts for a version made before: its links file's stamps don't
+    // give them as they are now.
+    let (version, links) = (file_name(&made.version), file_name(&made.links));
+    let first = match &made.made {
+        Made::Already => scriptorium_tools::already_made(&version, &links, &[]),
+        Made::Refound(msgs) => scriptorium_tools::already_made(&version, &links, msgs),
+        Made::New | Made::Adopted => made.summary().lines().next().unwrap_or_default().to_string(),
+    };
+    scriptorium_tools::new_version_message(&first, &made.version.display().to_string(), false)
 }
 
 fn note(notes: &mut Vec<String>, n: String) {
@@ -158,16 +172,7 @@ impl ReviewStore for FileStore<'_> {
             &mut more,
         );
         more.into_iter().for_each(|n| note(self.notes, n));
-        let made = made.map_err(ReviewError::Failed)?;
-        // No counts for a version made before: its links file's stamps don't
-        // give them as they are now.
-        let (version, links) = (file_name(&made.version), file_name(&made.links));
-        let first = match &made.made {
-            Made::Already => scriptorium_tools::already_made(&version, &links, &[]),
-            Made::Refound(msgs) => scriptorium_tools::already_made(&version, &links, msgs),
-            Made::New | Made::Adopted => made.summary().lines().next().unwrap_or_default().to_string(),
-        };
-        Ok(scriptorium_tools::new_version_message(&first, &made.version.display().to_string(), false))
+        Ok(new_version_result(&made.map_err(ReviewError::Failed)?))
     }
 
     fn may_be_version(&self) -> bool {

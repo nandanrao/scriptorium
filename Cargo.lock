@@ -5328,6 +5328,7 @@ dependencies = [
  "scriptorium-providers",
  "scriptorium-review",
  "scriptorium-tools",
+ "scriptorium-versions",
  "serde_json",
  "unicode-segmentation",
  "wayland-client",
@@ -5395,7 +5396,9 @@ dependencies = [
  "scriptorium-core",
  "scriptorium-fdx",
  "scriptorium-review",
+ "scriptorium-tools",
  "scriptorium-versions",
+ "serde_json",
 ]
 
 [[package]]

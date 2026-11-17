@@ -47,7 +47,7 @@ use scriptorium_versions::PairView;
 
 use crate::naming;
 
-pub use file::{FileScript, FileStore};
+pub use file::{FileScript, FileStore, new_version_result};
 
 /// The tool result when the script's files stay busy (another program holds
 /// the session lock).

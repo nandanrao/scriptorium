@@ -345,6 +345,12 @@ impl Opened {
     /// old one no longer fit the script is moved aside first
     /// ([`crate::set_aside_path`]), never overwritten. The caller holds the
     /// session lock.
+    ///
+    /// Writing the progress fails when a review file changed on disk since it
+    /// was opened (an agent appended to it): the save is refused, the session
+    /// file not written, and the command fails (run it again). The app, which
+    /// keeps its work in memory, instead says so and still saves its session,
+    /// writing the progress after its next reload.
     pub fn save(&mut self) -> Result<(), String> {
         // First, before any file is written: only the session file judged at
         // open is set aside; anything else there now (another program saved

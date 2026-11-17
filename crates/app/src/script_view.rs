@@ -19,19 +19,21 @@ use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, MouseButton,
-    ScrollStrategy, SharedString, Stateful, StyledText, Subscription, Task, UniformListScrollHandle, Window, actions,
-    div, prelude::*, px, relative, uniform_list,
+    AnyElement, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
+    MouseButton, ScrollStrategy, SharedString, Stateful, StyledText, Subscription, Task, UniformListScrollHandle,
+    Window, actions, div, prelude::*, px, relative, uniform_list,
 };
 use scriptorium_core::diff::{WordOp, word_diff};
 use scriptorium_core::doc::Event;
 use scriptorium_core::outline::{ParaContext, annotate};
 use scriptorium_core::{Document, ElementKind, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
-use scriptorium_fsio::versions::{self, PairState};
+use scriptorium_fsio::versions::{self, InPlaceError, PairState};
+use scriptorium_review::file::RowRef;
 use scriptorium_review::sessionfile::{self, Change, Disk, Resumed, Seen, SessionFile};
 use scriptorium_review::{Decision, LineChange, Refusal, Review, Session, Status};
 use scriptorium_tools::item_numbers;
+use scriptorium_versions::links::Links;
 
 use crate::agent_panel::{self, AgentPanel, AgentPanelEvent};
 use crate::blocks::{self, CardLine, Side};
@@ -142,6 +144,7 @@ impl Opened {
             }
         }
         notices.append(&mut opened.notes);
+        notices.extend(pair_note(&pair));
         Ok(Self { script_path, raw, fdx, opened, pair, session_path, dir, seen, unsynced, notices })
     }
 }
@@ -193,11 +196,202 @@ fn resume_from_disk(
             Err(e) => notices.push(format!("{e}. It was taken off this script's reviews.")),
         }
     }
-    let (opened, pair) = versions::resume(fdx, &dir, &script_name, sources, saved.as_deref(), &mut notices);
+    // One try, no waiting (this is the UI thread): a busy links lock or a
+    // member mid-save leaves the pair unusable until a later tick.
+    let (opened, pair) = versions::resume_with(
+        fdx,
+        &dir,
+        &script_name,
+        sources,
+        saved.as_deref(),
+        versions::Patience::ONCE,
+        &mut notices,
+    );
     for r in 0..opened.session.reviews.len() {
         notices.append(&mut review_notes(&opened.session, r));
     }
     (opened, pair, seen, notices)
+}
+
+/// The status bar's note on opening the original of a pair: its rows are
+/// translated (or, two files in one language, reviewed) in the version.
+fn pair_note(pair: &PairState) -> Option<String> {
+    let p = pair.loaded()?;
+    if p.this_is_version() {
+        return None;
+    }
+    let version = &p.links.members[p.links.sides().1].file;
+    let what = if p.links.same_language() { "review it" } else { "translate" };
+    Some(format!("Lined up with {version}: open that file to {what}."))
+}
+
+/// A file's modification time and length: looked at every tick, before
+/// reading it again.
+type FileSig = Option<(std::time::SystemTime, u64)>;
+
+fn file_sig(path: &Path) -> FileSig {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+/// The `*.links.txt` files in `dir`, by name.
+fn links_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .filter(|n| n.to_lowercase().ends_with(".links.txt"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// How long after a pair couldn't be used to try loading it again: a links
+/// lock held a moment, or Final Draft halfway through saving the other
+/// file. Then only a change to its files loads it again.
+const PAIR_RETRIES: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
+
+/// What the app looks at every tick to know when to load the script's pair
+/// again: loading may re-find and write the links file, so it isn't done on
+/// every tick, only when
+/// - a file of the pair changed: the links file or the other member (time
+///   and length first, then, only then, its bytes against the hashes the
+///   pair was loaded from);
+/// - without a pair, a `*.links.txt` file came or went in the folder (a
+///   version made by the CLI or Claude while the original is open);
+/// - a pair that couldn't be used is due another try ([`PAIR_RETRIES`]).
+#[derive(Debug, Default)]
+struct PairWatch {
+    files: Vec<Watched>,
+    /// Without a pair: the folder and its links files when loaded.
+    folder: Option<(PathBuf, Vec<String>)>,
+    /// An unusable pair: when to try again, and the tries left after that.
+    retry: Option<(Instant, usize)>,
+}
+
+#[derive(Debug)]
+struct Watched {
+    path: PathBuf,
+    /// `sessionfile::hash` of the bytes the pair was loaded from; `None`:
+    /// any change counts (a pair that couldn't be used).
+    hash: Option<String>,
+    /// The file's [`FileSig`] when its bytes were last found to be `hash`;
+    /// `None` until then.
+    seen: Option<FileSig>,
+}
+
+impl PairWatch {
+    /// What to look at for `pair`, just loaded for the script `script_name`
+    /// in `dir`.
+    fn of(pair: &PairState, dir: &Path, script_name: &str) -> Self {
+        let any_change = |path: PathBuf| Watched { seen: Some(file_sig(&path)), path, hash: None };
+        match pair {
+            PairState::None => Self { folder: Some((dir.to_path_buf(), links_files(dir))), ..Self::default() },
+            PairState::Loaded(p) => Self {
+                files: vec![
+                    Watched { path: p.path.clone(), hash: Some(p.links_hash.clone()), seen: None },
+                    Watched { path: p.other_path.clone(), hash: Some(p.other_hash.clone()), seen: None },
+                ],
+                ..Self::default()
+            },
+            PairState::Unusable { links, .. } => {
+                let mut files = vec![];
+                if let Some(l) = links {
+                    // The other member too: Final Draft finishing its save
+                    // makes the pair usable.
+                    let other = std::fs::read_to_string(l)
+                        .ok()
+                        .and_then(|t| scriptorium_versions::links::parse(&t).ok())
+                        .and_then(|x| {
+                            x.member_of(script_name).map(|m| x.members[if m == 0 { 1 } else { 0 }].file.clone())
+                        });
+                    files.push(any_change(l.clone()));
+                    files.extend(other.map(|o| any_change(dir.join(o))));
+                }
+                let retry = Some((Instant::now() + PAIR_RETRIES[0], 1));
+                Self { files, folder: None, retry }
+            }
+        }
+    }
+
+    /// Whether to load the pair again now (see [`PairWatch`]).
+    fn changed(&mut self) -> bool {
+        if let Some((at, n)) = self.retry
+            && Instant::now() >= at
+        {
+            self.retry = PAIR_RETRIES.get(n).map(|d| (Instant::now() + *d, n + 1));
+            return true;
+        }
+        if let Some((dir, names)) = &self.folder {
+            return links_files(dir) != *names;
+        }
+        for w in &mut self.files {
+            // Before reading: a write after this shows as a newer time later.
+            let sig = file_sig(&w.path);
+            if w.seen == Some(sig) {
+                continue;
+            }
+            let Some(hash) = &w.hash else { return true };
+            match std::fs::read_to_string(&w.path) {
+                Ok(text) if sessionfile::hash(&text) == *hash => w.seen = Some(sig),
+                _ => return true,
+            }
+        }
+        false
+    }
+}
+
+/// On the version of a loaded pair: for each of its lines, the original's
+/// line(s) of its row, shown dimmed while the line is blank (what is left to
+/// translate reads in place). Rows of one version line and several original
+/// lines show them all; several version lines pair with the original's in
+/// order where the counts agree, else the first takes them all.
+fn pair_ghosts(pair: &PairState) -> HashMap<ParaId, String> {
+    let Some(p) = pair.loaded().filter(|p| p.this_is_version()) else { return HashMap::new() };
+    let (o, v) = p.links.sides();
+    let text = |id: &ParaId| p.other_script.paragraphs.iter().find(|q| q.id == *id).map(|q| q.text());
+    let by_id: HashMap<ParaId, String> =
+        p.links.rows.iter().flat_map(|row| row.cells[o].iter()).filter_map(|id| text(id).map(|t| (*id, t))).collect();
+    let mut out = HashMap::new();
+    for row in &p.links.rows {
+        let (orig, ver) = (&row.cells[o], &row.cells[v]);
+        let texts: Vec<&str> = orig.iter().filter_map(|id| by_id.get(id).map(String::as_str)).collect();
+        if ver.len() == texts.len() {
+            out.extend(ver.iter().zip(&texts).map(|(id, t)| (*id, t.to_string())));
+        } else if let Some(first) = ver.first() {
+            out.insert(*first, texts.join(" "));
+        }
+    }
+    out.retain(|_, t| !t.trim().is_empty());
+    out
+}
+
+/// What the card shows above a `ROW:` suggestion: the original's line(s) it
+/// was made for (`ROW TEXT`, which the original's file still reads: an
+/// entry whose original line changed isn't placed, so it has no card).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RowCard {
+    /// The original's label ("English", or its file stem).
+    label: String,
+    /// The version's label ("Español").
+    version: String,
+    /// `ROW TEXT`, one line per paragraph.
+    text: String,
+    /// What the card says for the version's line while it is blank.
+    blank: &'static str,
+}
+
+/// The card's [`RowCard`] for `row` (an item's `ROW:`) in the pair `links`.
+fn row_card(links: &Links, row: &RowRef) -> RowCard {
+    let (o, v) = links.sides();
+    let blank = if links.same_language() { "empty" } else { "empty \u{2014} not yet translated" };
+    RowCard { label: links.label(o), version: links.label(v), text: row.texts.join("\n"), blank }
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -218,13 +412,22 @@ fn review_notes(session: &Session, r: usize) -> Vec<String> {
     // Blocks whose lines another review cut are named (they can't be
     // placed), and not counted again as not matching.
     let mut n = 0;
+    // Suggestions on rows of a pair not placed, by reason, in order.
+    let mut rows: Vec<(&str, usize)> = vec![];
     for u in &review.unmatched {
         match &u.why {
             Some(why @ scriptorium_review::Unplaced::RemovedBy { .. }) => {
                 notes.push(format!("{}: a suggestion's {}.", review.name, session.unplaced_label(why)));
             }
+            Some(scriptorium_review::Unplaced::NoRow(reason)) => match rows.iter_mut().find(|(r, _)| r == reason) {
+                Some((_, k)) => *k += 1,
+                None => rows.push((reason, 1)),
+            },
             _ => n += 1,
         }
+    }
+    for (reason, k) in rows {
+        notes.push(format!("{}: {}", review.name, row_note(reason, k)));
     }
     if n > 0 {
         notes.push(format!(
@@ -236,6 +439,28 @@ fn review_notes(session: &Session, r: usize) -> Vec<String> {
     notes
 }
 
+/// What the status bar says about `n` suggestions on rows of a pair not
+/// shown, for one reason (the resolver's sentence), in plain words.
+fn row_note(reason: &str, n: usize) -> String {
+    let changed = reason.strip_prefix("the ").and_then(|r| r.strip_suffix(" line changed since this suggestion"));
+    match changed {
+        Some(label) => {
+            let a = if label.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+            if n == 1 {
+                format!(
+                    "1 suggestion is for {a} {label} line that changed since: ask Claude to translate that row again."
+                )
+            } else {
+                format!(
+                    "{n} suggestions are for {label} lines that changed since: ask Claude to translate those rows again."
+                )
+            }
+        }
+        None if n == 1 => format!("1 suggestion isn't shown: {reason}."),
+        None => format!("{n} suggestions aren't shown: {reason}."),
+    }
+}
+
 pub fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
 }
@@ -244,10 +469,17 @@ pub fn has_extension(p: &Path, ext: &str) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
-/// "PURPLE LIST.review.txt" → "PURPLE LIST review".
+/// "PURPLE LIST.review.txt" → "PURPLE LIST review"; a name that already
+/// says what it is keeps it: "Translation from English.review.txt" →
+/// "Translation from English" (the agent's translation review).
 fn review_title(p: &Path) -> String {
     let name = file_name(p);
     let name = name.strip_suffix(".txt").unwrap_or(&name);
+    if let Some(stem) = name.strip_suffix(".review")
+        && stem.starts_with("Translation from ")
+    {
+        return stem.to_string();
+    }
     name.replace(".review", " review").replace('.', " ")
 }
 
@@ -330,6 +562,17 @@ pub(crate) enum LiveError {
     Failed(String),
 }
 
+/// Emitted when Write .fdx wrote the version in place (or got as far as
+/// its `.fdx`): the window drops this view without saving it and opens
+/// `path`, saying `notice` (plan D4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reopen {
+    pub path: PathBuf,
+    pub notice: String,
+}
+
+impl EventEmitter<Reopen> for ScriptView {}
+
 pub struct ScriptView {
     editor: Entity<ScriptEditor>,
     session: Rc<Session>,
@@ -342,6 +585,15 @@ pub struct ScriptView {
     /// The script's pair of versions as last loaded: its resolver places
     /// `ROW:` suggestions whenever a review is opened here.
     pair: Rc<PairState>,
+    /// The pair's files as loaded, looked at every tick ([`PairWatch`]).
+    pair_watch: PairWatch,
+    /// [`pair_ghosts`] of the pair as loaded.
+    ghosts: Rc<HashMap<ParaId, String>>,
+    /// Load the pair again on the next tick (a version was just made).
+    recheck_pair: bool,
+    /// Written in place and being replaced by the written file
+    /// ([`Reopen`]): never saves, looks at files or writes again.
+    retired: bool,
     session_path: PathBuf,
     originals: Rc<HashMap<ParaId, Paragraph>>,
     /// Scene and speaker per paragraph position, for the live document as of
@@ -446,6 +698,10 @@ fn reload_life(summary: &disk::Summary) -> NoticeLife {
 /// Said when a rewrite is undone because its line went away.
 const REWRITE_LOST: &str = "The line you were rewriting was removed, so the rewrite was undone.";
 
+/// Write .fdx on a version while the agent panel's run goes on.
+const AGENT_BUSY: &str =
+    "The assistant is still working on this script: wait for it to finish, or stop it, then write.";
+
 /// How often the app looks for changes another program made to its files.
 const WATCH_EVERY: Duration = Duration::from_millis(1000);
 
@@ -454,18 +710,12 @@ impl ScriptView {
         let Opened { script_path, raw, fdx, opened, pair, session_path, dir, seen, unsynced, notices } = opened;
         let sessionfile::ResumedSession { session, doc, base, .. } = opened;
         let synced = doc.log().len();
+        let pair_watch = PairWatch::of(&pair, &dir, &file_name(&script_path));
         let originals: HashMap<ParaId, Paragraph> = fdx.to_script().paragraphs.into_iter().map(|p| (p.id, p)).collect();
 
         let editor = cx.new(|cx| ScriptEditor::new(doc, cx));
         let subscription = cx.subscribe_in(&editor, window, Self::on_editor_event);
-        let watch = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(WATCH_EVERY).await;
-                if this.update(cx, |w, cx| w.watch_files(cx)).is_err() {
-                    break;
-                }
-            }
-        });
+        let watch = Self::start_watch(cx);
         let n = session.reviews.len();
         let mut this = Self {
             editor,
@@ -475,6 +725,10 @@ impl ScriptView {
             dir,
             raw: raw.into(),
             fdx: Rc::new(fdx),
+            pair_watch,
+            ghosts: Rc::new(pair_ghosts(&pair)),
+            recheck_pair: false,
+            retired: false,
             pair: Rc::new(pair),
             session_path,
             originals: Rc::new(originals),
@@ -523,6 +777,18 @@ impl ScriptView {
             this.agent_open = true;
         }
         this
+    }
+
+    /// Look at the files every [`WATCH_EVERY`] ([`Self::watch_files`]).
+    fn start_watch(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(WATCH_EVERY).await;
+                if this.update(cx, |w, cx| w.watch_files(cx)).is_err() {
+                    break;
+                }
+            }
+        })
     }
 
     /// The per-review sidebar rows and lookups, after the reviews change.
@@ -756,6 +1022,9 @@ impl ScriptView {
     /// write failed), it is written beside it as
     /// `X.scriptorium.set-aside-<time>.json`. Returns what to tell the writer.
     pub fn save_now(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        if self.retired {
+            return None;
+        }
         self.commit_rewrite_quietly(cx);
         self.autosave = None;
         // Worth waiting a moment for another program to finish writing; if
@@ -791,6 +1060,9 @@ impl ScriptView {
         let changed = self.changed_lines(cx);
         let written = self.applied.as_deref() == Some(self.doc(cx).script());
         match (changed, written) {
+            (0, _) if !matches!(*self.pair, PairState::None) => {
+                format!("No changes since {}", file_name(&self.script_path))
+            }
             (0, _) => "Same as the original".to_string(),
             (1, true) => format!("1 line changed · written to {}", file_name(&output_path(&self.script_path))),
             (1, false) => "1 line changed · not yet written".to_string(),
@@ -861,7 +1133,7 @@ impl ScriptView {
         let doc = self.doc(cx);
         self.numbers = self.session.reviews.iter().map(|review| item_numbers(doc, &review.items)).collect();
         let protect = self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para);
-        let mut decor = Decor { originals: self.originals.clone(), ..Decor::default() };
+        let mut decor = Decor { originals: self.originals.clone(), ghosts: self.ghosts.clone(), ..Decor::default() };
         // Lines move under blocks (accepting one gives its lines new ids), so
         // which item a line belongs to is worked out again each time.
         self.item_by_para = (0..self.session.reviews.len()).map(|r| items_by_para(&self.session, doc, r)).collect();
@@ -1222,14 +1494,14 @@ impl ScriptView {
     /// [`Self::save_session`], waiting up to `wait` for another program
     /// holding the session lock. False: it was still busy; nothing was done.
     fn save_session_within(&mut self, wait: Duration, cx: &mut Context<Self>) -> bool {
-        if self.stuck.is_some() {
+        if self.stuck.is_some() || self.retired {
             return true;
         }
         // Held from looking at the files through writing them, so no other
         // program writes in between (see `scriptorium_fsio::SessionLock`).
         let Some(_lock) = self.lock_session(wait) else { return false };
         match self.disk_plan().1 {
-            Plan::Save => self.write_session(cx),
+            Plan::Save => _ = self.write_session(cx),
             Plan::Reload => self.reload(cx),
             // Finishing the rewrite saves again.
             Plan::Wait => {}
@@ -1237,7 +1509,36 @@ impl ScriptView {
         true
     }
 
-    fn write_session(&mut self, cx: &mut Context<Self>) {
+    /// Write the session file (call it holding the session lock). For the
+    /// version Scriptorium made (or one that may be: its links file can't be
+    /// used), each review's decisions are written into its file first, so
+    /// they outlive a Final Draft save of the version (plan C2), as the
+    /// CLI's save does. If that fails (a review file changed on disk since
+    /// it was read), the app says so and still writes the session file, so
+    /// nothing done here is lost; the next look at the files reloads the
+    /// review and the save after it writes the decisions. (The CLI instead
+    /// refuses the whole save: its command fails and nothing is written.)
+    /// False: the session file wasn't written (said).
+    fn write_session(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.pair.maybe_made() {
+            let doc = &self.editor.read(cx).doc;
+            match versions::write_progress(&self.dir, Rc::make_mut(&mut self.session), doc) {
+                Ok(notes) => {
+                    let new: Vec<String> = notes.into_iter().filter(|n| self.shown_notes.insert(n.clone())).collect();
+                    if !new.is_empty() {
+                        crate::log::warn(&new.join("; "));
+                        self.say(new.join("  "));
+                    }
+                }
+                // A review file changed on disk since it was read: the next
+                // look at the files reloads it, and the save after that
+                // writes its decisions.
+                Err(e) => {
+                    crate::log::warn(&format!("decisions not written into the review files: {e}"));
+                    self.say_error(format!("Couldn't write the decisions into the review files: {e}"));
+                }
+            }
+        }
         let doc = self.doc(cx);
         let len = doc.log().len();
         let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log()).to_json();
@@ -1246,10 +1547,12 @@ impl ScriptView {
                 self.seen_session = Seen::wrote(&json);
                 self.synced = len;
                 self.attached_since_sync.clear();
+                true
             }
             Err(e) => {
                 self.say_error(format!("Couldn't save the session to {}: {e}", self.session_path.display()));
                 cx.notify();
+                false
             }
         }
     }
@@ -1307,6 +1610,9 @@ impl ScriptView {
     /// session file can't be used, only a new version of it (or its removal)
     /// is worth another look.
     fn watch_files(&mut self, cx: &mut Context<Self>) {
+        if self.retired {
+            return;
+        }
         // Another program is writing: look again next time.
         let Some(_lock) = self.lock_session(Duration::ZERO) else { return };
         if self.stuck.is_some() && !self.session_path.exists() {
@@ -1318,6 +1624,17 @@ impl ScriptView {
         }
         let (session_changed, plan) = self.disk_plan();
         if plan == Plan::Reload && (self.stuck.is_none() || session_changed) {
+            self.reload(cx);
+            return;
+        }
+        // The pair: its links file or the other member changed (another
+        // window, the CLI, Final Draft), or a version was just made here.
+        // Loading it again re-places `ROW:` suggestions, so it goes through
+        // the reload, which can't run under a rewrite.
+        if self.rewriting.is_none()
+            && self.stuck.is_none()
+            && (std::mem::take(&mut self.recheck_pair) || self.pair_watch.changed())
+        {
             self.reload(cx);
         }
     }
@@ -1389,6 +1706,9 @@ impl ScriptView {
         let script_name = file_name(&self.script_path);
         // The pair as loaded with this session: reviews reopened here place
         // `ROW:` suggestions (an agent may just have appended some) too.
+        notes.extend(pair_note(&pair));
+        self.pair_watch = PairWatch::of(&pair, &self.dir, &script_name);
+        self.ghosts = Rc::new(pair_ghosts(&pair));
         self.pair = Rc::new(pair);
         let rows = self.pair.resolver(&self.fdx, &replayed.doc);
         let mut still = vec![];
@@ -1736,6 +2056,45 @@ impl ScriptView {
         &self.session
     }
 
+    /// The pair's rows over the live session and document, for the tools'
+    /// `Ctx::links` (`PairState::view`): `None` without a pair, the reason
+    /// when its links file can't be used.
+    pub(crate) fn pair_view<'a>(&'a self, cx: &'a App) -> Option<Result<scriptorium_versions::PairView<'a>, String>> {
+        self.pair.view(&self.fdx, &self.session, self.doc(cx))
+    }
+
+    /// Whether this script is, or may be, the version of its pair
+    /// (`PairState::maybe_made`).
+    pub(crate) fn may_be_version(&self) -> bool {
+        self.pair.maybe_made()
+    }
+
+    /// After the agent's `new_version` (made or refused): say `notes`, and
+    /// load the pair again on the next look at the files.
+    /// Why a version can't be made of this script now: it reads otherwise
+    /// here than in its file (decisions or typing not written), and a
+    /// version is made from the file.
+    pub(crate) fn unwritten_changes(&self, cx: &App) -> Option<String> {
+        let same = self.fdx.write_script(self.doc(cx).script()).is_ok_and(|raw| raw == *self.raw);
+        (!same).then(|| {
+            let name = file_name(&self.script_path);
+            format!(
+                "{name} has changes in Scriptorium that aren't in the file, and a version is made from the file: ask \
+                 the writer to undo them first, or to bring them into {name} in Final Draft (Write .fdx writes {})",
+                file_name(&output_path(&self.script_path))
+            )
+        })
+    }
+
+    pub(crate) fn after_new_version(&mut self, notes: Vec<String>, cx: &mut Context<Self>) {
+        self.recheck_pair = true;
+        let new: Vec<String> = notes.into_iter().filter(|n| self.shown_notes.insert(n.clone())).collect();
+        if !new.is_empty() {
+            self.say(new.join("  "));
+            cx.notify();
+        }
+    }
+
     /// Where review `r`'s file is.
     pub(crate) fn review_file(&self, r: usize) -> PathBuf {
         sessionfile::resolve_path(&self.dir, &self.session.reviews[r].path)
@@ -1808,7 +2167,15 @@ impl ScriptView {
     }
 
     pub fn apply_to_fdx(&mut self, _: &ApplyToFdx, _: &mut Window, cx: &mut Context<Self>) {
+        if self.retired {
+            return;
+        }
         self.commit_rewrite_quietly(cx);
+        if self.pair.is_made() {
+            self.write_in_place(cx);
+            cx.notify();
+            return;
+        }
         let out = output_path(&self.script_path);
         let script = self.doc(cx).script().clone();
         let said = match self.fdx.write_script(&script) {
@@ -1834,6 +2201,102 @@ impl ScriptView {
         self.say(said);
         self.save_session(cx);
         cx.notify();
+    }
+
+    /// Write .fdx on the version Scriptorium made: written over its own file
+    /// (plan, "Writing a version in place"). The autosave and the watch are
+    /// stopped first (`write_in_place` writes the session for the new bytes;
+    /// nothing of this view may save after it); then, under the session
+    /// lock, the session is saved (what other programs wrote reloaded
+    /// first) and `write_in_place` reads everything fresh from disk. Written
+    /// (even if only as far as the `.fdx`): [`Reopen`], and this view is
+    /// retired without a final save. Refused: said, and the watch starts
+    /// again.
+    fn write_in_place(&mut self, cx: &mut Context<Self>) {
+        // The agent may be about to add suggestions to this session.
+        if self.agent.as_ref().is_some_and(|(p, _)| p.read(cx).chat().read(cx).is_running()) {
+            self.say("");
+            self.say_error(AGENT_BUSY);
+            return;
+        }
+        self.autosave = None;
+        self._watch = Task::ready(());
+        let refused = |this: &mut Self, why: String, cx: &mut Context<Self>| {
+            crate::log::warn(&format!("writing {} in place: {why}", this.script_path.display()));
+            this.say("");
+            this.say_error(format!("Not written: {why}"));
+            this._watch = Self::start_watch(cx);
+            // Anything not saved yet is saved as usual.
+            this.schedule_autosave(cx);
+        };
+        let Some(lease) = self.lock_session(scriptorium_fsio::LOCK_WAIT) else {
+            let why = format!("{}'s files are busy in another program; try again.", file_name(&self.script_path));
+            return refused(self, why, cx);
+        };
+        // Save first: what other programs wrote (the pair too, so the
+        // session matches what `write_in_place` opens and numbers), then the
+        // app's own work.
+        if self.disk_plan().1 == Plan::Reload || self.pair_watch.changed() {
+            self.reload(cx);
+        }
+        if let Some(why) = &self.stuck {
+            let why = format!("the session file can't be used ({why}).");
+            return refused(self, why, cx);
+        }
+        if !self.write_session(cx) {
+            return refused(self, "the session couldn't be saved first.".into(), cx);
+        }
+        let raw = self.raw.clone();
+        match versions::write_in_place(&self.script_path, &raw) {
+            Ok(w) => {
+                crate::log::info(&format!("wrote {} in place", w.path.display()));
+                self.retire(
+                    Reopen {
+                        path: w.path,
+                        notice: std::iter::once(w.message).chain(w.notes).collect::<Vec<_>>().join("  "),
+                    },
+                    cx,
+                );
+            }
+            Err(InPlaceError::WrittenButIncomplete { path, message }) => {
+                crate::log::warn(&message);
+                self.retire(Reopen { path, notice: message }, cx);
+            }
+            Err(e) => {
+                // A failed `.fdx` write puts the review files back as they
+                // were read, and they may differ from what the app holds:
+                // load them before anything is saved again.
+                if self.disk_plan().1 == Plan::Reload {
+                    self.reload(cx);
+                }
+                let why = match e {
+                    // Numbered in the session as saved on disk, which is
+                    // this one now (saved, and reloaded if it changed).
+                    InPlaceError::Blocked(items) => {
+                        let doc = self.doc(cx).clone();
+                        let numbered: Vec<(usize, LineChange)> = items
+                            .into_iter()
+                            .filter(|(r, i, _)| self.session.reviews.get(*r).is_some_and(|x| *i < x.items.len()))
+                            .map(|(r, i, how)| (self.number(&doc, r, i), how))
+                            .collect();
+                        versions::blocked(&numbered)
+                    }
+                    other => other.to_string(),
+                };
+                drop(lease);
+                refused(self, why, cx);
+            }
+        }
+    }
+
+    /// Stop for good and ask to be replaced by `reopen` (the window drops
+    /// this view without saving it).
+    fn retire(&mut self, reopen: Reopen, cx: &mut Context<Self>) {
+        self.retired = true;
+        self.autosave = None;
+        self._watch = Task::ready(());
+        self.outline_task = None;
+        cx.emit(reopen);
     }
 
     // ---- actions -------------------------------------------------------------
@@ -2093,12 +2556,19 @@ impl ScriptView {
             View::Review(r) => (format!("Changes · {}", self.session.reviews[r].name), self.rows[r].clone()),
             View::Script => ("Scenes".into(), self.scene_rows.clone()),
         };
-        let marks: Rc<Vec<(Mark, SharedString)>> = Rc::new(match self.view {
+        // (mark, text, dimmed: a blank line, named by what it is for)
+        let marks: Rc<Vec<(Mark, SharedString, bool)>> = Rc::new(match self.view {
             View::Review(r) => self.session.reviews[r]
                 .items
                 .iter()
                 .enumerate()
-                .map(|(i, _)| (mark_of(&self.session, doc, r, i), item_text(&self.session, doc, r, i).into()))
+                .map(|(i, _)| {
+                    let (text, dim) = match item_text(&self.session, doc, r, i) {
+                        t if t.trim().is_empty() => (blank_item_text(&self.session, doc, r, i), true),
+                        t => (t, false),
+                    };
+                    (mark_of(&self.session, doc, r, i), text.into(), dim)
+                })
                 .collect(),
             View::Script => vec![],
         });
@@ -2117,7 +2587,7 @@ impl ScriptView {
                             .text_color(INK_3)
                             .child(div().truncate().child(name.clone())),
                         Row::Item(i) => {
-                            let (mark, text) = &marks[*i];
+                            let (mark, text, dim) = &marks[*i];
                             base.cursor_pointer()
                                 .when(current == Some(*i), |d| d.bg(PAPER).border_1().border_color(ACCENT))
                                 .hover(|s| s.bg(ACCENT_SOFT))
@@ -2129,11 +2599,12 @@ impl ScriptView {
                                         .truncate()
                                         .font_family(SCRIPT_FONT)
                                         .text_size(px(12.))
-                                        .text_color(if *mark == Mark::Pending || *mark == Mark::Outdated {
+                                        .text_color(if !*dim && (*mark == Mark::Pending || *mark == Mark::Outdated) {
                                             INK
                                         } else {
                                             INK_3
                                         })
+                                        .when(*dim, |d| d.italic())
                                         .child(text.clone()),
                                 )
                         }
@@ -2307,6 +2778,7 @@ impl ScriptView {
             return shell.children(body);
         };
 
+        let row = self.row_card_for(r, i);
         let doc = self.doc(cx);
         let item = self.session.item(r, i);
         if item.block {
@@ -2343,6 +2815,9 @@ impl ScriptView {
                 )))
                 .into_any_element(),
         );
+        if let Some(card) = &row {
+            self.row_section(&mut body, card);
+        }
         if item.fuzzy {
             body.push(warn_box("Matched approximately: check this is the right line.", None));
         }
@@ -2370,15 +2845,29 @@ impl ScriptView {
             Status::Rewritten => Some("rewritten".into()),
             Status::Removed => Some("line removed".into()),
         };
-        body.push(label_with("Yours now", chip));
+        let yours = row.as_ref().map_or("Yours now".to_string(), |c| format!("{} now", c.version));
+        body.push(label_with(yours, chip));
         let hi = self.hi.min(item.options.len() - 1);
-        let mine = if status == Status::Pending {
+        let mine = if let Some(card) = row.as_ref().filter(|_| now.trim().is_empty()) {
+            // A placeholder: say so rather than show an empty bar.
+            StyledText::new(card.blank)
+        } else if status == Status::Pending {
             diff_text(&now, &item.options[hi], WordOp::Del, caps)
         } else {
             plain_text(&now, caps)
         };
+        let blank = row.is_some() && now.trim().is_empty();
         body.push(
-            div().border_l_2().border_color(RULE).pl_2().child(script_text(mine).text_color(INK_2)).into_any_element(),
+            div()
+                .border_l_2()
+                .border_color(RULE)
+                .pl_2()
+                .child(if blank {
+                    div().text_size(px(12.)).italic().text_color(INK_3).child(mine)
+                } else {
+                    script_text(mine).text_color(INK_2)
+                })
+                .into_any_element(),
         );
 
         let multi = item.options.len() > 1;
@@ -2428,6 +2917,29 @@ impl ScriptView {
         shell.children(body)
     }
 
+    /// What the card says about item `i`'s row, for a `ROW:` suggestion on
+    /// the version of a loaded pair.
+    fn row_card_for(&self, r: usize, i: usize) -> Option<RowCard> {
+        let row = self.session.item(r, i).row.as_ref()?;
+        let pair = self.pair.loaded().filter(|p| p.this_is_version())?;
+        Some(row_card(&pair.links, row))
+    }
+
+    /// The original's line a `ROW:` suggestion was made for, labelled with
+    /// the original's language: under the card's heading, before the
+    /// version's line.
+    fn row_section(&self, body: &mut Vec<AnyElement>, card: &RowCard) {
+        body.push(label(card.label.clone()));
+        body.push(
+            div()
+                .border_l_2()
+                .border_color(RULE)
+                .pl_2()
+                .child(script_text(plain_text(&card.text, false)).text_color(INK_2))
+                .into_any_element(),
+        );
+    }
+
     /// The card's middle for a block: its heading, why it can't be decided
     /// (if so), the lines it left once decided, and each option as BEFORE
     /// struck in red and AFTER in green, laid out by element kind.
@@ -2461,6 +2973,9 @@ impl ScriptView {
                 )))
                 .into_any_element(),
         );
+        if let Some(card) = self.row_card_for(r, i) {
+            self.row_section(body, &card);
+        }
         if item.fuzzy {
             body.push(warn_box("Matched approximately: check these are the right lines.", None));
         }
@@ -2963,6 +3478,17 @@ fn item_text(session: &Session, doc: &Document, r: usize, i: usize) -> String {
             None => format!("Lines gone: {}", l.text),
         },
     }
+}
+
+/// The sidebar's text for an item on a blank line: the original's line it
+/// is for (`ROW TEXT`), else "(blank Action)".
+fn blank_item_text(session: &Session, doc: &Document, r: usize, i: usize) -> String {
+    let item = session.item(r, i);
+    if let Some(row) = item.row.as_ref().filter(|row| row.texts.iter().any(|t| !t.trim().is_empty())) {
+        return row.texts.join(" ");
+    }
+    let kind = doc.paragraph(item.para).map_or("line".to_string(), |p| p.kind.name().to_string());
+    format!("(blank {kind})")
 }
 
 /// The card's warning for a block, if any: lines gone while pending (and
@@ -3505,5 +4031,346 @@ mod row_tests {
         let dialogue = opened.doc.paragraphs().iter().find(|p| p.kind == ElementKind::Dialogue).unwrap().id;
         assert_eq!(r.items[0].para, dialogue);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Versions in the app (plan step A10): the original's line on the card,
+/// the pair watched, Write .fdx over the version Scriptorium made.
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    use gpui::{TestAppContext, WindowHandle};
+    use std::cell::RefCell;
+
+    const SCRIPT: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<FinalDraft DocumentType="Script" Template="No" Version="5">
+  <Content>
+    <Paragraph Type="Scene Heading">
+      <Text>EXT. FARM HOUSE - NIGHT</Text>
+    </Paragraph>
+    <Paragraph Type="Character">
+      <Text>CESAR</Text>
+    </Paragraph>
+    <Paragraph Type="Dialogue">
+      <Text>I am going to town tomorrow.</Text>
+    </Paragraph>
+  </Content>
+</FinalDraft>
+"#;
+
+    /// `film.fdx`, its version `film.es.fdx` (made by `version new`) and a
+    /// review on the version with one `ROW:` suggestion for the blank
+    /// dialogue, attached; removed on drop.
+    struct Pair {
+        dir: PathBuf,
+        id: String,
+    }
+
+    impl Pair {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("scriptorium-app-version-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let dir = dir.canonicalize().unwrap();
+            std::fs::write(dir.join("film.fdx"), SCRIPT).unwrap();
+            versions::version_new(&dir.join("film.fdx"), "es", Some("en"), None, &mut vec![]).unwrap();
+            let links = std::fs::read_to_string(dir.join("film.es.links.txt")).unwrap();
+            let id = links.lines().find_map(|l| l.strip_prefix("Id: ")).unwrap().to_string();
+            let p = Self { dir, id };
+            std::fs::write(
+                p.at("tr.review.txt"),
+                format!(
+                    "SCRIPT REVIEW v1\nScript: film.es.fdx\nId: tr-1\n{}",
+                    p.entry("[empty]", "Mañana voy al pueblo.", "I am going to town tomorrow.")
+                ),
+            )
+            .unwrap();
+            p
+        }
+        fn at(&self, name: &str) -> PathBuf {
+            self.dir.join(name)
+        }
+        fn read(&self, name: &str) -> String {
+            std::fs::read_to_string(self.at(name)).unwrap()
+        }
+        /// A `ROW:` entry for the line reading `before` (`[empty]`: blank)
+        /// whose original reads `row_text`.
+        fn entry(&self, before: &str, after: &str, row_text: &str) -> String {
+            format!("\n---\nBEFORE: {before}\nAFTER: {after}\nWHY:\nROW: {}\nROW TEXT: {row_text}\n", self.id)
+        }
+        /// An agent appends an entry to the review.
+        fn append(&self, entry: &str) {
+            let mut text = self.read("tr.review.txt");
+            text.push_str(entry);
+            std::fs::write(self.at("tr.review.txt"), text).unwrap();
+        }
+    }
+
+    impl Drop for Pair {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn open(cx: &mut TestAppContext, p: &Pair) -> (WindowHandle<ScriptView>, Entity<ScriptView>) {
+        cx.update(gpui_base::init);
+        let opened = Opened::load(&p.at("film.es.fdx"), &[p.at("tr.review.txt")]).unwrap();
+        let window = cx.add_window(|window, cx| ScriptView::new(opened, window, cx));
+        let view = window.root(cx).unwrap();
+        (window, view)
+    }
+
+    /// Every [`Reopen`] the view emits.
+    fn reopens(cx: &mut TestAppContext, view: &Entity<ScriptView>) -> Rc<RefCell<Vec<Reopen>>> {
+        let got: Rc<RefCell<Vec<Reopen>>> = Rc::default();
+        let g = got.clone();
+        cx.update(|cx| cx.subscribe(view, move |_, e: &Reopen, _| g.borrow_mut().push(e.clone())).detach());
+        got
+    }
+
+    #[test]
+    fn the_card_and_the_blank_lines_show_the_original() {
+        let p = Pair::new("card");
+        let opened = Opened::load(&p.at("film.es.fdx"), &[p.at("tr.review.txt")]).unwrap();
+        let pair = opened.pair.loaded().unwrap();
+        let session = &opened.opened.session;
+        let item = &session.reviews[0].items[0];
+        let card = row_card(&pair.links, item.row.as_ref().unwrap());
+        assert_eq!(
+            card,
+            RowCard {
+                label: "English".into(),
+                version: "Español".into(),
+                text: "I am going to town tomorrow.".into(),
+                blank: "empty \u{2014} not yet translated",
+            }
+        );
+        // The blank dialogue reads the English, dimmed; the sidebar too.
+        let ghosts = pair_ghosts(&opened.pair);
+        assert_eq!(ghosts.get(&item.para).map(String::as_str), Some("I am going to town tomorrow."));
+        assert_eq!(blank_item_text(session, &opened.opened.doc, 0, 0), "I am going to town tomorrow.");
+        // The review's name says what it is.
+        assert_eq!(review_title(Path::new("/x/Translation from English.review.txt")), "Translation from English");
+        assert_eq!(review_title(Path::new("/x/PURPLE LIST.review.txt")), "PURPLE LIST review");
+        // Nothing on the original.
+        let original = Opened::load(&p.at("film.fdx"), &[]).unwrap();
+        assert!(pair_ghosts(&original.pair).is_empty());
+    }
+
+    #[test]
+    fn suggestions_not_placed_on_rows_are_told_in_plain_words() {
+        assert_eq!(
+            row_note("the English line changed since this suggestion", 1),
+            "1 suggestion is for an English line that changed since: ask Claude to translate that row again."
+        );
+        assert_eq!(
+            row_note("the English line changed since this suggestion", 2),
+            "2 suggestions are for English lines that changed since: ask Claude to translate those rows again."
+        );
+        assert_eq!(
+            row_note("its line was changed, split or joined since this suggestion", 1),
+            "1 suggestion isn't shown: its line was changed, split or joined since this suggestion."
+        );
+        // Opened after the English changed: the status bar says so.
+        let p = Pair::new("not-placed");
+        std::fs::write(p.at("film.fdx"), SCRIPT.replace("going to town", "going to the city")).unwrap();
+        let opened = Opened::load(&p.at("film.es.fdx"), &[p.at("tr.review.txt")]).unwrap();
+        assert!(
+            opened.notices.iter().any(|n| n.ends_with(
+                "1 suggestion is for an English line that changed since: ask Claude to translate that row again."
+            )),
+            "{:?}",
+            opened.notices
+        );
+        assert!(!opened.notices.iter().any(|n| n.contains("scriptorium review")), "{:?}", opened.notices);
+    }
+
+    #[test]
+    fn opening_the_original_says_where_to_translate() {
+        let p = Pair::new("original");
+        let opened = Opened::load(&p.at("film.fdx"), &[]).unwrap();
+        assert!(
+            opened.notices.iter().any(|n| n == "Lined up with film.es.fdx: open that file to translate."),
+            "{:?}",
+            opened.notices
+        );
+        let opened = Opened::load(&p.at("film.es.fdx"), &[]).unwrap();
+        assert!(!opened.notices.iter().any(|n| n.starts_with("Lined up")), "{:?}", opened.notices);
+    }
+
+    #[test]
+    fn the_pair_is_loaded_again_only_when_its_files_change() {
+        let p = Pair::new("watch");
+        let opened = Opened::load(&p.at("film.es.fdx"), &[]).unwrap();
+        let mut watch = PairWatch::of(&opened.pair, &p.dir, "film.es.fdx");
+        assert_eq!(watch.files.len(), 2);
+        assert!(!watch.changed(), "as loaded");
+        // Written again with the same bytes: looked at, not loaded again.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(p.at("film.fdx"), SCRIPT).unwrap();
+        std::fs::write(p.at("film.es.links.txt"), p.read("film.es.links.txt")).unwrap();
+        assert!(!watch.changed());
+        assert!(!watch.changed());
+        // Final Draft saves the original.
+        std::fs::write(p.at("film.fdx"), SCRIPT.replace("tomorrow", "today")).unwrap();
+        assert!(watch.changed());
+    }
+
+    #[test]
+    fn a_pair_made_or_saved_while_open_is_noticed() {
+        // Without a pair: a links file coming into the folder.
+        let dir = std::env::temp_dir().join(format!("scriptorium-app-version-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut watch = PairWatch::of(&PairState::None, &dir, "film.fdx");
+        assert!(watch.files.is_empty());
+        assert!(!watch.changed());
+        std::fs::write(dir.join("film.es.links.txt"), "").unwrap();
+        assert!(watch.changed());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A pair that couldn't be used (the other member mid-save): its
+        // file is watched, and it is tried again after a moment anyway.
+        let p = Pair::new("unusable");
+        let unusable = PairState::Unusable {
+            links: Some(p.at("film.es.links.txt")),
+            reason: "film.fdx can't be read".into(),
+            maybe_made: true,
+        };
+        let mut watch = PairWatch::of(&unusable, &p.dir, "film.es.fdx");
+        let watched: Vec<&Path> = watch.files.iter().map(|w| w.path.as_path()).collect();
+        assert_eq!(watched, [p.at("film.es.links.txt").as_path(), p.at("film.fdx").as_path()]);
+        assert!(!watch.changed());
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(p.at("film.fdx"), SCRIPT.replace("tomorrow", "today")).unwrap();
+        assert!(watch.changed(), "Final Draft finished saving");
+        let mut watch = PairWatch::of(&unusable, &p.dir, "film.es.fdx");
+        watch.retry = Some((Instant::now(), 1));
+        assert!(watch.changed(), "due a retry");
+        assert_eq!(watch.retry.map(|(_, n)| n), Some(2));
+    }
+
+    #[gpui::test]
+    fn write_in_place_keeps_an_agents_append_and_reopens_the_written_file(cx: &mut TestAppContext) {
+        let p = Pair::new("write");
+        let (w, view) = open(cx, &p);
+        let got = reopens(cx, &view);
+        w.update(cx, |v, window, cx| {
+            assert!(v.pair.is_made());
+            assert_eq!(v.row_card_for(0, 0).unwrap().label, "English");
+            v.accept(0, window, cx);
+            // An autosave is due when the writer writes.
+            v.schedule_autosave(cx);
+        })
+        .unwrap();
+        // An agent appends a suggestion for the heading (kept in English in
+        // a new version) just before.
+        p.append(&p.entry("EXT. FARM HOUSE - NIGHT", "EXT. GRANJA - NOCHE", "EXT. FARM HOUSE - NIGHT"));
+        w.update(cx, |v, window, cx| v.apply_to_fdx(&ApplyToFdx, window, cx)).unwrap();
+        cx.run_until_parked();
+
+        let reopen = got.borrow().clone();
+        assert_eq!(reopen.len(), 1, "{reopen:?}");
+        assert_eq!(reopen[0].path, p.at("film.es.fdx"));
+        assert_eq!(reopen[0].notice, "Wrote film.es.fdx. Undo starts again from here.");
+        let es = p.read("film.es.fdx");
+        assert!(es.contains("<Text>Mañana voy al pueblo.</Text>"), "{es}");
+        let links = scriptorium_versions::links::parse(&p.read("film.es.links.txt")).unwrap();
+        assert_eq!(links.members[1].hash, sessionfile::hash(&es));
+        // The review holds the decision and the agent's entry.
+        let review = p.read("tr.review.txt");
+        assert!(review.contains("STATUS: accepted"), "{review}");
+        assert!(review.contains("EXT. GRANJA - NOCHE"), "{review}");
+
+        // The old view never saves again: the autosave and the watch are off.
+        let session = p.read("film.es.scriptorium.json");
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        assert_eq!(p.read("film.es.scriptorium.json"), session);
+        view.read_with(cx, |v, _| assert!(v.retired));
+
+        // Reopened: the decision is back and the appended suggestion placed.
+        let opened = Opened::load(&reopen[0].path, &[]).unwrap();
+        let s = &opened.opened.session;
+        assert_eq!(s.reviews.len(), 1);
+        let r = &s.reviews[0];
+        assert_eq!(r.items.len(), 2, "unmatched: {:?}", r.unmatched);
+        let doc = &opened.opened.doc;
+        let statuses: Vec<Status> = (0..2).map(|i| s.status(doc, 0, i)).collect();
+        assert!(statuses.contains(&Status::Accepted(0)), "{statuses:?}");
+        assert!(statuses.contains(&Status::Pending), "{statuses:?}");
+    }
+
+    #[gpui::test]
+    fn a_refused_write_says_why_and_the_view_goes_on(cx: &mut TestAppContext) {
+        let p = Pair::new("refused");
+        let (w, view) = open(cx, &p);
+        let got = reopens(cx, &view);
+        w.update(cx, |v, window, cx| v.accept(0, window, cx)).unwrap();
+        // Final Draft saved the version meanwhile.
+        let opened_raw = p.read("film.es.fdx");
+        let es = opened_raw.replace("<Text></Text>", "<Text>Hola.</Text>");
+        std::fs::write(p.at("film.es.fdx"), &es).unwrap();
+        w.update(cx, |v, window, cx| v.apply_to_fdx(&ApplyToFdx, window, cx)).unwrap();
+        cx.run_until_parked();
+        assert!(got.borrow().is_empty());
+        assert_eq!(p.read("film.es.fdx"), es, "nothing written");
+        view.read_with(cx, |v, _| {
+            assert!(!v.retired);
+            assert!(v.error.contains("film.es.fdx changed since you opened it"), "{}", v.error);
+        });
+        // Its work was saved first, its decision written into the review
+        // too (C2), and saving goes on (the watch is back).
+        let saved = SessionFile::from_json(&p.read("film.es.scriptorium.json")).unwrap();
+        assert!(saved.is_for(&opened_raw));
+        assert!(p.read("tr.review.txt").contains("STATUS: accepted"));
+        view.read_with(cx, |v, _| assert!(v.autosave.is_some(), "saving as usual"));
+        w.update(cx, |v, window, cx| v.undo_redo(false, window, cx)).unwrap();
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        assert!(!p.read("tr.review.txt").contains("STATUS: accepted"), "saved after the refusal");
+    }
+
+    /// The agent's `new_version` on the original is refused while it reads
+    /// otherwise here than in its file (a version is made from the file).
+    #[gpui::test]
+    fn a_version_is_made_only_from_the_original_as_saved(cx: &mut TestAppContext) {
+        let p = Pair::new("unwritten");
+        std::fs::write(
+            p.at("en.review.txt"),
+            "SCRIPT REVIEW v1\nScript: film.fdx\nId: en-1\n\n---\nBEFORE: I am going to town tomorrow.\nAFTER: I go \
+             to town tomorrow.\n",
+        )
+        .unwrap();
+        cx.update(gpui_base::init);
+        let opened = Opened::load(&p.at("film.fdx"), &[p.at("en.review.txt")]).unwrap();
+        let w = cx.add_window(|window, cx| ScriptView::new(opened, window, cx));
+        w.update(cx, |v, window, cx| {
+            assert_eq!(v.unwritten_changes(cx), None);
+            v.accept(0, window, cx);
+            let why = v.unwritten_changes(cx).unwrap();
+            assert!(why.starts_with("film.fdx has changes in Scriptorium that aren't in the file"), "{why}");
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_pair_is_loaded_again_when_the_original_changes(cx: &mut TestAppContext) {
+        let p = Pair::new("reload");
+        let (_w, view) = open(cx, &p);
+        view.read_with(cx, |v, _| assert!(v.session.reviews[0].unmatched.is_empty()));
+        // Final Draft saves the English, the dialogue reworded.
+        let en = SCRIPT.replace("I am going to town tomorrow.", "I am going to the city tomorrow.");
+        std::fs::write(p.at("film.fdx"), &en).unwrap();
+        cx.executor().advance_clock(WATCH_EVERY * 2);
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.pair.loaded().unwrap().other_hash, sessionfile::hash(&en));
+            // The suggestion was made for the old line: no longer placed.
+            let r = &v.session.reviews[0];
+            assert!(r.items.is_empty(), "{:?}", r.items);
+            assert!(r.unmatched[0].why.is_some());
+            assert!(v.notice.contains("film.fdx changed outside Scriptorium"), "{}", v.notice);
+        });
     }
 }

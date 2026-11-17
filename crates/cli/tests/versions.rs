@@ -249,7 +249,7 @@ fn a_changed_original_is_found_again_first() {
     let (text, notes) = p.run(&["rows", &es]).unwrap();
     assert_eq!(
         notes,
-        vec!["film.fdx changed outside Scriptorium: 6 lines found again, 0 changed, 1 new, 0 gone.".to_string()]
+        vec!["film.fdx changed outside Scriptorium: 1 new line; the other lines are where they were.".to_string()]
     );
     assert!(text.contains("#3 nothing on this side  — | ¶2 A dog barks."), "{text}");
     assert!(text.contains("    note: nothing on this side"), "{text}");

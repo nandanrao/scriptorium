@@ -82,6 +82,9 @@ pub struct Decor {
     pub marks: HashMap<ParaId, Mark>,
     /// Paragraphs as opened from the file, to put Final Draft's `*` beside changed lines.
     pub originals: Rc<HashMap<ParaId, Paragraph>>,
+    /// Hints shown dimmed in blank lines: on a version, the original's line
+    /// of the row (what is left to translate).
+    pub ghosts: Rc<HashMap<ParaId, String>>,
 }
 
 /// Whether `p` differs from the file: new, retyped, or with other text.

@@ -423,8 +423,8 @@ Cues and headings are verbatim on both sides of a placeholder version, so
 they anchor step 1 even after translation. Re-find changes only ids, never
 stamps. It writes under the links lock, re-hashing the file just before
 writing (and starting over if it changed again), and says: "PURPLE
-LIST.fdx changed outside Scriptorium: 2,914 lines found again, 3 changed,
-4 new, 1 gone." No fuzzy pass yet (Phase C, if needed).
+LIST.fdx changed outside Scriptorium: 3 lines reworded, 4 new, 1 removed;
+the other lines are where they were." No fuzzy pass yet (Phase C, if needed).
 
 C3's case, as a test: old version `[H, A"", A"", A"", C, D"", H]`, new
 `[H, A"x", A"", A"y", C, D"", H]`: H, C and the second H pair in step 1;
@@ -863,10 +863,15 @@ returns the absolute path; the prompt names only real tools.
   re-find, pass the resolver to `resume_from_disk`; reload the pair when
   the links file or the original changes (`watch_files`, `:1300`); C6's
   notice when the links file no longer matches the open bytes.
-- The card (`render_card`, `:2221`) shows an item's `ROW TEXT` above its
-  options, labelled with the original's language, and when the original's
-  file text differs: "The English line changed since this suggestion",
-  with a word diff (`core::diff::word_diff`, `diff.rs:130`).
+- The card (`render_card`, `:2221`) shows an item's `ROW TEXT` under its
+  heading, labelled with the original's language ("English"), and the
+  version's line as "Español now" ("empty — not yet translated" while
+  blank). *As built:* no "the English line changed" diff on the card: the
+  resolver doesn't place an entry whose original line changed, so it has
+  no card; the status bar says it in plain words instead ("1 suggestion is
+  for an English line that changed since: ask Claude to translate that row
+  again"). Blank version lines show the original's line dimmed, in the
+  script and the change list.
 - Write .fdx (`apply_to_fdx`, `:1789`) on the made member: cancel the
   autosave and the watch task, call `write_in_place`, drop the view
   without saving, open the written file (D4).
