@@ -205,6 +205,7 @@ fn modified(path: &Path) -> Option<std::time::SystemTime> {
 /// Read one review file, to open with the script.
 fn read_review(path: &Path, dir: &Path) -> Result<sessionfile::ReviewSource, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+    scriptorium_review::file::refuse_links(&text).map_err(|e| format!("{}: {e}", file_name(path)))?;
     Ok(sessionfile::ReviewSource { name: review_title(path), path: sessionfile::stored_path(dir, path), text })
 }
 

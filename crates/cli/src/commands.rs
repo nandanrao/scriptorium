@@ -122,6 +122,30 @@ EDITING STRUCTURE
   scriptorium retype <script.fdx> <id> <TYPE> [--json]
   `apply` writes these into the .fdx as far as the writer supports them.
 
+VERSIONS
+  A version is another .fdx lined up with a script row by row (a
+  translation), through a links file beside both (<version stem>.links.txt).
+  scriptorium version new <script.fdx> --lang <code> [--from <code>] [-o <name.fdx>]
+        make a version lined up with the script: scene headings and character
+        names copied, other lines blank, every line linked. Default name
+        \"<stem>.<code>.fdx\" next to the script. --from: the script's language.
+        Run again, it finds what an earlier run made. Prints the version's path.
+  scriptorium versions <script.fdx> [--json]
+        the version lined up with the script: both files and languages, the
+        links file, rows by status, rows new in the original
+  scriptorium rows <script.fdx> [--scene <n|text>] [--needs] [--json]
+        the rows as \"#<row> <status>  ¶ids text | ¶ids text\" (this script
+        first), with any suggestion on the row and its status, and notes.
+        --scene: a scene number (1 = the first) or part of its heading;
+        --needs: only rows the version needs a suggestion for (none when
+        called on the original). With --json: [{row, status, label, needs,
+        note?, this: [{id, kind, text}], other: [...], suggestion?: {review,
+        n, status}}]; status is in_sync, this_changed, other_changed,
+        both_changed, blank or one_sided, from the script called on.
+  Both re-find first: a file changed outside Scriptorium (Final Draft saved
+  it) is found again and the links file updated, with a note. `apply` on
+  the version Scriptorium made needs -o (it is written from the app).
+
 AGENT TOOLS
   scriptorium tool <script.fdx> <name> ['<json args>'] [--review-file <review.txt>]
         run one of the tools the built-in agent and the MCP server use:
@@ -282,6 +306,8 @@ fn run_other(args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
         ["dump", path] => dump(path, false, notes),
         ["dump", path, "--json"] => dump(path, true, notes),
         ["roundtrip", path] => load(path).and_then(|f| roundtrip(&f)),
+        ["version", "new", rest @ ..] => crate::version_new::command(rest, notes),
+        [cmd, rest @ ..] if crate::rows::COMMANDS.contains(cmd) => crate::rows::command(cmd, rest, notes),
         [cmd, rest @ ..] if crate::structure::COMMANDS.contains(cmd) => crate::structure::command(cmd, rest, notes),
         [cmd, rest @ ..] if REVIEW_COMMANDS.contains(cmd) => review_command(cmd, rest, notes),
         ["-h" | "--help" | "help"] => Ok(USAGE.to_string()),
@@ -445,7 +471,7 @@ fn list_reviews(script: &str, notes: &mut Vec<String>) -> Result<String, String>
 /// the session; the result lists each with its suggestion count.
 pub fn add_reviews(script: &str, files: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     let _lock = lock(script)?;
-    let o = Opened::open(script, files, notes)?;
+    let mut o = Opened::open(script, files, notes)?;
     o.save()?;
     let mut out = String::new();
     for &r in &o.given {
@@ -1018,6 +1044,11 @@ pub fn apply(
 ) -> Result<String, String> {
     let _lock = lock(script)?;
     let mut o = Opened::open(script, reviews, notes)?;
+    if output.is_none() && o.pair().is_some_and(|p| p.is_made) {
+        // The version Scriptorium made is written in place, from the app
+        // only (plan, "Writing a version in place"); elsewhere it needs -o.
+        return Err(format!("{} is written from the app: Write .fdx (or give -o <file>)", o.script_name));
+    }
     // Review files named here are attached, as on every command that takes
     // them. Saved before accept_all, which only shapes this output.
     if !o.given.is_empty() {

@@ -28,14 +28,17 @@ pub struct RowQuery<'a> {
     /// (`BEFORE: [empty]` is one empty line). What the host passes depends
     /// on the entry's state:
     /// - pending: `BEFORE` first, then each option;
-    /// - accepted or rewritten: only the text it put there (the chosen
-    ///   option, or `MINE`);
-    /// - kept (rejected): only `BEFORE`.
+    /// - decided in the document (accepted, rewritten): only the text it
+    ///   put there (the chosen option, or its lines as they read now);
+    /// - kept (rejected): only `BEFORE`;
+    /// - decided only in its review file (`STATUS:` not yet applied): the
+    ///   chosen option or `MINE`, then `BEFORE`.
     ///
-    /// The first text counts as `BEFORE`: rows reading it are ranked first.
+    /// Rows reading the first text are ranked first.
     pub texts: &'a [Vec<String>],
-    /// Its `PARA:` ids, if any: among equally ranked candidates, the one
-    /// holding them comes first.
+    /// The ids to prefer: the lines the decision is on now when decided in
+    /// the document, else its `PARA:` ids, if any. Among equally ranked
+    /// candidates, the one holding them comes first.
     pub para: &'a [ParaId],
 }
 

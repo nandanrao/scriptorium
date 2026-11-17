@@ -13,8 +13,9 @@ use scriptorium_core::doc::Event;
 use scriptorium_core::{Document, ElementKind, ParaId, Selection};
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::Session;
-use scriptorium_review::sessionfile::{self, Resumed, SessionFile};
+use scriptorium_review::sessionfile::{self, Resumed, SessionFile, aside};
 
+use crate::versions::Pair;
 use crate::{Folders, write_atomic, write_atomic_no_link};
 
 /// A script, its review files and the saved session: the review files
@@ -37,6 +38,18 @@ pub struct Opened {
     /// Review files newly attached here that had no `Id:` header: their new
     /// text, with the id spliced in, written first when the session is saved.
     pin: Vec<(PathBuf, String)>,
+    /// The saved session, as read, when it was made on other bytes of the
+    /// script and held only decisions the review files have: opened fresh,
+    /// and moved to a set-aside file by the first [`Self::save`].
+    aside: Option<String>,
+    /// The script's pair, if a links file beside it names it. When this is
+    /// the version Scriptorium made, every [`Self::save`] writes progress
+    /// into the review files ([`crate::versions::write_progress`]), so the
+    /// decisions outlive a Final Draft save of the script (plan C2).
+    pair: Option<Pair>,
+    /// Write progress on save: this is the made version, or may be (a links
+    /// file naming it doesn't parse), see [`crate::versions::Found`].
+    progress: bool,
 }
 
 impl Opened {
@@ -101,7 +114,17 @@ impl Opened {
                 }
                 Err(e) => return Err(format!("{}: {e}", at.display())),
             };
+            if !given && scriptorium_review::file::is_links_text(&text) {
+                // Listed in the session, but a links file: never read (or
+                // written) as a review.
+                if !read_only {
+                    notes.push(format!("attached review {stored} is a links file, not a review; left out"));
+                }
+                continue;
+            }
             if given {
+                // A links file named as a review is refused, not attached.
+                scriptorium_review::file::refuse_links(&text).map_err(|e| format!("{stored}: {e}"))?;
                 given_paths.push(stored.clone());
                 if !was_attached.contains(&stored) {
                     newly.push((at, stored.clone()));
@@ -114,7 +137,29 @@ impl Opened {
         // (nested paragraphs in scene summaries and arc beats), and it's cheap.
         let reader_1 = Some(fdx.legacy_script());
         let opened = sessionfile::resume(sources, s, reader_1.as_ref(), &raw, saved.as_deref(), &caps, &script_name);
-        if let Resumed::Discarded(why) = &opened.how {
+        let mut aside = None;
+        if let Resumed::Discarded(_) = &opened.how
+            && !read_only
+            && let Some(saved) = saved.as_deref()
+            && let Ok(file) = SessionFile::from_json(saved)
+            && !file.is_for(&raw)
+        {
+            // The script's bytes changed (Final Draft saved it). Started
+            // fresh from the files; that's safe only if the old session
+            // holds nothing they don't.
+            if let Err(kept) = aside::only_decisions(&file, &opened.doc, &opened.session) {
+                return Err(format!(
+                    "{script_name} changed outside Scriptorium, and its session holds {}. Open the script in the \
+                     Scriptorium app: it keeps that session as a set-aside file and starts fresh.",
+                    kept.what()
+                ));
+            }
+            notes.push(format!(
+                "{script_name} changed outside Scriptorium; its session held only decisions, which are back from the \
+                 review files. The old session file is set aside when a change is saved."
+            ));
+            aside = Some(saved.to_string());
+        } else if let Resumed::Discarded(why) = &opened.how {
             if !read_only {
                 return Err(format!(
                     "can't use the saved session {}: {why}. Move the session file aside to start fresh.",
@@ -152,7 +197,12 @@ impl Opened {
                 pin.push((at, text));
             }
         }
-        Ok(Self { fdx, raw, session, doc, base, session_path, dir, script_name, given, pin })
+        let found = crate::versions::find_pair(&dir, &script_name);
+        if !read_only {
+            notes.extend(found.notes);
+        }
+        let (pair, progress) = (found.pair, found.maybe_made);
+        Ok(Self { fdx, raw, session, doc, base, session_path, dir, script_name, given, pin, aside, pair, progress })
     }
 
     /// Open, and pick the one review a command works on: the file given
@@ -268,13 +318,53 @@ impl Opened {
         Ok(())
     }
 
+    /// The script's pair, if a links file beside it names it.
+    pub fn pair(&self) -> Option<&Pair> {
+        self.pair.as_ref()
+    }
+
     /// Save the session (and pin new reviews' ids into their files first).
-    pub fn save(&self) -> Result<(), String> {
+    /// For the version Scriptorium made (or one that may be, its links file
+    /// broken), each attached review's progress is written into its file
+    /// first too. A session opened fresh because the
+    /// old one no longer fit the script is moved aside first
+    /// ([`crate::set_aside_path`]), never overwritten. The caller holds the
+    /// session lock.
+    pub fn save(&mut self) -> Result<(), String> {
+        // First, before any file is written: only the session file judged at
+        // open is set aside; anything else there now (another program saved
+        // meanwhile) is left alone and this save refused.
+        if let Some(was) = &self.aside {
+            match std::fs::read_to_string(&self.session_path) {
+                Ok(now) if now == *was => {
+                    let to = crate::set_aside_path(&self.dir, &self.script_name);
+                    std::fs::rename(&self.session_path, &to).map_err(|e| {
+                        format!("setting {} aside as {}: {e}", self.session_path.display(), to.display())
+                    })?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(format!(
+                        "{} changed while this command ran; run it again",
+                        self.session_path.display()
+                    ));
+                }
+            }
+            self.aside = None;
+        }
         // Attached now: pin each new review's id into its file, so later edits
-        // to the file don't orphan the decisions stored under that id. First,
-        // so a session never names a review whose file couldn't be pinned.
-        for (at, text) in &self.pin {
+        // to the file don't orphan the decisions stored under that id. Before
+        // the session, so it never names a review whose file couldn't be
+        // pinned. A pin is dropped only once written.
+        while let Some((at, text)) = self.pin.first() {
             write_atomic(at, text.as_bytes()).map_err(|e| format!("{}: {e}", at.display()))?;
+            self.pin.remove(0);
+        }
+        if self.progress {
+            // Notes (files agents can't write) have nowhere to go from here;
+            // their decisions stay in the session, and opening after a Final
+            // Draft save refuses rather than lose them.
+            crate::versions::write_progress(&self.dir, &mut self.session, &self.doc)?;
         }
         let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, self.doc.log()).to_json();
         write_atomic_no_link(&self.session_path, json.as_bytes())

@@ -494,6 +494,7 @@ fn unplaced_error(
         Some(Unplaced::Ambiguous) => format!("the lines at ¶{id} fit several places; give their paragraph ids"),
         Some(Unplaced::Restructured) => format!("the lines at ¶{id} were split, removed or moved apart"),
         Some(Unplaced::Invalid(why)) => format!("the suggestion can't be written to a review file: {why}"),
+        Some(Unplaced::NoRow(why)) => format!("not placed on a row: {why}"),
         // Only set when a review is opened, never by appending.
         Some(Unplaced::RemovedBy { .. }) => format!("the lines at ¶{id} were cut by another review"),
         // Visibility was checked just before against the same line, so this

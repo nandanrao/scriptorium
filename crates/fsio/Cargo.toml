@@ -8,18 +8,29 @@ rust-version.workspace = true
 
 [features]
 # `opened`: a script opened with its saved session and review files, as the
-# CLI and the chat host open it. Pulls in the document and review crates.
-opened = ["dep:scriptorium-core", "dep:scriptorium-fdx", "dep:scriptorium-review"]
+# CLI and the chat host open it. Pulls in the document, review and versions
+# crates.
+opened = ["dep:scriptorium-core", "dep:scriptorium-fdx", "dep:scriptorium-review", "dep:scriptorium-versions"]
 
 [dependencies]
 fs4.workspace = true
 scriptorium-core = { workspace = true, optional = true }
 scriptorium-fdx = { workspace = true, optional = true }
 scriptorium-review = { workspace = true, optional = true }
+scriptorium-versions = { workspace = true, optional = true }
 
 # ENOLCK differs by OS (37 on Linux, 77 on macOS): take it from libc.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Opening a script with its session: only with `opened`.
+[[test]]
+name = "set_aside"
+required-features = ["opened"]
+
+[[test]]
+name = "version_new"
+required-features = ["opened"]
 
 [lints]
 workspace = true

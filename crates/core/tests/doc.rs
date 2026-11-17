@@ -416,3 +416,32 @@ fn applied_ops_replay_to_the_live_document() {
     assert_eq!(paras, live);
     assert_eq!(texts(&doc), texts(&Document::new(sample())), "everything was undone");
 }
+
+#[test]
+fn undo_groups_leave_what_the_log_leaves() {
+    use scriptorium_core::doc::undo_groups;
+    let mut doc = Document::new(sample());
+    let mut sel = at(4, 13);
+    for ch in [" ", "S", "h", "e", " ", "w", "a", "v", "e", "s"] {
+        sel = doc.insert_text(sel, ch).unwrap();
+    }
+    doc.undo();
+    let depth = doc.undo_depth();
+    doc.replace_text(at(3, 0), ParaId(3), "I am going.", &[]).unwrap();
+    doc.replace_text(at(3, 0), ParaId(3), "I am going.", &[("review/r/0", Some("rewritten@3"))]).unwrap();
+    doc.merge_undo_since(depth);
+    doc.replace_text(at(1, 0), ParaId(1), "They play.", &[("review/r/1", Some("accepted:0@1"))]).unwrap();
+    doc.undo();
+    doc.redo();
+    doc.replace_text(at(0, 0), ParaId(0), "INT. BARN - DAY", &[]).unwrap();
+    doc.undo();
+
+    let groups = undo_groups(doc.log());
+    assert_eq!(groups.len(), doc.undo_depth());
+    // The typing (" She", 4 keys), the merged rewrite, the accepted line.
+    assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), vec![4, 2, 1]);
+    let events: Vec<Event> = groups.iter().flatten().map(|t| Event::Edit((*t).clone())).collect();
+    let replayed = Document::replay(sample(), &events).unwrap();
+    assert_eq!(texts(&replayed), texts(&doc));
+    assert_eq!(replayed.all_meta(), doc.all_meta());
+}

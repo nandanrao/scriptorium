@@ -7,6 +7,13 @@
 //! (normalized) match at or after the previous match wins, then an exact match
 //! anywhere, then the most similar unused paragraph (fuzzy, flagged for the
 //! UI). Ported from `script-review/src/core/match.js`.
+//!
+//! **Rows.** An entry with `ROW:` (a suggestion for a row of a pair of
+//! versions) is never matched by `PARA:` or `BEFORE`: only a [`RowResolver`]
+//! the host gives places it, through
+//! [`crate::Review::open_live_with_rows`] and
+//! [`crate::Session::append_entries_with_rows`]. [`match_live`] and
+//! [`match_para`] leave such entries unmatched.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,8 +21,26 @@ pub use scriptorium_core::text::FUZZY_THRESHOLD;
 use scriptorium_core::text::{keep_edge_whitespace, looks_same, normalize, similarity};
 use scriptorium_core::{ElementKind, ParaId, Paragraph};
 
-use crate::file::{Entry, Line};
-use crate::meta::{MetaValue, Now};
+use crate::file::{Entry, FileStatus, Line, RowRef};
+use crate::meta::{MetaValue, Now, Stored};
+
+/// Where a `ROW:` entry may go, from the host (review knows nothing about
+/// links): given the entry's `ROW:`/`ROW TEXT:`, the texts the version's
+/// side may read (each as its lines; the first ranks first) and the ids to
+/// prefer among equal candidates, the live cells (paragraph ids, in order)
+/// it may be placed on, best first; or why there are none, as a sentence
+/// hosts show ("the English line changed since this suggestion").
+///
+/// What review passes as texts: a pending entry, `BEFORE` then each
+/// option; one decided in the document, only the text it put there (the
+/// chosen option, `MINE` as the lines read now, or `BEFORE` if kept), with
+/// the lines it is on as the ids to prefer; one decided only in its file
+/// (`STATUS:`, not yet applied), that text then `BEFORE`, so it is found
+/// whether or not the file's lines already read it.
+pub type RowResolver<'a> = dyn Fn(&RowRef, &[Vec<Line>], &[ParaId]) -> Result<Vec<Vec<ParaId>>, String> + 'a;
+
+/// Why a `ROW:` entry is not placed when no [`RowResolver`] was given.
+pub const NO_LINKS: &str = "this suggestion is for a row of a pair of versions, and no links file is in use";
 
 /// How much the best fuzzy window of a block must beat every other by.
 pub const FUZZY_MARGIN: f64 = 0.05;
@@ -205,7 +230,8 @@ fn before_pass(
     gone_at: &dyn Fn(ParaId) -> Option<usize>,
     out: &mut [Option<Match>],
 ) {
-    let rest: Vec<usize> = (0..entries.len()).filter(|&n| out[n].is_none() && entries[n].is_line()).collect();
+    let rest: Vec<usize> =
+        (0..entries.len()).filter(|&n| out[n].is_none() && entries[n].is_line() && entries[n].row.is_none()).collect();
     if rest.is_empty() {
         return;
     }
@@ -250,7 +276,8 @@ fn match_para_gone(
     let mut out: Vec<Option<Match>> = vec![None; entries.len()];
     for (n, e) in entries.iter().enumerate() {
         // Blocks are matched by B3; until then they find no paragraph.
-        if !e.is_line() {
+        // `ROW:` entries only by the resolver.
+        if !e.is_line() || e.row.is_some() {
             continue;
         }
         let Some(&id) = e.para.first() else { continue };
@@ -357,8 +384,10 @@ pub(crate) enum Miss {
 pub(crate) enum Found {
     Line(Match),
     Block(BlockMatch),
-    /// No place; why, for blocks.
+    /// No place; why, for blocks (and `ROW:` entries whose rows are all taken).
     None(Option<Miss>),
+    /// A `ROW:` entry the resolver found no row for: its reason.
+    NoRow(String),
 }
 
 /// Whether `line` reads as paragraph `f`: same normalized text, same kind if typed.
@@ -618,15 +647,151 @@ impl<'s, 'a> Ctx<'s, 'a> {
     }
 }
 
-/// Whether an entry is matched as a block.
+/// Whether an entry is matched as a block (by `PARA:` or `BEFORE`).
 fn is_block(e: &Entry) -> bool {
-    !e.is_line() && e.invalid.is_none() && !e.before.is_empty()
+    !e.is_line() && e.invalid.is_none() && !e.before.is_empty() && e.row.is_none()
 }
+
+/// Whether an entry is placed only by the [`RowResolver`].
+fn is_row(e: &Entry) -> bool {
+    e.row.is_some() && e.invalid.is_none() && !e.before.is_empty()
+}
+
+impl Ctx<'_, '_> {
+    /// What review passes the resolver for `ROW:` entry `e` (see
+    /// [`RowResolver`]): the texts, the ids to prefer, and the decision it
+    /// is placed from (one made in the document, on lines still live).
+    fn row_query(&self, e: &Entry, v: Option<MetaValue>) -> RowQuery {
+        let before = e.before.clone();
+        if let Some(v) = v
+            && let Some(made_on) = v.paras.clone()
+        {
+            let now = match &v.now {
+                Some(Now::Ids(ids)) => ids.clone(),
+                None => made_on.clone(),
+                Some(Now::After(_) | Now::Start) => vec![],
+            };
+            let live: Option<Vec<&Full>> = now.iter().map(|&id| self.live(id)).collect();
+            if let Some(live) = live.filter(|l| !l.is_empty()) {
+                let text = match v.decision {
+                    Stored::Rejected => Some(before.clone()),
+                    Stored::Rewritten => {
+                        Some(live.iter().map(|f| Line::typed(f.source.kind.clone(), f.para.text)).collect())
+                    }
+                    Stored::Accepted(k) if e.is_line() => {
+                        let b = Line::join(&e.before);
+                        let caps = self.caps(made_on[0]);
+                        e.options.iter().filter(|o| !looks_same(&Line::join(o), &b, caps)).nth(k).cloned()
+                    }
+                    Stored::Accepted(k) => {
+                        let (options, _) = self.options(e, &self.before_paras(e, &made_on));
+                        options.into_iter().nth(k)
+                    }
+                };
+                if let Some(text) = text {
+                    return (vec![text], now, Some(v));
+                }
+            }
+        }
+        let chosen = match (e.status, &e.mine) {
+            (FileStatus::Accepted, _) => e.options.get(e.chosen.unwrap_or(0)).cloned(),
+            (FileStatus::Rewritten, Some(mine)) if !mine.is_empty() => Some(mine.clone()),
+            (FileStatus::Rejected, _) => return (vec![before], e.para.clone(), None),
+            _ => None,
+        };
+        let texts = match chosen {
+            Some(c) => vec![c, before],
+            None => std::iter::once(before).chain(e.options.iter().cloned()).collect(),
+        };
+        (texts, e.para.clone(), None)
+    }
+
+    /// `ROW:` entry `e` on `cell` (a candidate the resolver gave), or why
+    /// it can't go there (a sentence, see [`Found::NoRow`]): a line entry
+    /// goes on one live editable line; a block decided in the document
+    /// (`v`) only on a cell holding the lines its decision left (`now`), a
+    /// pending one on as many lines as its `BEFORE`.
+    fn on_row(
+        &self,
+        e: &Entry,
+        cell: &[ParaId],
+        v: Option<&MetaValue>,
+        now: &[ParaId],
+        used: &HashSet<ParaId>,
+    ) -> Result<Found, &'static str> {
+        const MOVED: &str = "the row's lines were split, removed or moved apart since this suggestion";
+        if e.is_line() {
+            let [id] = cell else {
+                return Err("the row now has several lines here, and this suggestion is for one");
+            };
+            let &li = self.live_at.get(id).ok_or(MOVED)?;
+            let lp = &self.live[li].para;
+            if !lp.editable {
+                return Err("the row's line can't take suggestions");
+            }
+            let b = Line::join(&e.before);
+            let before = if normalize(lp.text) == normalize(&b) {
+                lp.text.to_string()
+            } else {
+                keep_edge_whitespace(lp.text, &b)
+            };
+            return Ok(Found::Line(make_match(li, lp, before, false, 1.0, e)));
+        }
+        let m = match v.and_then(|v| v.paras.as_deref().map(|on| (v, on))) {
+            Some(_) if !now.iter().all(|id| cell.contains(id)) => {
+                return Err("the row's lines aren't the ones this suggestion's decision left");
+            }
+            Some((v, on)) => self.decided(e, on, v, used),
+            None if cell.len() == e.before.len() => self.placed(e, cell, false),
+            None => return Err("the row has a different number of lines than this suggestion"),
+        };
+        m.map(Found::Block).map_err(|_| MOVED)
+    }
+
+    /// Where `ROW:` entry `e` goes, given its [`RowQuery`] (see
+    /// [`Self::row_query`]): the first candidate from `rows` none of whose
+    /// lines is in `used` and that fits it.
+    fn by_row(&self, e: &Entry, q: RowQuery, rows: Option<&RowResolver>, used: &HashSet<ParaId>) -> Found {
+        let (Some(rows), Some(row)) = (rows, e.row.as_ref()) else { return Found::NoRow(NO_LINKS.into()) };
+        let (texts, prefer, v) = q;
+        let cells = match rows(row, &texts, &prefer) {
+            Ok(cells) => cells,
+            Err(why) => return Found::NoRow(why),
+        };
+        let (mut taken, mut unfit) = (None, None);
+        for cell in cells.iter().filter(|c| !c.is_empty()) {
+            if let Some(&t) = cell.iter().find(|id| used.contains(id)) {
+                taken.get_or_insert(t);
+                continue;
+            }
+            match self.on_row(e, cell, v.as_ref(), &prefer, used) {
+                Ok(found) => return found,
+                Err(why) => {
+                    unfit.get_or_insert(why);
+                }
+            }
+        }
+        match (taken, unfit) {
+            (Some(t), _) => Found::None(Some(Miss::Taken(t))),
+            (None, Some(why)) => Found::NoRow(why.to_string()),
+            (None, None) => Found::None(Some(Miss::Missing)),
+        }
+    }
+}
+
+/// What review passes the resolver for one `ROW:` entry: the texts, the ids
+/// to prefer, and the document decision it is placed from.
+type RowQuery = (Vec<Vec<Line>>, Vec<ParaId>, Option<MetaValue>);
 
 /// Every entry of a review matched against the script: line entries as
 /// [`match_live`] (or [`match_para`] with `para_only`) does, blocks as the
 /// module docs say. `decided(n)` is entry `n`'s stored decision, if any.
 /// Paragraphs in `used` take no entry.
+///
+/// `ROW:` entries go first, and only through `rows` (none: not found, with
+/// [`NO_LINKS`]): those decided in the document, then those decided only in
+/// their file, then pending ones, each on the first candidate not already
+/// taken.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn match_review(
     original: &[Full],
@@ -637,9 +802,39 @@ pub(crate) fn match_review(
     has_meta: &dyn Fn(usize, ParaId) -> bool,
     decided: &dyn Fn(usize) -> Option<MetaValue>,
     gone_at: &dyn Fn(ParaId) -> Option<usize>,
+    rows: Option<&RowResolver>,
 ) -> Vec<Found> {
     let ctx = Ctx::new(original, live, gone_at);
     let mut used = used.clone();
+    // 0. `ROW:` entries, by the resolver alone: decided ones first, so a
+    // pending one never takes the row a decided one is on.
+    let mut by_row: Vec<Option<Found>> = vec![None; entries.len()];
+    // Three tiers, each in file order: decided in the document (on lines
+    // still live), then decided only in the file's `STATUS`, then pending.
+    let mut queue: Vec<(u8, usize, RowQuery)> = (0..entries.len())
+        .filter(|&n| is_row(&entries[n]))
+        .map(|n| {
+            let q = ctx.row_query(&entries[n], decided(n));
+            let tier = match (&q.2, entries[n].status) {
+                (Some(_), _) => 0,
+                (None, FileStatus::Pending) => 2,
+                (None, _) => 1,
+            };
+            (tier, n, q)
+        })
+        .collect();
+    queue.sort_by_key(|&(tier, n, _)| (tier, n));
+    for (_, n, q) in queue {
+        let found = ctx.by_row(&entries[n], q, rows, &used);
+        match &found {
+            Found::Line(m) => {
+                used.insert(m.para);
+            }
+            Found::Block(m) => used.extend(m.paras.iter().copied()),
+            Found::None(_) | Found::NoRow(_) => {}
+        }
+        by_row[n] = Some(found);
+    }
     let mut blocks: Vec<Option<Result<BlockMatch, Miss>>> = vec![None; entries.len()];
     type Slot = Option<Result<BlockMatch, Miss>>;
     let take = |blocks: &mut [Slot], n: usize, r: Result<BlockMatch, Miss>, used: &mut HashSet<ParaId>| {
@@ -699,12 +894,14 @@ pub(crate) fn match_review(
         .into_iter()
         .zip(blocks)
         .zip(entries)
-        .map(|((l, b), e)| match (l, b) {
-            (Some(m), _) => Found::Line(m),
-            (None, Some(Ok(m))) => Found::Block(m),
-            (None, Some(Err(miss))) => Found::None(Some(miss)),
-            (None, None) if is_block(e) && para_only => Found::None(Some(Miss::NoPara)),
-            (None, None) => Found::None(None),
+        .zip(by_row)
+        .map(|(((l, b), e), row)| match (l, b, row) {
+            (_, _, Some(found)) => found,
+            (Some(m), ..) => Found::Line(m),
+            (None, Some(Ok(m)), _) => Found::Block(m),
+            (None, Some(Err(miss)), _) => Found::None(Some(miss)),
+            (None, None, _) if is_block(e) && para_only => Found::None(Some(Miss::NoPara)),
+            (None, None, _) => Found::None(None),
         })
         .collect()
 }

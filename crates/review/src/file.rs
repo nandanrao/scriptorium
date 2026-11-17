@@ -82,6 +82,34 @@
 //!
 //! A file holding any valid block is written as `SCRIPT REVIEW v2`; one
 //! without (placeholders don't count) stays v1, byte for byte as before.
+//!
+//! # Rows (versions)
+//!
+//! A suggestion for a row of a pair of versions (see the links file of
+//! `scriptorium-versions`) names the row and what its other side read:
+//!
+//! ```text
+//! ---
+//! BEFORE: [empty]
+//! PARA: 18
+//! AFTER: Mirá cómo lo hago.
+//! WHY: Keeps her defiance.
+//! ROW: lk-5k2m9q                    (the links file's Id)
+//! ROW TEXT: Watch me.               (one per paragraph on the other side)
+//! ```
+//!
+//! - `ROW:` and `ROW TEXT:` only in capitals. `ROW TEXT:` with nothing after
+//!   it is an empty paragraph; no `ROW TEXT:` lines, an empty other side.
+//!   Review keeps them opaque ([`RowRef`]); the host places such entries.
+//! - `BEFORE: [empty]` is one blank line, valid only with `ROW:`. In a block
+//!   a blank line is typed with nothing after it (`DIALOGUE:`).
+//! - No header change: a file with rows stays v1 unless it has blocks. The
+//!   writer always puts a `WHY:` line (empty if need be) right before the
+//!   `ROW` lines, so builds up to 0.4 read them as a continuation of `WHY`,
+//!   never as option text.
+//! - Since rows: a wrapped line starting with a capitalised `ROW:` or
+//!   `ROW TEXT:` is a field, not a continuation; `BEFORE: [empty]` without
+//!   `ROW:` (and a plain empty `BEFORE:`) is a placeholder, not reviewed.
 
 use std::sync::LazyLock;
 
@@ -94,13 +122,32 @@ pub const FORMAT_HEADER_V2: &str = "SCRIPT REVIEW v2";
 
 static FIELD_RE: LazyLock<Regex> =
     // `PARA:` only in capitals: "Para: ..." starts many a wrapped Spanish line.
-    LazyLock::new(|| Regex::new(r"^\s*((?i:BEFORE|AFTER|WHY|STATUS|CHOSEN|MINE)|PARA)\s*:\s?(.*)$").unwrap());
+    // `ROW` and `ROW TEXT` too: "Row:" can start a wrapped line.
+    LazyLock::new(|| {
+        Regex::new(r"^\s*((?i:BEFORE|AFTER|WHY|STATUS|CHOSEN|MINE)|PARA|ROW TEXT|ROW)\s*:\s?(.*)$").unwrap()
+    });
 static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\s*(Script|Reviewer|Id)\s*:\s*(.*)$").unwrap());
 static ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._-]{1,64}$").unwrap());
 static SEPARATOR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*-{3,}\s*$").unwrap());
 
 /// The marker for an empty list of lines (a cut).
 const CUT: &str = "[cut]";
+/// The marker for one blank line in a one-line `BEFORE` (valid only with `ROW:`).
+const EMPTY: &str = "[empty]";
+
+/// How a links file's format line starts (`SCRIPTORIUM LINKS v1`).
+pub const LINKS_HEADER: &str = "SCRIPTORIUM LINKS";
+
+/// The `ROW:` and `ROW TEXT:` fields: the row of a pair of versions a
+/// suggestion is for. Opaque to review; the host's resolver reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RowRef {
+    /// The links file's `Id:`.
+    pub id: String,
+    /// Each paragraph on the row's other side, in order: its normalized text
+    /// when the suggestion was made (possibly empty). Empty: no paragraphs.
+    pub texts: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileStatus {
@@ -181,6 +228,8 @@ pub struct Entry {
     /// For an [`Self::invalid`] entry: the block as written (without its
     /// `---`), written back unchanged.
     pub verbatim: Option<String>,
+    /// `ROW:` / `ROW TEXT:`: a suggestion for a row of a pair of versions.
+    pub row: Option<RowRef>,
 }
 
 impl Entry {
@@ -226,10 +275,32 @@ impl Entry {
     /// line in a several-line `BEFORE`; an untyped block line whose text
     /// would read as something else (empty, `TYPE: text`, a field, `---`, a
     /// fence or `#` comment); a one-line untyped `AFTER`/`MINE` that is empty
-    /// or reads as `[cut]`.
+    /// or reads as `[cut]` or `[empty]`; a blank one-line `BEFORE` (`[empty]`) without
+    /// `ROW:`, or one whose text is `[empty]`; a `ROW:` id that isn't an id
+    /// (`[A-Za-z0-9._-]{1,64}`), or a `ROW TEXT` that isn't one trimmed line.
     pub fn check(&self) -> Result<(), String> {
         if self.before.is_empty() {
             return Err("BEFORE has no lines".into());
+        }
+        if let [Line { kind: None, text }] = self.before.as_slice() {
+            let t = one_line(text);
+            if t.trim().is_empty() && self.row.is_none() {
+                return Err("BEFORE [empty] (a blank line) needs ROW:".into());
+            }
+            if t.trim().is_empty() && !text.is_empty() {
+                return Err(format!("BEFORE {text:?} would read back as \"\" (a blank line is empty)"));
+            }
+            if t.trim() == EMPTY {
+                return Err(format!("BEFORE {text:?} would read back as a blank line"));
+            }
+        }
+        if let Some(row) = &self.row {
+            if !ID_RE.is_match(&row.id) {
+                return Err(format!("ROW {:?} isn't a links id (letters, digits, . _ -; up to 64)", row.id));
+            }
+            if let Some(t) = row.texts.iter().find(|t| t.contains(['\n', '\r']) || t.trim() != t.as_str()) {
+                return Err(format!("ROW TEXT {t:?} would read back differently (one trimmed line)"));
+            }
         }
         if self.options.is_empty() {
             return Err("there is no AFTER".into());
@@ -265,7 +336,7 @@ impl Entry {
                         return Err("every AFTER line needs a TYPE when BEFORE has several lines".into());
                     }
                     let t = one_line(text);
-                    if (name == "AFTER" && t.trim().is_empty()) || t.trim() == CUT {
+                    if (name == "AFTER" && t.trim().is_empty()) || t.trim() == CUT || t.trim() == EMPTY {
                         return Err(format!("{name} {text:?} would read back differently (use [cut] for a cut)"));
                     }
                 }
@@ -307,6 +378,10 @@ struct Block {
     status: Option<String>,
     chosen: Option<String>,
     mine: Option<Field>,
+    row: Option<String>,
+    row_text: Vec<String>,
+    /// Why the `ROW` fields can't be read, if they can't.
+    row_error: Option<String>,
     /// The block's lines as written, for [`Entry::verbatim`].
     raw: Vec<String>,
 }
@@ -319,6 +394,8 @@ impl Block {
             "why" => return Some(self.why.get_or_insert_with(String::new)),
             "status" => return Some(self.status.get_or_insert_with(String::new)),
             "chosen" => return Some(self.chosen.get_or_insert_with(String::new)),
+            "row" => return Some(self.row.get_or_insert_with(String::new)),
+            "row text" => return self.row_text.last_mut(),
             "before" => self.before.as_mut(),
             "after" => self.after.last_mut(),
             _ => self.mine.as_mut(),
@@ -427,6 +504,10 @@ impl ReviewFile {
                     "before" => block.before = Some(field),
                     "after" => block.after.push(field),
                     "mine" => block.mine = Some(field),
+                    "row text" => block.row_text.push(value_of(field)),
+                    "row" if block.row.is_some() => {
+                        block.row_error.get_or_insert_with(|| "more than one ROW".into());
+                    }
                     _ => *block.text_mut(&key).expect("a text field") = value_of(field),
                 }
                 continue;
@@ -471,6 +552,7 @@ impl ReviewFile {
         let n = self.entries.len() + 1;
         let mut errors: Vec<String> = vec![];
         let lines_of = |name: &str, f: Field, errors: &mut Vec<String>| match f {
+            Field::Text(t) if name == "BEFORE" && t.trim() == EMPTY => Some(vec![Line::untyped("")]),
             Field::Text(t) => Some(vec![Line::untyped(t.trim())]),
             Field::Lines(Ok(ls)) => Some(ls),
             Field::Lines(Err(e)) => {
@@ -504,6 +586,18 @@ impl ReviewFile {
                 vec![]
             })
         });
+        let row = match (b.row, b.row_text.is_empty()) {
+            (Some(id), _) => Some(RowRef {
+                id: id.trim().to_string(),
+                texts: b.row_text.iter().map(|t| t.trim().to_string()).collect(),
+            }),
+            (None, true) => None,
+            (None, false) => {
+                errors.push("ROW TEXT without ROW".into());
+                None
+            }
+        };
+        errors.extend(b.row_error);
         if errors.is_empty() {
             let line_entry =
                 Entry { before: before.clone(), options: options.clone(), mine: mine.clone(), ..Entry::default() };
@@ -515,7 +609,7 @@ impl ReviewFile {
                 ));
                 para.clear();
             }
-            let candidate = Entry { para: para.clone(), ..line_entry };
+            let candidate = Entry { para: para.clone(), row: row.clone(), ..line_entry };
             if let Err(e) = candidate.check() {
                 errors.push(e);
             }
@@ -534,6 +628,7 @@ impl ReviewFile {
                 why,
                 invalid: Some(reason),
                 verbatim: Some(raw.join("\n")),
+                row,
                 ..Entry::default()
             });
             return;
@@ -552,7 +647,18 @@ impl ReviewFile {
             }
             n.map(|n| n - 1)
         });
-        self.entries.push(Entry { para, before, options, why, status, chosen, mine, invalid: None, verbatim: None });
+        self.entries.push(Entry {
+            para,
+            before,
+            options,
+            why,
+            status,
+            chosen,
+            mine,
+            invalid: None,
+            verbatim: None,
+            row,
+        });
     }
 
     /// Write the file back out. Round-trips through [`ReviewFile::parse`]
@@ -589,8 +695,9 @@ fn one_line(s: &str) -> String {
     s.split('\n').map(str::trim).collect::<Vec<_>>().join(" ")
 }
 
-/// `KEY: text` for one untyped line, `KEY: [cut]` for none, else `KEY:` and
-/// one indented `TYPE: text` (or, in `BEFORE`, untyped `text`) per line.
+/// `KEY: text` for one untyped line (`BEFORE: [empty]` for a blank one),
+/// `KEY: [cut]` for none, else `KEY:` and one indented `TYPE: text` (`TYPE:`
+/// for a blank line; in `BEFORE`, untyped `text`) per line.
 ///
 /// Not every list can be written: an untyped line first in a block, or one
 /// whose text reads as `TYPE: text`, a field, `---` or a `#` comment, reads
@@ -599,13 +706,17 @@ fn one_line(s: &str) -> String {
 fn write_lines(key: &str, lines: &[Line], out: &mut Vec<String>) {
     match lines {
         [] => out.push(format!("{key}: {CUT}")),
+        [Line { kind: None, text }] if key == "BEFORE" && one_line(text).trim().is_empty() => {
+            out.push(format!("{key}: {EMPTY}"))
+        }
         [Line { kind: None, text }] => out.push(format!("{key}: {}", one_line(text))),
         _ => {
             out.push(format!("{key}:"));
             for l in lines {
+                let text = one_line(&l.text);
                 out.push(match &l.kind {
-                    Some(k) => format!("  {}: {}", k.name().to_uppercase(), one_line(&l.text)),
-                    None => format!("  {}", one_line(&l.text)),
+                    Some(k) => format!("  {}: {text}", k.name().to_uppercase()),
+                    None => format!("  {text}"),
                 });
             }
         }
@@ -632,6 +743,16 @@ fn write_entry(e: &Entry, out: &mut Vec<String>) {
     }
     if !e.why.is_empty() {
         out.push(format!("WHY: {}", one_line(&e.why)));
+    } else if e.row.is_some() {
+        // Builds up to 0.4 fold the ROW lines into this, not into an option.
+        out.push("WHY:".into());
+    }
+    if let Some(row) = &e.row {
+        out.push(format!("ROW: {}", row.id));
+        for t in &row.texts {
+            let t = one_line(t);
+            out.push(if t.trim().is_empty() { "ROW TEXT:".into() } else { format!("ROW TEXT: {t}") });
+        }
     }
     if e.status != FileStatus::Pending {
         out.push(format!("STATUS: {}", e.status.name()));
@@ -674,6 +795,28 @@ pub fn is_review_text(text: &str) -> bool {
         .map(|l| l.strip_suffix('\r').unwrap_or(l))
         .find(|l| !l.trim().is_empty() && !skipped(l))
         .is_some_and(is_format_line)
+}
+
+/// Whether `text` is a links file (its first line that isn't blank, a
+/// comment or a fence starts with `SCRIPTORIUM LINKS`). Hosts attaching a
+/// review a person named refuse such a file with [`LINKS_REFUSAL`].
+pub fn is_links_text(text: &str) -> bool {
+    let body = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    body.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .find(|l| !l.trim().is_empty() && !skipped(l))
+        .is_some_and(|l| {
+            let t = l.trim_start();
+            t.get(..LINKS_HEADER.len()).is_some_and(|h| h.eq_ignore_ascii_case(LINKS_HEADER))
+        })
+}
+
+/// What a host says when a links file is given as a review.
+pub const LINKS_REFUSAL: &str = "this is a links file, not a review";
+
+/// `Err` with [`LINKS_REFUSAL`] if `text` is a links file ([`is_links_text`]).
+pub fn refuse_links(text: &str) -> Result<(), String> {
+    if is_links_text(text) { Err(LINKS_REFUSAL.into()) } else { Ok(()) }
 }
 
 fn is_format_line(bare: &str) -> bool {
@@ -1376,5 +1519,219 @@ mod typed_lines_tests {
         let err = parse_typed_lines("BANANA: x", Case::Any).unwrap_err();
         assert!(err.contains("unknown element type \"BANANA\""), "{err}");
         assert!(parse_typed_lines("action: x", Case::Upper).is_err());
+    }
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+
+    fn opts(e: &Entry) -> Vec<String> {
+        e.options.iter().map(|o| Line::join(o)).collect()
+    }
+
+    fn row(id: &str, texts: &[&str]) -> Option<RowRef> {
+        Some(RowRef { id: id.into(), texts: texts.iter().map(|t| t.to_string()).collect() })
+    }
+
+    const ROWS: &str = "SCRIPT REVIEW v1
+Script: PURPLE LIST.es.fdx
+Id: tr-1
+
+---
+BEFORE: [empty]
+PARA: 18
+AFTER: Mirá cómo lo hago.
+AFTER: Ya vas a ver.
+WHY: Keeps her defiance; 2 is softer.
+ROW: lk-5k2m9q
+ROW TEXT: Watch me.
+---
+BEFORE: TOMÁS
+AFTER: TOMÁS
+WHY:
+ROW: lk-5k2m9q
+ROW TEXT: TOMÁS
+STATUS: accepted
+CHOSEN: 1
+---
+BEFORE: [empty]
+AFTER: Algo.
+WHY:
+ROW: lk-5k2m9q
+ROW TEXT:
+ROW TEXT: Second.
+---
+BEFORE: [empty]
+AFTER: Nada.
+WHY:
+ROW: lk-5k2m9q
+";
+
+    #[test]
+    fn rows_and_empty_parse_and_round_trip_byte_for_byte() {
+        let r = ReviewFile::parse(ROWS);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(r.entries.len(), 4);
+        let e = &r.entries[0];
+        assert_eq!(e.before, [Line::untyped("")]);
+        assert_eq!(e.para, [ParaId(18)]);
+        assert_eq!(opts(e), ["Mirá cómo lo hago.", "Ya vas a ver."]);
+        assert_eq!(e.why, "Keeps her defiance; 2 is softer.");
+        assert_eq!(e.row, row("lk-5k2m9q", &["Watch me."]));
+        assert!(e.is_line());
+        assert_eq!(r.entries[1].row, row("lk-5k2m9q", &["TOMÁS"]));
+        assert_eq!((r.entries[1].status, r.entries[1].chosen), (FileStatus::Accepted, Some(0)));
+        assert_eq!(r.entries[2].row, row("lk-5k2m9q", &["", "Second."]));
+        assert_eq!(r.entries[3].row, row("lk-5k2m9q", &[]));
+        // Rows don't make a file v2.
+        assert_eq!(r.serialize(), ROWS);
+    }
+
+    #[test]
+    fn typed_blank_block_line_round_trips() {
+        let e = Entry {
+            before: vec![Line::typed(ElementKind::Character, "TOMÁS"), Line::typed(ElementKind::Dialogue, "")],
+            options: vec![vec![
+                Line::typed(ElementKind::Character, "TOMÁS"),
+                Line::typed(ElementKind::Dialogue, "No."),
+            ]],
+            row: row("lk-1", &["TOMAS", "No."]),
+            ..Entry::default()
+        };
+        assert_eq!(e.check(), Ok(()));
+        let f = ReviewFile { entries: vec![e], ..ReviewFile::default() };
+        let text = f.serialize();
+        assert!(text.contains("\n  DIALOGUE: \n"), "{text}");
+        assert!(text.starts_with(FORMAT_HEADER_V2), "{text}");
+        let back = ReviewFile::parse(&text);
+        assert!(back.warnings.is_empty(), "{:?}", back.warnings);
+        assert_eq!(back.entries, f.entries);
+        assert_eq!(back.serialize(), text);
+    }
+
+    #[test]
+    fn empty_needs_row() {
+        let blank = Entry::single("", ["Algo."]);
+        assert!(blank.check().unwrap_err().contains("needs ROW"));
+        assert_eq!(Entry { row: row("lk-1", &["Something."]), ..blank.clone() }.check(), Ok(()));
+        // The literal text "[empty]" would read back as a blank line.
+        let literal = Entry { row: row("lk-1", &[]), ..Entry::single("[empty]", ["x"]) };
+        assert!(literal.check().is_err());
+        // In a file: kept in its slot, not reviewed, written back as it was.
+        let text = "SCRIPT REVIEW v1\n\n---\nBEFORE: [empty]\nAFTER: Algo.\n---\nBEFORE: a\nAFTER: b\n";
+        let r = ReviewFile::parse(text);
+        assert_eq!(r.entries.len(), 2);
+        assert!(r.entries[0].invalid.as_deref().is_some_and(|w| w.contains("needs ROW")), "{:?}", r.entries[0]);
+        assert!(r.entries[1].invalid.is_none());
+        assert_eq!(r.serialize(), text);
+    }
+
+    #[test]
+    fn bad_rows_are_placeholders() {
+        for (body, why) in [
+            ("BEFORE: a\nAFTER: b\nROW TEXT: x\n", "ROW TEXT without ROW"),
+            ("BEFORE: a\nAFTER: b\nROW: lk-1\nROW: lk-2\n", "more than one ROW"),
+            ("BEFORE: a\nAFTER: b\nROW: not an id\n", "isn't a links id"),
+        ] {
+            let text = format!("SCRIPT REVIEW v1\n\n---\n{body}");
+            let r = ReviewFile::parse(&text);
+            assert_eq!(r.entries.len(), 1, "{body}");
+            assert!(r.entries[0].invalid.as_deref().is_some_and(|w| w.contains(why)), "{body}: {:?}", r.entries[0]);
+            assert_eq!(r.serialize(), text);
+        }
+        let bad_text = Entry { row: row("lk-1", &["two\nlines"]), ..Entry::single("a", ["b"]) };
+        assert!(bad_text.check().is_err());
+        let untrimmed = Entry { row: row("lk-1", &[" x"]), ..Entry::single("a", ["b"]) };
+        assert!(untrimmed.check().is_err());
+    }
+
+    #[test]
+    fn row_fields_are_capitals_only_and_wrap() {
+        // "Row:" in lower case is a wrapped line of the field above.
+        let r = ReviewFile::parse("---\nBEFORE: a\nAFTER: b\nWHY: w\nRow: of seats\nROW: lk-1\nROW TEXT: one\n  two\n");
+        let e = &r.entries[0];
+        assert_eq!(e.why, "w Row: of seats");
+        assert_eq!(e.row, row("lk-1", &["one two"]));
+        // ROW ends a block.
+        let r = ReviewFile::parse("---\nBEFORE:\n  ACTION: a\nAFTER:\n  ACTION: b\nROW: lk-1\n");
+        assert_eq!(r.entries[0].options, [vec![Line::typed(ElementKind::Action, "b")]]);
+        assert_eq!(r.entries[0].row, row("lk-1", &[]));
+    }
+
+    #[test]
+    fn append_block_writes_rows() {
+        let e = Entry { para: vec![ParaId(18)], row: row("lk-1", &["Watch me."]), ..Entry::single("", ["Mirá."]) };
+        let text = append_block("", &e, "k");
+        assert_eq!(
+            text,
+            "SCRIPT REVIEW v1\nId: k\n\n---\nBEFORE: [empty]\nPARA: 18\nAFTER: Mirá.\nWHY:\nROW: lk-1\nROW TEXT: Watch me.\n"
+        );
+        assert_eq!(ReviewFile::parse(&text).entries, [e]);
+    }
+
+    /// `WHY:` always comes right before `ROW`, so builds up to 0.4 fold the
+    /// ROW lines into WHY and never into an option or `MINE`.
+    #[test]
+    fn row_lines_follow_a_why_line() {
+        let e = Entry {
+            status: FileStatus::Rewritten,
+            mine: Some(vec![Line::untyped("Mío.")]),
+            row: row("lk-1", &["Watch me.", ""]),
+            ..Entry::single("", ["Mirá."])
+        };
+        let f = ReviewFile { entries: vec![e], ..ReviewFile::default() };
+        let text = f.serialize();
+        assert!(
+            text.ends_with(
+                "---\nBEFORE: [empty]\nAFTER: Mirá.\nWHY:\nROW: lk-1\nROW TEXT: Watch me.\nROW TEXT:\nSTATUS: \
+                 rewritten\nMINE: Mío.\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(ReviewFile::parse(&text).entries, f.entries);
+        // No WHY line without a row, as before.
+        let plain = ReviewFile { entries: vec![Entry::single("a", ["b"])], ..ReviewFile::default() };
+        assert!(!plain.serialize().contains("WHY"));
+    }
+
+    #[test]
+    fn empty_after_and_mine_are_refused() {
+        let row = row("lk-1", &[]);
+        let after = Entry { row: row.clone(), ..Entry::single("a", ["[empty]"]) };
+        assert!(after.check().is_err());
+        let mine = Entry { row: row.clone(), mine: Some(vec![Line::untyped("[empty]")]), ..Entry::single("a", ["b"]) };
+        assert!(mine.check().is_err());
+        let text = "SCRIPT REVIEW v1\n\n---\nBEFORE: a\nAFTER: [empty]\n---\nBEFORE: c\nAFTER: d\nMINE: [empty]\n";
+        let r = ReviewFile::parse(text);
+        assert!(r.entries.iter().all(|e| e.invalid.is_some()), "{:?}", r.entries);
+        assert_eq!(r.serialize(), text);
+        // A blank BEFORE is exactly "", so it reads back as itself.
+        let spaces = Entry { row, ..Entry::single("  ", ["x"]) };
+        assert!(spaces.check().is_err());
+    }
+
+    /// v2 files written before rows (`TYPE: ` with its trailing space) come
+    /// back byte for byte.
+    #[test]
+    fn old_v2_typed_blank_lines_round_trip() {
+        let text = "SCRIPT REVIEW v2\nScript: X.fdx\n\n---\nBEFORE:\n  CHARACTER: MARIA\n  DIALOGUE: \nPARA: 3, \
+                    4\nAFTER:\n  CHARACTER: MARIA\n  DIALOGUE: Sí.\n";
+        let r = ReviewFile::parse(text);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(r.entries[0].before[1], Line::typed(ElementKind::Dialogue, ""));
+        assert_eq!(r.serialize(), text);
+    }
+
+    #[test]
+    fn links_files_are_not_reviews() {
+        let links = "SCRIPTORIUM LINKS v1\nId: lk-1\na: A.fdx\nb: B.fdx\n---\n1 | 1\n";
+        assert!(is_links_text(links));
+        assert!(is_links_text("\u{FEFF}\r\n# x\nscriptorium links v1\r\n"));
+        assert!(!is_review_text(links));
+        assert_eq!(refuse_links(links), Err(LINKS_REFUSAL.to_string()));
+        assert_eq!(refuse_links(ROWS), Ok(()));
+        assert!(!is_links_text(""));
+        assert!(!is_links_text("SCRIPT REVIEW v1\n# SCRIPTORIUM LINKS\n"));
     }
 }

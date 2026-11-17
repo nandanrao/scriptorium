@@ -184,42 +184,9 @@ pub fn summarize(old: &Session, before: &Document, new: &Session, after: &Docume
     s
 }
 
-/// `secs` since the Unix epoch as `YYYYMMDD-HHMMSS` (UTC), for file names.
-pub fn timestamp(secs: u64) -> String {
-    let (days, rem) = (secs / 86_400, secs % 86_400);
-    // Civil from days (Howard Hinnant's algorithm).
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
-}
-
-/// Where to put a session file set aside (one that can't be used, or work
-/// that couldn't be saved): `X.scriptorium.set-aside-<UTC time>.json` for
-/// script `X.fdx` in `dir`, with `-2`, `-3`... if that name is taken so an
-/// earlier one is never overwritten. The reason goes in the log and notice.
-pub fn set_aside_path(dir: &std::path::Path, script_file_name: &str) -> std::path::PathBuf {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    set_aside_path_at(dir, script_file_name, secs)
-}
-
-fn set_aside_path_at(dir: &std::path::Path, script_file_name: &str, secs: u64) -> std::path::PathBuf {
-    let stem = script_file_name.rsplit_once('.').map_or(script_file_name, |(stem, _)| stem);
-    let base = format!("{stem}.scriptorium.set-aside-{}", timestamp(secs));
-    (1..)
-        .map(|n| match n {
-            1 => dir.join(format!("{base}.json")),
-            n => dir.join(format!("{base}-{n}.json")),
-        })
-        .find(|p| !p.exists())
-        .expect("some name is free")
-}
+// Set-aside files are named by `scriptorium_fsio::set_aside_path`, shared
+// with the CLI.
+pub use scriptorium_fsio::set_aside_path;
 
 #[cfg(test)]
 mod tests {
@@ -236,20 +203,6 @@ mod tests {
         assert_eq!(plan(&Disk::Changed, false, false), Plan::Reload);
         assert_eq!(plan(&Disk::Unchanged, true, false), Plan::Reload);
         assert_eq!(plan(&Disk::Changed, false, true), Plan::Wait);
-    }
-
-    #[test]
-    fn timestamps_and_aside_names() {
-        assert_eq!(timestamp(0), "19700101-000000");
-        assert_eq!(timestamp(1_794_667_830), "20261114-145030");
-        let dir = std::env::temp_dir().join(format!("scriptorium-aside-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let first = set_aside_path_at(&dir, "film.fdx", 0);
-        assert_eq!(first.file_name().unwrap(), "film.scriptorium.set-aside-19700101-000000.json");
-        std::fs::write(&first, "").unwrap();
-        let second = set_aside_path_at(&dir, "film.fdx", 0);
-        assert_eq!(second.file_name().unwrap(), "film.scriptorium.set-aside-19700101-000000-2.json");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

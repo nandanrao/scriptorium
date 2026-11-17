@@ -662,3 +662,25 @@ fn a_planted_session_path_outside_the_folder_is_never_written() {
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), text);
     std::fs::remove_file(&outside).unwrap();
 }
+
+#[test]
+fn reviews_add_refuses_a_links_file() {
+    let f = Folder::new("links");
+    std::fs::write(f.path("film.es.links.txt"), "SCRIPTORIUM LINKS v1\nId: lk-1\na: film.fdx\nb: film.es.fdx\n---\n")
+        .unwrap();
+    let (ok, text) = f.run(&["reviews", "film.fdx", "add", "film.es.links.txt"]);
+    assert!(!ok && text.contains("this is a links file, not a review"), "{text}");
+    assert!(!f.path("film.scriptorium.json").exists());
+}
+
+#[test]
+fn reviews_add_refuses_a_links_file_given_with_a_review() {
+    let f = Folder::new("links2");
+    std::fs::write(f.path("film.es.links.txt"), "SCRIPTORIUM LINKS v1\nId: lk-1\na: film.fdx\nb: film.es.fdx\n---\n")
+        .unwrap();
+    let (ok, text) = f.run(&["reviews", "film.fdx", "add", "a.review.txt", "film.es.links.txt"]);
+    assert!(!ok && text.contains("this is a links file, not a review"), "{text}");
+    assert!(!f.path("film.scriptorium.json").exists(), "nothing attached");
+    // The review alone still attaches.
+    assert!(f.ok(&["reviews", "film.fdx", "add", "a.review.txt"]).contains("attached a.review.txt"));
+}

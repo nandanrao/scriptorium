@@ -59,8 +59,8 @@ use scriptorium_core::{
     Document, ElementKind, Group, NewPara, ParaId, Paragraph, Pos, Replaced, Run, Script, Selection,
 };
 
-use crate::file::{Entry, FileStatus, Line, ReviewFile, append_block, insert_id};
-use crate::matching::{FUZZY_THRESHOLD, Found, Full, Miss, Para, match_review, typed};
+use crate::file::{Entry, FileStatus, Line, ReviewFile, RowRef, append_block, insert_id};
+use crate::matching::{FUZZY_THRESHOLD, Found, Full, Miss, Para, RowResolver, match_review, typed};
 use crate::meta::{MetaValue, Now, Stored};
 
 /// What the writer decides about a suggestion.
@@ -394,6 +394,9 @@ pub struct Item {
     /// kind), as the paragraphs read when matched (so styles survive). Keep
     /// mine and undecide put these back.
     pub before_paras: Vec<Paragraph>,
+    /// The entry's `ROW:` / `ROW TEXT:` (a suggestion for a row of a pair of
+    /// versions), as written; opaque to review.
+    pub row: Option<RowRef>,
 }
 
 impl Item {
@@ -501,6 +504,8 @@ enum Placed {
     Item(Box<Item>),
     Invisible,
     Unmatched(Option<Miss>),
+    /// A `ROW:` entry with no row: the resolver's reason.
+    NoRow(String),
 }
 
 /// The one way an entry and its match become an [`Item`] (shared by
@@ -509,6 +514,7 @@ enum Placed {
 fn place(entry: usize, e: &Entry, m: Found, kind_of: &dyn Fn(ParaId) -> Option<ElementKind>) -> Placed {
     match m {
         Found::None(miss) => Placed::Unmatched(miss),
+        Found::NoRow(why) => Placed::NoRow(why),
         Found::Line(m) if m.options.is_empty() => Placed::Invisible,
         Found::Block(m) if m.options.is_empty() => Placed::Invisible,
         Found::Line(m) => {
@@ -527,6 +533,7 @@ fn place(entry: usize, e: &Entry, m: Found, kind_of: &dyn Fn(ParaId) -> Option<E
                 why: e.why.clone(),
                 fuzzy: m.fuzzy,
                 block: false,
+                row: e.row.clone(),
             }))
         }
         Found::Block(m) => Placed::Item(Box::new(Item {
@@ -543,6 +550,7 @@ fn place(entry: usize, e: &Entry, m: Found, kind_of: &dyn Fn(ParaId) -> Option<E
             before_lines: m.before.iter().map(|p| Line::typed(p.kind.clone(), p.text())).collect(),
             option_lines: m.options,
             before_paras: m.before,
+            row: e.row.clone(),
         })),
     }
 }
@@ -609,7 +617,8 @@ fn unplaced(e: &Entry, para_only: bool, live: &[Para], claimed: &HashMap<ParaId,
     {
         return taken(c);
     }
-    if !para_only {
+    // A `ROW:` entry is placed by its row alone, never by its text.
+    if !para_only && e.row.is_none() {
         // No free line fits BEFORE: say so if a taken one does, exactly or
         // (as matching would have) approximately.
         let before = Line::join(&e.before);
@@ -672,7 +681,7 @@ impl Review {
     ) -> Self {
         let texts: Vec<String> = script.paragraphs.iter().map(|p| p.text()).collect();
         let paras = fulls(&script.paragraphs, &texts, &is_caps);
-        Self::build(name.into(), text, &paras, &paras, &|_, _| false, &|_| None, &|_| None, script_name)
+        Self::build(name.into(), text, &paras, &paras, &|_, _| false, &|_| None, &|_| None, None, script_name)
     }
 
     /// [`Self::open`] for a script that may have been edited since it was
@@ -681,6 +690,9 @@ impl Review {
     /// and by `BEFORE` against the original (see [`crate::matching::match_live`]);
     /// a block already decided is placed from its decision (see
     /// [`crate::matching`]). [`Item::index`] is the live position.
+    ///
+    /// `ROW:` entries are not found here ([`Unplaced::NoRow`]); see
+    /// [`Self::open_live_with_rows`].
     pub fn open_live(
         name: impl Into<String>,
         text: &str,
@@ -688,6 +700,25 @@ impl Review {
         live: &Document,
         is_caps: impl Fn(&ElementKind) -> bool,
         script_name: &str,
+    ) -> Self {
+        Self::open_live_with_rows(name, text, original, live, is_caps, script_name, None)
+    }
+
+    /// [`Self::open_live`], placing `ROW:` entries (suggestions for rows of
+    /// a pair of versions) through `rows`, built by the host for `live` (see
+    /// [`RowResolver`]): only through it, never by `PARA:` or `BEFORE`. An
+    /// entry is placed on the first candidate none of whose lines another
+    /// entry of the review has, decided entries before pending ones; its
+    /// status comes from its decision as for any entry. No candidate (or no
+    /// `rows`): unmatched with the reason ([`Unplaced::NoRow`]).
+    pub fn open_live_with_rows(
+        name: impl Into<String>,
+        text: &str,
+        original: &Script,
+        live: &Document,
+        is_caps: impl Fn(&ElementKind) -> bool,
+        script_name: &str,
+        rows: Option<&RowResolver>,
     ) -> Self {
         let original_texts: Vec<String> = original.paragraphs.iter().map(|p| p.text()).collect();
         let live_texts: Vec<String> = live.paragraphs().iter().map(|p| p.text()).collect();
@@ -703,7 +734,7 @@ impl Review {
         // Worked out only if an entry is on a gone line.
         let history = std::cell::OnceCell::new();
         let gone_at = |p: ParaId| gone_position(history.get_or_init(|| live.history_order()), live, p);
-        Self::build(name.into(), text, &original_paras, &live_paras, &has_meta, &decided, &gone_at, script_name)
+        Self::build(name.into(), text, &original_paras, &live_paras, &has_meta, &decided, &gone_at, rows, script_name)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -715,6 +746,7 @@ impl Review {
         has_meta: &dyn Fn(usize, ParaId) -> bool,
         decided: &dyn Fn(usize) -> Option<MetaValue>,
         gone_at: &dyn Fn(ParaId) -> Option<usize>,
+        rows: Option<&RowResolver>,
         script_name: &str,
     ) -> Self {
         let file = ReviewFile::parse(text);
@@ -728,7 +760,8 @@ impl Review {
                 file.script
             ));
         }
-        let matches = match_review(original, live, &file.entries, &HashSet::new(), false, has_meta, decided, gone_at);
+        let matches =
+            match_review(original, live, &file.entries, &HashSet::new(), false, has_meta, decided, gone_at, rows);
         let kinds: HashMap<ParaId, &ElementKind> =
             original.iter().chain(live).map(|f| (f.para.id, &f.source.kind)).collect();
         let kind_of = |id: ParaId| kinds.get(&id).map(|k| (*k).clone());
@@ -741,7 +774,7 @@ impl Review {
             if match &m {
                 Found::Line(m) => m.gone,
                 Found::Block(m) => m.gone,
-                Found::None(_) => false,
+                Found::None(_) | Found::NoRow(_) => false,
             } {
                 gone.insert(entry);
             }
@@ -749,6 +782,10 @@ impl Review {
                 Placed::Unmatched(miss) => {
                     misses.extend(miss.map(|m| (unmatched.len(), m)));
                     unmatched.push(Unmatched { entry, before: Line::join(&e.before), why: None });
+                    continue;
+                }
+                Placed::NoRow(why) => {
+                    unmatched.push(Unmatched { entry, before: Line::join(&e.before), why: Some(Unplaced::NoRow(why)) });
                     continue;
                 }
                 Placed::Invisible => {
@@ -945,6 +982,11 @@ pub enum Unplaced {
     /// `review` in [`Session::reviews`]) cut them. Set by
     /// [`Session::note_removed_by`]; named by [`Session::unplaced_label`].
     RemovedBy { review: usize },
+    /// A `ROW:` entry (a suggestion for a row of a pair of versions) that
+    /// the host's resolver placed on no row, with its reason as a sentence
+    /// ("the English line changed since this suggestion"), or no resolver
+    /// was given ([`crate::matching::NO_LINKS`]). Not written.
+    NoRow(String),
 }
 
 /// What [`Session::append_entries`] did.
@@ -1116,7 +1158,7 @@ impl Session {
         entry: Entry,
         is_caps: impl Fn(&ElementKind) -> bool,
     ) -> Result<Appended, String> {
-        let many = self.append_entries(doc, r, vec![entry], false, is_caps)?;
+        let many = self.append_entries_with_rows(doc, r, vec![entry], false, is_caps, None)?;
         Ok(Appended { file_text: many.file_text, item: many.results[0].item })
     }
 
@@ -1148,6 +1190,9 @@ impl Session {
     /// Blocks are matched as [`Review::open_live`] matches them (every
     /// `PARA:` line, or a `BEFORE` window), written with every line's id as
     /// `PARA:`, and turn the file's header into `SCRIPT REVIEW v2`.
+    ///
+    /// `ROW:` entries are not placed here ([`Unplaced::NoRow`]); see
+    /// [`Self::append_entries_with_rows`].
     pub fn append_entries(
         &mut self,
         doc: &Document,
@@ -1156,17 +1201,36 @@ impl Session {
         para_only: bool,
         is_caps: impl Fn(&ElementKind) -> bool,
     ) -> Result<AppendedMany, String> {
+        self.append_entries_with_rows(doc, r, entries, para_only, is_caps, None)
+    }
+
+    /// [`Self::append_entries`], placing `ROW:` entries through `rows`
+    /// (built by the host for `doc`) as [`Review::open_live_with_rows`] does,
+    /// whatever `para_only` says; each is written with the lines it went on
+    /// as its `PARA:`. With `rows`, a `ROW:` entry may have a blank `BEFORE`
+    /// (`BEFORE: [empty]`, a blank line to fill in).
+    pub fn append_entries_with_rows(
+        &mut self,
+        doc: &Document,
+        r: usize,
+        entries: Vec<Entry>,
+        para_only: bool,
+        is_caps: impl Fn(&ElementKind) -> bool,
+        rows: Option<&RowResolver>,
+    ) -> Result<AppendedMany, String> {
         if r >= self.reviews.len() {
             return Err(format!("no review {r}"));
         }
         let mut read = Vec::with_capacity(entries.len());
         for entry in &entries {
+            // A blank line to fill in: only a `ROW:` entry, placed by its row.
+            let blank_ok = entry.row.is_some() && rows.is_some();
             let empty = if entry.is_line() {
-                Line::join(&entry.before).trim().is_empty()
+                (Line::join(&entry.before).trim().is_empty() && !blank_ok)
                     || entry.options.iter().all(|o| Line::join(o).trim().is_empty())
             } else {
                 // A block's option may be a cut (`[]`).
-                entry.before.iter().all(|l| l.text.trim().is_empty()) || entry.options.is_empty()
+                (entry.before.iter().all(|l| l.text.trim().is_empty()) && !blank_ok) || entry.options.is_empty()
             };
             if empty {
                 return Err("a suggestion needs a BEFORE and at least one AFTER".into());
@@ -1199,7 +1263,7 @@ impl Session {
         let live: Vec<Para> = full.iter().map(|f| f.para.clone()).collect();
         let kind_of = |id: ParaId| doc.paragraph(id).map(|p| p.kind.clone());
         // New entries have no decisions yet.
-        let matches = match_review(&full, &full, &read, &used, para_only, &|_, _| false, &|_| None, &|_| None);
+        let matches = match_review(&full, &full, &read, &used, para_only, &|_, _| false, &|_| None, &|_| None, rows);
 
         let mut file_text = review.text.clone();
         let mut results = Vec::with_capacity(refused.len());
@@ -1227,7 +1291,7 @@ impl Session {
                     }
                     m.paras.clone()
                 }
-                Found::None(_) => vec![],
+                Found::None(_) | Found::NoRow(_) => vec![],
             };
             let (item, unplaced) = match place(index, &e, m, &kind_of) {
                 Placed::Unmatched(miss) => {
@@ -1236,6 +1300,10 @@ impl Session {
                         None => unplaced(&e, para_only, &live, &claimed),
                     };
                     results.push(AppendedEntry { item: None, entry: None, unplaced: Some(why) });
+                    continue;
+                }
+                Placed::NoRow(why) => {
+                    results.push(AppendedEntry { item: None, entry: None, unplaced: Some(Unplaced::NoRow(why)) });
                     continue;
                 }
                 Placed::Invisible => {
@@ -1562,6 +1630,7 @@ impl Session {
             Unplaced::Ambiguous => "fits several places".into(),
             Unplaced::Restructured => "lines split, removed or moved apart".into(),
             Unplaced::Invalid(why) => format!("can't be written: {why}"),
+            Unplaced::NoRow(why) => why.clone(),
             Unplaced::RemovedBy { review } => match self.reviews.get(*review) {
                 Some(r) => format!("lines cut by {}", r.name),
                 None => "lines cut by another review".into(),

@@ -159,6 +159,14 @@ impl Links {
         let file = file.to_lowercase();
         self.members.iter().position(|m| m.file.to_lowercase() == file)
     }
+
+    /// How many of member `member`'s listed paragraphs are placeholders
+    /// still (`~`: waiting for a translation, scene headings included).
+    pub fn placeholders(&self, member: usize) -> usize {
+        self.paras
+            .get(member)
+            .map_or(0, |p| p.values().filter(|p| matches!(p.stamp, Some(Stamp::Placeholder(_)))).count())
+    }
 }
 
 /// The display name of a language code (`es` → `Español`, `es-MX` →

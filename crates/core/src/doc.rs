@@ -668,40 +668,11 @@ impl Document {
     /// of the group it undid (redid), as [`Document::undo`] applies them.
     /// Replays only the undo history, not the text, so it is cheap.
     pub fn for_each_applied_op(&self, mut f: impl FnMut(&Op)) {
-        let (mut undo, mut redo): (Vec<Vec<&Transaction>>, Vec<Vec<&Transaction>>) = (vec![], vec![]);
-        let mut after_edit = false;
-        for e in &self.log {
-            match e {
-                Event::Edit(t) => {
-                    t.ops.iter().for_each(&mut f);
-                    let coalesce = coalesces(after_edit, undo.last().and_then(|g| g.last().copied()), t);
-                    redo.clear();
-                    match undo.last_mut() {
-                        Some(g) if coalesce => g.push(t),
-                        _ => undo.push(vec![t]),
-                    }
-                }
-                Event::Undo => {
-                    if let Some(g) = undo.pop() {
-                        g.iter().rev().flat_map(|t| t.ops.iter().rev()).for_each(|op| f(&op.inverse()));
-                        redo.push(g);
-                    }
-                }
-                Event::Redo => {
-                    if let Some(g) = redo.pop() {
-                        g.iter().flat_map(|t| &t.ops).for_each(&mut f);
-                        undo.push(g);
-                    }
-                }
-                Event::MergeUndo { depth } => {
-                    if undo.len() > depth + 1 {
-                        let merged: Vec<&Transaction> = undo.drain(depth..).flatten().collect();
-                        undo.push(merged);
-                    }
-                }
-            }
-            after_edit = matches!(e, Event::Edit(_));
-        }
+        walk_history(&self.log, |step| match step {
+            Step::Edit(t) => t.ops.iter().for_each(&mut f),
+            Step::Redo(g) => g.iter().flat_map(|t| &t.ops).for_each(&mut f),
+            Step::Undo(g) => g.iter().rev().flat_map(|t| t.ops.iter().rev()).for_each(|op| f(&op.inverse())),
+        });
     }
 
     /// Undo the last undo group; returns the selection from before it.
@@ -1127,6 +1098,64 @@ fn inserted_text(t: &Transaction) -> String {
             _ => None,
         })
         .collect()
+}
+
+/// The undo groups in effect after `log`: what undo would take back, oldest
+/// first, grouped as [`Document::undo`] groups them. Replaying these
+/// groups' ops in order has the same effect as replaying `log` (undone
+/// steps cancel out), so a caller can tell what a log leaves behind without
+/// the script it applies to (`review`'s set-aside check reads it).
+pub fn undo_groups(log: &[Event]) -> Vec<Vec<&Transaction>> {
+    walk_history(log, |_| {})
+}
+
+/// One step of an undo history being walked: an edit logged, or the undo
+/// group an undo (redo) took back (put back).
+enum Step<'a, 'b> {
+    Edit(&'a Transaction),
+    Undo(&'b [&'a Transaction]),
+    Redo(&'b [&'a Transaction]),
+}
+
+/// Walks `log`'s undo history as [`Document`] keeps it (edits coalescing
+/// into groups, undo, redo, merges), calling `f` with each step, and
+/// returns the undo groups in effect at the end, oldest first.
+fn walk_history<'a>(log: &'a [Event], mut f: impl FnMut(Step<'a, '_>)) -> Vec<Vec<&'a Transaction>> {
+    let (mut undo, mut redo): (Vec<Vec<&Transaction>>, Vec<Vec<&Transaction>>) = (vec![], vec![]);
+    let mut after_edit = false;
+    for e in log {
+        match e {
+            Event::Edit(t) => {
+                f(Step::Edit(t));
+                let coalesce = coalesces(after_edit, undo.last().and_then(|g| g.last().copied()), t);
+                redo.clear();
+                match undo.last_mut() {
+                    Some(g) if coalesce => g.push(t),
+                    _ => undo.push(vec![t]),
+                }
+            }
+            Event::Undo => {
+                if let Some(g) = undo.pop() {
+                    f(Step::Undo(&g));
+                    redo.push(g);
+                }
+            }
+            Event::Redo => {
+                if let Some(g) = redo.pop() {
+                    f(Step::Redo(&g));
+                    undo.push(g);
+                }
+            }
+            Event::MergeUndo { depth } => {
+                if undo.len() > depth + 1 {
+                    let merged: Vec<&Transaction> = undo.drain(depth..).flatten().collect();
+                    undo.push(merged);
+                }
+            }
+        }
+        after_edit = matches!(e, Event::Edit(_));
+    }
+    undo
 }
 
 /// Whether edit `t`, logged right after an edit (`after_edit`) or not,

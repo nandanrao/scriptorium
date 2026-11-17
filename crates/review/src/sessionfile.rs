@@ -16,8 +16,9 @@ use scriptorium_core::doc::{DocError, Event, Op};
 use scriptorium_core::{Document, ElementKind, ParaId, Paragraph, Script};
 use serde::{Deserialize, Serialize};
 
-use crate::{Review, Session};
+use crate::{Review, RowResolver, Session};
 
+pub mod aside;
 pub mod sync;
 pub use sync::{
     Change, Disk, Renumber, Replayed, Seen, check, common_prefix, rebuild, review_changed, still_synced, with_unsaved,
@@ -208,12 +209,52 @@ pub fn resume(
     is_caps: &dyn Fn(&ElementKind) -> bool,
     script_name: &str,
 ) -> ResumedSession {
+    resume_with_rows(sources, script, reader_1, script_contents, saved, is_caps, script_name, None)
+}
+
+/// Builds the [`RowResolver`] for the document reviews are opened against
+/// (see [`resume_with_rows`]). The host's factory reads the links file and
+/// the other script; `doc` is the version's live document (its text, after
+/// any replayed edits, is what rows are read from).
+pub type RowResolverFactory<'a> = dyn for<'d> Fn(&'d Document) -> Box<RowResolver<'a>> + 'a;
+
+/// [`resume`], placing `ROW:` entries through a resolver `rows` builds for
+/// the document the reviews are opened against: the replayed document, or
+/// (fresh, version 1, discarded) the unedited script. See
+/// [`Review::open_live_with_rows`]. `None`: as [`resume`].
+#[allow(clippy::too_many_arguments)]
+pub fn resume_with_rows(
+    sources: Vec<ReviewSource>,
+    script: Script,
+    reader_1: Option<&Script>,
+    script_contents: &str,
+    saved: Option<&str>,
+    is_caps: &dyn Fn(&ElementKind) -> bool,
+    script_name: &str,
+    rows: Option<&RowResolverFactory>,
+) -> ResumedSession {
     // Opens every review against `live` (or the unedited script).
     let open_all = |live: Option<&Document>, notes: &mut Vec<String>| {
         let mut session = Session::default();
+        // With rows, the unedited script is opened as a document too, so the
+        // resolver reads the same text matching does.
+        let unedited = match (live, rows) {
+            (None, Some(_)) => Some(Document::new(script.clone())),
+            _ => None,
+        };
+        let live = live.or(unedited.as_ref());
+        let resolver = rows.zip(live).map(|(make, doc)| make(doc));
         for s in &sources {
             let review = match live {
-                Some(doc) => Review::open_live(s.name.clone(), &s.text, &script, doc, is_caps, script_name),
+                Some(doc) => Review::open_live_with_rows(
+                    s.name.clone(),
+                    &s.text,
+                    &script,
+                    doc,
+                    is_caps,
+                    script_name,
+                    resolver.as_deref(),
+                ),
                 None => Review::open(s.name.clone(), &s.text, &script, is_caps, script_name),
             };
             if let Err(e) = session.add(review.with_path(s.path.clone())) {

@@ -386,3 +386,13 @@ fn real_script_handtest_files() {
     std::fs::write(dir.join("PURPLE LIST.es.links.txt"), links::write(&links).unwrap()).unwrap();
     eprintln!("hand test files in {}", dir.display());
 }
+
+#[test]
+fn placeholders_counts_the_lines_waiting_for_a_translation() {
+    let (_, _, _, l) = make(&film());
+    let waiting = l.paras[1].values().filter(|p| matches!(p.stamp, Some(Stamp::Placeholder(_)))).count();
+    assert!(waiting > 0);
+    assert_eq!(l.placeholders(1), waiting);
+    assert_eq!(l.placeholders(0), 0, "the original is stamped `=` throughout");
+    assert_eq!(l.placeholders(7), 0, "no such member");
+}

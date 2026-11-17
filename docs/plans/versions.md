@@ -350,13 +350,22 @@ resolver, `&dyn Fn(&Entry, &[Vec<Line>]) -> Vec<Vec<ParaId>>`, built by
 `before_pass` (`:200`). For an entry it returns the version-side cells of
 the rows whose original side reads `ROW TEXT` and whose version side reads
 one of the texts review passes: a pending entry passes `BEFORE` then its
-options; an accepted or rewritten one only the text it put there (the
-chosen option or `MINE`); a kept one only `BEFORE`. Candidates whose
-version side reads the first text (`BEFORE`, or a decided entry's one
-text) come first, so a pending entry never takes a row already accepted
-with its option; within each group, the `PARA` cell comes first. Review
-then places the entry on the first candidate not already used, and
-computes its status from its decision metadata as today. No candidate
+options; one decided in the document (its metadata, on lines still live)
+only the text it put there (the chosen option, its lines as they read now
+if rewritten, `BEFORE` if kept); one decided only in its file (`STATUS:`
+not yet applied) its chosen option or `MINE`, then `BEFORE` (a kept one:
+`BEFORE`), so it is found whether or not the file already reads it.
+Candidates whose version side reads the first text come first, so a
+pending entry never takes a row already accepted with its option; within
+each group, the cell holding the preferred ids comes first: the lines the
+decision is on now when decided in the document, else `PARA`. Review
+places entries decided in the document first, then those decided only in
+their file, then pending ones, each on the first candidate not already
+used (a decided block only on a cell holding the lines its decision
+left), and computes its status from its decision metadata as today.
+Candidates that are all unusable (a line entry on a row of several lines,
+a line that can't take suggestions, a block of another length) give a
+reason too. No candidate
 gives a reason (`NotFound`: another pair, the original's line changed,
 the version's line reads none of the texts).
 
@@ -647,13 +656,21 @@ scriptorium version new <script.fdx> --lang <code> [--from <code>] [-o <name.fdx
 ```
 
 Opens the original from its file and refuses if its session has changes
-(C8). Writes the `.fdx` with `create_new`, then the links file. A re-run:
+(C8): writing its live document must give back its file byte for byte (an
+undone edit or a kept decision doesn't block; a write error is reported as
+itself). Writes the `.fdx` with `create_new` (a failed write removes the
+partial file), then the links file. A re-run:
 links file and `.fdx` both present → check the `.fdx` hash against `b
-hash:`; equal → "already made" with the paths; different → re-find. Only
-the links file → the `.fdx` is gone: delete the links file and make both
-again (said in the output). Only the `.fdx` → adopt it if byte-identical to
-what it would write, else refuse naming the file to move away. Prints the
-version's absolute path.
+hash:`; equal → "already made" with the paths; different → re-find (the
+original too, if its hash differs). A re-run whose `--lang` or `--from`
+contradicts the pair is refused. Only the links file → the `.fdx` was
+renamed, moved or deleted: refused with the missing-file fix (the `b:` line
+to edit, any `.fdx` holding `b hash:`'s bytes); the links file is never
+deleted. Only the `.fdx` → adopt it if byte-identical to what it would
+write, else refuse naming the file to move away. A links file naming either
+file that doesn't parse refuses. Names and codes are checked before any
+lock file is made. Prints a summary, a tip when `--from` wasn't given, a
+next step, and last the version's absolute path.
 
 Tests: both files made; re-runs after each simulated crash; the original
 never written; refused with changes in the original's session; refused
