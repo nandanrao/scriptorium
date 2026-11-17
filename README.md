@@ -11,7 +11,7 @@ CLI, so you (or your coding agent) can add what you need. See [AGENTS.md](AGENTS
 agent can do from the command line (suggest changes, accept them, rewrite a
 line, undo), working on the same saved session you see in the app.
 
-**Status:** v0.4.0: reviewing, full editing, multi-line suggestions and AI chat work; see the roadmap.
+**Status:** v0.5.0: reviewing, full editing, multi-line suggestions, AI chat and translation versions (a second script lined up row by row, filled by suggestions) work; see the roadmap.
 
 ## Try it
 
@@ -127,7 +127,7 @@ scriptorium threads "MY SCRIPT.fdx" [show <id> | set-model <id> <account> <model
 
 Being planned; see [docs/PLAN.md](docs/PLAN.md). Direction so far: writing stays
 in Final Draft at first, and Scriptorium starts with **review** and
-**translation**. v0.4.0 is done: AI chat, on top of v0.3.0's full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
+**translation**. v0.5.0 is done: translation versions and AI chat, on top of v0.3.0's full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
 
 Done so far: the document model, Final Draft import/export with byte-identical
 round trips, an event-sourced editing core (undo/redo, stable paragraph ids), a

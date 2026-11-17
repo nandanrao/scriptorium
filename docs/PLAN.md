@@ -41,7 +41,22 @@ Living notes on direction. Update this when a decision is made or reversed.
   reviews are read-only for them (AGENTS.md rule 6). The agent's (MCP)
   `write_script` replaces `<name> (scriptorium).fdx` without warning and no
   other existing `.fdx`.
-  Plan: [plans/chat-panel.md](plans/chat-panel.md).
+  Plan: [plans/chat-panel.md](plans/chat-panel.md). Never released on its
+  own (no `v0.4.0` tag): it ships in v0.5.0.
+- **v0.5.0** (2026-11-17): versions, translation first (Phases A and B of
+  [plans/versions.md](plans/versions.md)), with the v0.4.0 chat panel. A
+  version is a second `.fdx` lined up row by row through a `*.links.txt`
+  file: made as placeholders by `scriptorium version new`, the `new_version`
+  tool (MCP, the chat panel) or File › New version… (Cmd/Ctrl+T); filled
+  with ordinary suggestions placed by row (`read_rows`, `suggest_changes`
+  with `row`; the `translate-version` plugin skill); found again after Final
+  Draft edits; written in place by Write .fdx (app only). In the app: the
+  original lined up on the left with a status bar per row, the sidebar's
+  "Lined up on the left" section with a legend, the header "English |
+  **Español**" with Swap, Edit › Mark in sync / Mark not in sync (CLI
+  `scriptorium links … sync|unsync|join`), and the left column giving way
+  for width before the card. What was deferred: the "As released" note at
+  the top of the plan.
 - **Built-in agent** (2026-11-14), plan in
   [plans/built-in-agent.md](plans/built-in-agent.md). Status (2026-11-15):
   step 0 and the agent core (step 1) built; MCP server and app on the shared
@@ -114,7 +129,8 @@ installed — GPUI fell back to another renderer and still drew fine):
   - Scene summaries: fixed in v0.3.0; v0.2.0 could corrupt Scene Headings
     that have a scene summary (`<SceneProperties><Summary>`) when edited.
   - The legacy .fdx reader (reader 1, kept to check old sessions' line ids)
-    is removed in v0.5.0.
+    was to be removed in v0.5.0; it is still in v0.5.0 (testers come from
+    0.3.0 sessions). Remove it in a later release.
   - Dual dialogue lines can't be split, joined or removed (their text can be
     edited).
   - Not yet tried: a real IME (fcitx5/ibus), macOS, Windows, spellcheck.
@@ -140,10 +156,12 @@ Spelling, grammar and naturalness suggestions, reviewed line by line.
 - To work out: splitting a full script into chunks (token limits, cost, keeping
   context such as character voice across chunks).
 
-### 2. Versions (translation first) — planned 2026-11-17, for v0.5.0
+### 2. Versions (translation first) — Phases A and B built for v0.5.0
 
-Plan: [plans/versions.md](plans/versions.md). Phases A and B are built on
-this branch and ship together as v0.5.0, with the chat panel. Decided with
+Plan: [plans/versions.md](plans/versions.md). Phases A and B are built
+(2026-11-17) and ship together as v0.5.0, with the chat panel; Phases C–F
+are next. What v0.5.0 leaves out is listed in the plan's "As released"
+note. Decided with
 the user:
 - **One concept, versions.** A version is any `.fdx` lined up against
   another (a translation, an older draft, a co-writer's copy), with an

@@ -1,9 +1,44 @@
 # Plan: versions (translation first)
 
-Status: plan, final draft after three review rounds, 2026-11-17. Not built.
+Status: Phases A and B built and reviewed (2026-11-17), released as
+**v0.5.0** once the hand tests below pass; Phases C–F planned. Plan written
+after three review rounds, 2026-11-17.
 Built on the `v4/chat` branch (the chat panel); Phases A and B ship
 together as **v0.5.0**, with the chat panel. Design record (reasoning and
 mockups): the "Versions" brainstorm page of 2026-11-17 (round 4).
+
+## As released (v0.5.0)
+
+Phases A and B as planned, with the *As built* notes in each step. Left
+out of v0.5.0, on purpose:
+
+- **Phase C:** no `links move|split` and no `links` tool for agents (the
+  app's Mark in sync / Mark not in sync and the CLI's `links sync|unsync|
+  join` are the only link edits, and MCP has none). A line new in the
+  original has nothing to fill on the version's side: the writer adds an
+  empty line of that type in Final Draft and asks again. No fuzzy pass in
+  re-find (exact text, then same-kind lines by position).
+- **Phase D:** `brief.<lang>.md` and `glossary.md` are only read by Claude
+  as plain files (the skill says so); no glossary check, no `row_context`,
+  no brief prompt or `translation-brief` skill.
+- **Phases E and F:** no lining up two existing files (File › Line up
+  with…, `links new`) and no same-language versions (`version new --copy`;
+  the New version sheet offers blank lines only).
+- **One version per script**, two members per links file; one `is_caps`
+  (the original's) for both members.
+- **Known limits** (recorded in the steps): undo ends at Write .fdx on a
+  version; Write .fdx is refused while a pending suggestion's line was
+  split, joined or removed; Write .fdx in place is app-only (the CLI and
+  MCP write a copy with `-o`/`output`); the card shows no diff when the
+  original's line changed (the status bar says it and the row needs a new
+  suggestion); Mark not in sync doesn't restore a `~` stamp that Mark in
+  sync replaced; a crash between the progress write and the `.fdx` write
+  leaves `PARA` hints the old file doesn't have (A7b); the built-in chat
+  agent can make a version but stays on the original (the writer opens the
+  version and asks there); the left column's narrowing (B4) is still to be
+  checked on the partner's MacBook (hand test 7).
+- **Not version work, carried over:** the legacy `.fdx` reader (reader 1)
+  planned for removal in v0.5.0 is still in.
 
 **The goal** (the user, 2026-11-17): something that works and is robust,
 even if simple. Two versions next to each other, stable paragraph ids, and
@@ -1068,6 +1103,13 @@ plugin's (`plugin/.claude-plugin/plugin.json`), finish "What's new in
 (`.github/workflows/release.yml`) checks the tag against the version and
 attaches `Scriptorium-0.5.0-mac.zip` and `Scriptorium-plugin-0.5.0-mac.zip`.
 
+*Prep done (2026-11-17):* versions bumped (`Cargo.toml`, `Cargo.lock`,
+`plugin.json`; `cargo pkgid -p scriptorium-app` reads 0.5.0, so the
+workflow's check passes for `v0.5.0`), the release notes in `release.yml`,
+"What's new in 0.5.0" and §7 in `docs/testing-on-mac.md` (with a short
+checklist for the partner), README status. Left: the hand tests below, then
+the tag.
+
 # Later phases
 
 - **C. Fixing links and adding lines.** `links move|split` and the `links`
@@ -1185,16 +1227,39 @@ On copies, in a scratch folder, not in iCloud. Screenshot each result.
    suggestions appear on the card.
 7. (B) Open the Spanish: English on the left, rows lined up; a two-line
    Spanish action beside a one-line English one pads the English row.
-   Statuses match `rows`. Swap. On the MacBook: with the chat closed both
-   columns show; with it open the English gives way, with the note.
+   Statuses match `rows` and the sidebar's legend; the sidebar's count
+   matches `rows --needs`. Header "English | **Español**"; Swap and back;
+   "Nothing" hides the English and the choice survives a reopen. On the
+   MacBook: with the chat closed both columns show; with it open the
+   English gives way with the strip "English hidden: widen the window or
+   close the chat (⌘L)".
 8. (B) English and Spanish in two windows. Accept in the Spanish: the
-   English window's left column updates within a second. Mark a
-   hand-edited row in sync; Not in sync takes it back.
-9. **On the partner's Mac, with the v0.5.0 plugin zip:** follow
+   English window's left column updates within a second. Edit › Mark in
+   sync on a hand-edited row; Edit › Mark not in sync takes it back; on a
+   line typed in the app and not written yet it is refused (Write .fdx
+   first).
+9. (B) File › New version… (⌘T) on a fresh copy: the sheet's default name
+   follows the language; Create and open opens the version with the
+   original on the left. Again on the same script: refused ("One version
+   per script for now"). Write .fdx while Final Draft has saved the
+   Spanish since it was opened: "Not written: … changed since you opened
+   it"; with a pending suggestion's line split: "Decide or rewrite #n
+   first".
+10. Chat panel on the English: "Make a Spanish version": the file is made,
+   the reply says to open it, the status bar says "Lined up with …: open
+   it (Swap, in the toolbar) to translate"; Swap, a new conversation there,
+   translate a scene.
+11. **Final Draft round trip:** in Final Draft, type Spanish into an empty
+   line of the version and save; reopen in the app: the row reads "Español
+   changed", nothing else moved; Mark in sync. Write .fdx, open in Final
+   Draft: no warning, the typed line and the accepted ones are there.
+12. **On the partner's Mac, with the v0.5.0 app and plugin zips:** follow
    `docs/testing-on-mac.md` §7 "Translating with Claude" from a fresh
-   download: `/mcp` shows `scriptorium`; "Make a Spanish version of this
-   script and translate scene 1" makes the file and the review; the app
-   shows them; Write .fdx saves the Spanish file.
+   download, including its "Please try" list: `/mcp` shows `scriptorium`;
+   "Make a Spanish version of this script and translate scene 1" makes the
+   file and the review; the placeholder opens and saves cleanly in Final
+   Draft; the app shows them lined up; Write .fdx saves the Spanish file
+   and Final Draft opens it.
 
 # Open questions for the user
 

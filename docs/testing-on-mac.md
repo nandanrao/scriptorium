@@ -5,26 +5,33 @@ be rough. Everything you notice helps, including the small things.
 
 ## What's new in 0.5.0
 
-- **Translating with Claude.** Ask Claude (through the plugin) to make a
-  Spanish (or other language) version of your script. It makes a second
-  Final Draft file next to yours, `MY SCRIPT.es.fdx`, lined up line by line
-  with the English, and fills it with suggestions you decide in Scriptorium
-  as usual, with the English line shown on each card. See section 7,
-  "Translating with Claude".
+0.5.0 brings two big things: translating with Claude, and the AI chat. (The
+chat was planned as 0.4.0, but 0.4.0 was never released, so it is new to you
+too.)
+
+**Translating.** See section 7, "Translating with Claude".
+
+- **A version of your script in another language.** Claude (through the
+  plugin, or the chat in the app) or **File › New version…** (`Cmd+T`) makes
+  a second Final Draft file next to yours, `MY SCRIPT.es.fdx`, lined up line
+  by line with the English. Claude fills it with suggestions you decide as
+  usual; each card shows the English line.
+- **The English on the left.** Open the Spanish and the English is lined up
+  on the left, row by row, with a coloured bar per row saying whether it's
+  translated, in sync, or changed since. **Swap** (at the top) opens the
+  other file.
 - **Write .fdx saves the translation itself.** For a version Scriptorium
   made, `Cmd+S` writes that file (`MY SCRIPT.es.fdx`), not a
   `(scriptorium)` copy. Your original is still never changed.
-- **The AI chat** (`Cmd+L`, below under 0.4.0) ships in this same release, so
-  if you haven't tried it yet, it's new to you too.
 
-## What's new in 0.4.0
+**The AI chat.** See section 9.
 
-- **AI chat.** Press `Cmd+L` to open a chat column at the right. You talk
-  to an agent (Claude, GPT and others) about your script, and the changes it
-  proposes appear as suggestions on a review card for that conversation, to
-  decide as usual. Nothing in your script changes until you accept it.
-- **You bring your own API key.** See section 9 for getting one, setting it
-  up and the Mac's Keychain questions.
+- Press `Cmd+L` to open a chat column at the right. You talk to an agent
+  (Claude, GPT and others) about your script, and the changes it proposes
+  appear as suggestions on a review card for that conversation, to decide as
+  usual. Nothing in your script changes until you accept it.
+- **You bring your own API key.** Section 9 says how to get one, set it up
+  and answer the Mac's Keychain questions.
 - **Agents only write into review files in the script's folder.** A review
   you attached from another folder, or one that doesn't start with
   `SCRIPT REVIEW`, is read-only for the AI: it can read it but adds its
@@ -110,6 +117,8 @@ Anywhere in the app:
 | `Cmd+O` | Open a script |
 | `Cmd+Shift+O` | Add a review |
 | `Cmd+S` | Write the new `.fdx` (see below) |
+| `Cmd+T` | Make a version of the script (**File › New version…**, section 7) |
+| `Cmd+L` | Open or close the AI chat (section 9) |
 | `Cmd+0` | Show the plain script |
 | `Cmd+1`, `Cmd+2`, `Cmd+3` | Show the first, second, third review |
 | `Cmd+Shift+]` / `Cmd+Shift+[` | Next / previous view |
@@ -272,27 +281,76 @@ script the first time.
    - `MY SCRIPT.es.links.txt`: how the lines of the two files line up.
      Leave it alone.
    - `Translation from English.review.txt`: Claude's suggestions.
-4. Open `MY SCRIPT.es.fdx` in Scriptorium (**File › Open…**). The review
-   "Translation from English" is in the sidebar; press `Cmd+1`. Each card
-   shows the English line and Claude's Spanish. Accept, pick another option,
-   keep the empty line, or rewrite it, as with any review. Claude gives one
-   option when the line is obvious and two or three, with a short note, when
-   there's a real choice.
+4. Open `MY SCRIPT.es.fdx` in Scriptorium (**File › Open…**). The English
+   is lined up on the left, the Spanish on the right (see "What you see"
+   below). The review "Translation from English" is in the sidebar; press
+   `Cmd+1`. Each card shows the English line and Claude's Spanish. Accept,
+   pick another option, keep the empty line, or rewrite it, as with any
+   review. Claude gives one option when the line is obvious and two or
+   three, with a short note, when there's a real choice.
 5. Ask Claude for more ("Translate scenes 2 to 5"). It skips lines that
    already have a suggestion, so asking twice doesn't duplicate anything. If
    Scriptorium is open, the new suggestions appear while you watch.
+
+**Making the version in Scriptorium instead.** Open the English script and
+choose **File › New version…** (`Cmd+T`). Type the language (`es` for
+Spanish, `fr` for French, `pt-BR` for Brazilian Portuguese…) and the
+original's language (`en`), then press **Create and open**. Scriptorium
+makes `MY SCRIPT.es.fdx` and opens it with the English on the left. Its lines
+are empty (headings and names copied) until someone translates them: ask
+Claude (plugin), or the chat in the
+app (below). A script has one version for now; New version… on a script that
+already has one says so.
+
+**What you see.**
+
+- **Two columns.** The English on the left (grey, read only), the Spanish on
+  the right, each English line beside its Spanish line. A thin coloured bar
+  between them says how each row stands: not yet translated, in sync,
+  changed in the Spanish, changed in the English, or both.
+- **The sidebar** has a section "Lined up on the left": `◧ English` with how
+  many lines are left to translate under it, and a small legend of the
+  colours (hover over it for the full words). Click **Nothing** to hide the
+  English; click `◧ English` to bring it back.
+- **At the top:** "English | **Español**" (the open file in bold) and
+  **Swap**, which opens the English with the Spanish lined up on the left.
+  Swap again to come back.
+- **A narrow window** (for example with the chat open on a laptop): the
+  English gives way first, and a strip says "English hidden: widen the
+  window or close the chat (`Cmd+L`)." Close the chat or make the window
+  wider to see it again.
+- Opening the English on its own, the status bar says
+  "Lined up with MY SCRIPT.es.fdx: open it (Swap, in the toolbar) to
+  translate."
 
 **How to work.**
 
 - **Decide in Scriptorium first, polish in Final Draft after.** When you are
   ready, **close `MY SCRIPT.es.fdx` in Final Draft** if it is open there,
-  then press `Cmd+S` (**Write .fdx**) in Scriptorium. That saves the Spanish
-  file itself (no `(scriptorium)` copy). Undo starts again from there. Then
-  open it in Final Draft to polish, and reopen it in Scriptorium whenever you
-  like: Scriptorium finds the lines again.
+  then press `Cmd+S` (**File › Write .fdx**) in Scriptorium. That saves the
+  Spanish file itself (no `(scriptorium)` copy), and the status bar says
+  "Wrote MY SCRIPT.es.fdx. Undo starts again from here." Then open it in
+  Final Draft to polish, and reopen it in Scriptorium whenever you like:
+  Scriptorium finds the lines again.
+- **When Write .fdx says "Not written".** The status bar says why:
+  - "…changed since you opened it. Close it in Final Draft and reopen it
+    here.": Final Draft saved the Spanish in the meantime. Close it there,
+    open it again in Scriptorium (your decisions are kept), and press
+    `Cmd+S` again.
+  - "Decide or rewrite #4 and #9 first.": you split or joined the lines
+    of those suggestions. Decide them (or undo the split) first.
+  - "The assistant is still working on this script…": wait for the chat to
+    finish, or stop it (`Cmd+.`).
 - Decisions are never lost, but **lines you type straight into the Spanish
   in Scriptorium** (not through a card) are lost if Final Draft saves the
   file before you press Write .fdx. Write first, then go to Final Draft.
+- **Mark in sync.** When you fix a Spanish line yourself (in Final Draft,
+  or typing it in Scriptorium and writing it), its row reads "Español
+  changed". If it's right, click in that line and choose **Edit › Mark in
+  sync**: the row is in sync again. **Edit › Mark not in sync** takes it
+  back (the row then asks for a new translation). The same works when the
+  English was reworded but the Spanish still fits. A line you typed in
+  Scriptorium and haven't written yet can't be marked: press `Cmd+S` first.
 - **The title page and scene summaries stay in English**, and the English
   script notes aren't copied. That's on purpose: change the title page (and
   the summaries, if you use them) in Final Draft. Same for "(CONT'D)" and
@@ -307,9 +365,33 @@ script the first time.
   Spanish in Final Draft at that place, save, close, and ask Claude again: it
   fills it. (A later version will do this for you.)
 - Never edit `MY SCRIPT.es.links.txt` or the review files by hand.
-- **The AI chat in Scriptorium** (`Cmd+L`) can make the version too, but a
-  conversation stays on the script it was started on: open
-  `MY SCRIPT.es.fdx` and ask there to translate.
+- **The AI chat in Scriptorium** (`Cmd+L`) can make the version too: on the
+  English, ask "Make a Spanish version of this script". It makes the file and
+  tells you to open it; a conversation stays on the script it was started
+  on, so press **Swap** (or open `MY SCRIPT.es.fdx`), start a new
+  conversation there (`Cmd+N` in the chat), and ask it to translate.
+
+**Please try, on a copy** (screenshot what looks wrong):
+
+- [ ] `/mcp` shows `scriptorium` connected. Ask "Make a Spanish version of
+      this script and translate scene 1". `MY SCRIPT.es.fdx` and the review
+      appear.
+- [ ] Before deciding anything, open `MY SCRIPT.es.fdx` in **Final Draft**:
+      no warning; headings and names in English; every other line empty
+      with the right type. Save it there unchanged and close it.
+- [ ] Open it in Scriptorium: the English on the left, lined up. Accept a
+      few lines, keep one empty, rewrite one. Do the colours match the
+      legend?
+- [ ] With the chat open (`Cmd+L`) on your laptop: does the English give way
+      with the "English hidden" strip? Close the chat: does it come back?
+- [ ] Press **Swap** and back.
+- [ ] Press `Cmd+S`, then open `MY SCRIPT.es.fdx` in Final Draft: the
+      Spanish lines you accepted, with the right indents; the rest empty.
+- [ ] In Final Draft, type a Spanish line into one of the empty lines, save,
+      close. Reopen it in Scriptorium: is that line there, and does its row
+      read changed? Use **Edit › Mark in sync** on it.
+- [ ] **File › New version…** (`Cmd+T`) on another copy of the script: does
+      the sheet make the version and open it?
 
 **Sharing.** Keep these together in one folder: both scripts, the
 `.links.txt` file, the `.review.txt` files and the `.scriptorium.json` files.
@@ -324,7 +406,9 @@ script the first time.
 same without Claude. `scriptorium version new "MY SCRIPT.fdx" --lang es
 --from en` makes the version (`--from en` names the original as English, so
 the review and labels say "English"); `scriptorium rows "MY SCRIPT.es.fdx"
---scene 1` shows each line next to its English and what it needs.
+--scene 1` shows each line next to its English and what it needs;
+`scriptorium links "MY SCRIPT.es.fdx" sync 37` marks row 37 in sync (as
+**Edit › Mark in sync** does; `unsync` takes it back).
 
 ## 8. Checking files in Final Draft (please do this before relying on 0.3.0)
 
@@ -380,7 +464,7 @@ Note anything that looks different and send a screenshot.
 *Optional, for the curious: the app also comes with a command-line tool for
 AI agents to work on the same script; you can ignore it.*
 
-## 9. Trying the AI chat (0.4.0)
+## 9. Trying the AI chat
 
 The chat needs an API key: a password that lets Scriptorium use an AI
 service on your account. It costs a little money per message, charged by the
@@ -436,7 +520,7 @@ Terminal history can see the key, so use the Keychain when you can.
       Suggestions appear in the sidebar as a review named after the chat.
       Open it, accept one, rewrite one, undo one.
 - [ ] With the chat focused, press `Cmd+T`: does the list of conversations
-      open? Press `Cmd+N`: does a new, empty conversation start?
+      open? (Outside the chat, `Cmd+T` is **File › New version…**.) Press `Cmd+N`: does a new, empty conversation start?
 - [ ] Press `Cmd+.` while it is working: it should stop, and your
       conversation stays.
 - [ ] Quit and reopen: is the conversation still in the thread list? (It is
