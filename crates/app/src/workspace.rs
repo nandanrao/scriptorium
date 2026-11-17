@@ -514,7 +514,9 @@ impl Workspace {
             None => ("Scriptorium".to_string(), String::new(), None),
         };
         // The columns in their order, the open file's bold: "English |
-        // **Español**", and Swap.
+        // **Español**", and Swap. It names the open file, so the file's name
+        // isn't shown before it (the status on the right names it).
+        let name = if header.is_some() { None } else { Some(name) };
         let header = header.map(|h| {
             div()
                 .flex()
@@ -524,7 +526,7 @@ impl Workspace {
                 .text_color(INK_2)
                 .child(div().truncate().child(h.left))
                 .child(div().flex_none().text_color(RULE).child("|"))
-                .child(div().truncate().font_weight(FontWeight::SEMIBOLD).text_color(INK).child(h.right))
+                .child(div().truncate().font_weight(FontWeight::BOLD).text_color(INK).child(h.right))
                 .child(
                     crate::script_view::button("swap", "Swap", None, false)
                         .flex_none()
@@ -534,6 +536,8 @@ impl Workspace {
         div()
             .flex_none()
             .h(px(38.))
+            // A family with bold faces (the Linux system UI font shows none).
+            .font_family(crate::agent_panel::panel_font(cx))
             .px_2()
             .flex()
             .items_center()
@@ -552,7 +556,7 @@ impl Workspace {
                         .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx))),
                 )
             })
-            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(INK).child(name))
+            .children(name.map(|name| div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(INK).child(name)))
             .children(header)
             .child(div().flex_1())
             .child(div().text_color(INK_2).child(state))

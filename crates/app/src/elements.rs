@@ -617,7 +617,7 @@ fn paint_columns(window: &mut Window, cx: &mut App, bounds: Bounds<Pixels>, cols
         point(bounds.left() + px(split.right_x), bounds.top()),
         size(px(split.right_w), bounds.size.height),
     );
-    let left_page = left_col.left() + layout::page_left(left_col.size.width);
+    let left_page = left_col.left() + layout::page_left_unmarked(left_col.size.width);
     let right_page = right_col.left() + layout::page_left(right_col.size.width);
     let mask = |b: Bounds<Pixels>| Some(ContentMask { bounds: b });
     window.with_content_mask(mask(left_col), |w| {

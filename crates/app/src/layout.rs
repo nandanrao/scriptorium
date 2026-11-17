@@ -31,7 +31,16 @@ pub const VISIBLE_RIGHT: f32 = 8.0;
 /// than the space it has, in px from the page's left edge at zoom `z`: the
 /// review mark, the text column and the revision `*`.
 fn visible_at(z: f32) -> (f32, f32) {
-    (COLUMN_LEFT * 96.0 * z - MARK_OFFSET - MARK_ROOM, VISIBLE_RIGHT * 96.0 * z)
+    (COLUMN_LEFT * 96.0 * z - MARK_SPACE, VISIBLE_RIGHT * 96.0 * z)
+}
+
+/// What the review mark needs left of the text column, in screen px.
+const MARK_SPACE: f32 = MARK_OFFSET + MARK_ROOM;
+
+/// [`visible_at`] for a page without review marks (the script lined up on
+/// the left): the text column and the revision `*` only.
+fn visible_unmarked_at(z: f32) -> (f32, f32) {
+    (COLUMN_LEFT * 96.0 * z, VISIBLE_RIGHT * 96.0 * z)
 }
 
 /// The smallest zoom the page ever takes.
@@ -93,13 +102,24 @@ pub fn page_left(width: Pixels) -> Pixels {
     px(page_left_at(f32::from(width), zoom()))
 }
 
+/// [`page_left`] for a page without review marks (the left column): only
+/// the text column and the `*` are kept when the margins are cropped.
+pub fn page_left_unmarked(width: Pixels) -> Pixels {
+    px(crop_left(f32::from(width), zoom(), visible_unmarked_at(zoom())))
+}
+
 /// [`page_left`] at zoom `z`, in plain numbers.
 fn page_left_at(width: f32, z: f32) -> f32 {
+    crop_left(width, z, visible_at(z))
+}
+
+/// Where the page's left edge goes in a list `width` wide at zoom `z`,
+/// keeping `(l, r)` (px from the page's left) on screen.
+fn crop_left(width: f32, z: f32, (l, r): (f32, f32)) -> f32 {
     let page = 8.5 * 96.0 * z;
     if width >= page {
         return (width - page) / 2.;
     }
-    let (l, r) = visible_at(z);
     let visible_mid = (l + r) / 2.;
     // Never leave a gap at the right edge of the list.
     (width / 2. - visible_mid).max(width - page).min(0.)
@@ -117,15 +137,23 @@ pub struct TwoColumns {
     pub right_w: f32,
 }
 
-/// The two columns in a list `width` wide: an even split around the
-/// [`GUTTER`] for now. Both share one zoom, fitted to the right column
-/// ([`zoom_for`]). B4 sizes the script area for two columns at
-/// [`READABLE_ZOOM`] (`agent_panel::columns`, `lined_up`) and decides when
-/// the left gives way; this split is what it hands the columns.
+/// The two columns in a list `width` wide, around the [`GUTTER`]. Both
+/// share one zoom, fitted to the right column ([`zoom_for`]); the left one
+/// has no review marks, so it is narrower by the mark's room and shows its
+/// text column at that same zoom ([`page_left_unmarked`]). The script area
+/// is sized for two columns at [`READABLE_ZOOM`] by `agent_panel::columns`
+/// (`lined_up`), which also decides when the left gives way.
 pub fn two_columns(width: f32) -> TwoColumns {
-    let left_w = ((width - GUTTER) / 2.).max(0.).floor();
+    let left_w = ((width - GUTTER - MARK_SPACE) / 2.).max(0.).floor();
     let right_x = left_w + GUTTER;
     TwoColumns { left_w, right_x, right_w: (width - right_x).max(0.) }
+}
+
+/// The script area that shows two columns at [`READABLE_ZOOM`] or more:
+/// two readable columns and the gutter (the left column needs less, so
+/// there is a little to spare).
+pub fn two_columns_min() -> f32 {
+    2. * column_width_at(READABLE_ZOOM) + GUTTER
 }
 
 /// Blank space above the first paragraph (the page's top margin).
@@ -247,12 +275,40 @@ mod tests {
     }
 
     #[test]
-    fn two_columns_split_evenly_around_the_gutter() {
+    fn two_columns_leave_the_marks_room_on_the_right() {
         let c = two_columns(1000.0);
         assert_eq!(c.left_w + GUTTER + c.right_w, 1000.0);
-        assert!((c.left_w - c.right_w).abs() <= 1.0);
+        assert!((c.right_w - c.left_w - MARK_SPACE).abs() <= 1.0, "{c:?}");
         assert_eq!(c.right_x, c.left_w + GUTTER);
         assert_eq!(two_columns(10.0).left_w, 0.0);
+    }
+
+    /// The left page (no marks) in a list `w` wide at zoom `z`: its text
+    /// column and `*` are on screen.
+    fn left_visible(w: f32, z: f32) -> bool {
+        let left = crop_left(w, z, visible_unmarked_at(z));
+        let (l, r) = visible_unmarked_at(z);
+        left + l >= -0.01 && left + r <= w + 0.01
+    }
+
+    #[test]
+    fn both_columns_show_whole_at_the_right_columns_zoom() {
+        // From the narrowest script area that shows two columns up, the
+        // zoom fitted to the right column is readable, and both columns
+        // show their text column whole (the right one with its marks).
+        let mut w = two_columns_min();
+        assert!(zoom_for(two_columns(w).right_w) >= READABLE_ZOOM - 1e-4);
+        while w < 2400.0 {
+            let c = two_columns(w);
+            let z = zoom_for(c.right_w);
+            assert!(z >= READABLE_ZOOM - 1e-4, "{w}: {z}");
+            assert!(all_visible(c.right_w, z), "right {w}");
+            assert!(left_visible(c.left_w, z), "left {w}");
+            w += 5.0;
+        }
+        // 13" MacBook Air (1,470 px) with the rail and the card: about 0.75.
+        let z = zoom_for(two_columns(1470.0 - 44.0 - 380.0).right_w);
+        assert!((0.72..0.78).contains(&z), "{z}");
     }
 
     #[test]

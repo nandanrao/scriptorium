@@ -408,6 +408,10 @@ pub struct ScriptView {
     /// `ROW:` suggestions whenever a review is opened here), its rows over
     /// the live document, and the session's "Lined up on the left" choice.
     links: LinksView,
+    /// The script lined up on the left gave way for width (B4,
+    /// `agent_panel::columns`): drawn as one column with a note. View-only:
+    /// the session's "Lined up on the left" choice is untouched.
+    left_hidden: bool,
     /// Lays the pair's rows out again once typing settles ([`Stale::Text`]),
     /// for the log length it was scheduled at.
     links_task: Option<(usize, Task<()>)>,
@@ -546,6 +550,7 @@ impl ScriptView {
             raw: raw.into(),
             fdx: Rc::new(fdx),
             links,
+            left_hidden: false,
             links_task: None,
             retired: false,
             session_path,
@@ -1000,7 +1005,7 @@ impl ScriptView {
         let protect = self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para);
         // Two columns (B2): the original lined up on the left replaces its
         // dimmed lines in blank ones.
-        let columns = self.links.columns(doc);
+        let columns = if self.left_hidden { None } else { self.links.columns(doc) };
         let ghosts = if columns.is_some() { Rc::default() } else { self.links.ghosts() };
         let mut decor = Decor { originals: self.originals.clone(), ghosts, columns, ..Decor::default() };
         // Lines move under blocks (accepting one gives its lines new ids), so
@@ -3577,6 +3582,34 @@ impl Focusable for ScriptView {
     }
 }
 
+impl ScriptView {
+    /// The 28 px strip over the script while the left column gave way for
+    /// width: which script is hidden, and how to get it back.
+    fn render_left_note(&self, chat_open: bool) -> Div {
+        let left = self.pair_header().map_or_else(|| "The other version".to_string(), |h| h.left);
+        let how = if chat_open {
+            format!("widen the window or close the chat ({})", crate::menus::shortcut("l"))
+        } else {
+            "widen the window".to_string()
+        };
+        div()
+            .flex_none()
+            .h(px(LEFT_NOTE_HEIGHT))
+            .px_3()
+            .flex()
+            .items_center()
+            .bg(SIDE)
+            .border_b_1()
+            .border_color(RULE)
+            .text_size(px(12.))
+            .text_color(INK_2)
+            .child(div().truncate().child(format!("{left} hidden: {how}.")))
+    }
+}
+
+/// The strip's height (as the status bar).
+const LEFT_NOTE_HEIGHT: f32 = 28.;
+
 impl Render for ScriptView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.expire_notice(cx);
@@ -3584,7 +3617,15 @@ impl Render for ScriptView {
         let width = window.viewport_size().width / px(1.);
         // Keys going to the script keep it on screen (the card gives way).
         let keep_script = self.rewriting.is_some() || self.editor.read(cx).focus_handle().is_focused(window);
-        let cols = agent_panel::columns(width, agent.is_some(), self.review().is_some(), keep_script);
+        let lined_up = self.links.shows_left();
+        let cols = agent_panel::columns(width, agent.is_some(), self.review().is_some(), keep_script, lined_up);
+        // Too narrow for two columns: the left gives way, the choice stays.
+        let left_hidden = cols.left_hidden(lined_up);
+        if left_hidden != self.left_hidden {
+            self.left_hidden = left_hidden;
+            self.refresh(cx);
+        }
+        let left_note = (left_hidden && cols.script).then(|| self.render_left_note(agent.is_some()));
         // A card that gave way to the script isn't drawn (its focus isn't in it).
         let card_shown = !cols.card_hidden(self.review().is_some());
         let card = self.review().filter(|_| card_shown).map(|_| {
@@ -3645,7 +3686,10 @@ impl Render for ScriptView {
                             .h_full()
                             .overflow_hidden()
                             .when(!cols.script, |d| d.flex_none().w(px(0.)))
-                            .child(self.editor.clone()),
+                            .flex()
+                            .flex_col()
+                            .children(left_note)
+                            .child(div().flex_1().min_h_0().child(self.editor.clone())),
                     )
                     .children(card)
                     .children(agent),

@@ -45,6 +45,7 @@ use gpui::{
     actions, div, prelude::*, px,
 };
 
+use crate::layout::GUTTER;
 use crate::script_view::{RedoAny, ScriptView, UndoAny};
 use crate::theme::*;
 use composer::{Composer, ComposerEvent};
@@ -116,6 +117,9 @@ pub struct Columns {
     /// The script column shows. When even the narrowest card and panel leave
     /// it too little room, one of the two gives way (see [`columns`]).
     pub script: bool,
+    /// The script lined up on the left shows beside the open one (asked
+    /// for with `lined_up`, and there is room for both at a readable zoom).
+    pub left: bool,
 }
 
 impl Columns {
@@ -123,22 +127,57 @@ impl Columns {
     pub fn card_hidden(&self, card: bool) -> bool {
         card && self.card == 0.
     }
+
+    /// The script lined up on the left gave way for width: it was asked
+    /// for but isn't shown.
+    pub fn left_hidden(&self, lined_up: bool) -> bool {
+        lined_up && !self.left
+    }
 }
 
-/// The columns for a window `width` wide, with the panel open or not and a
-/// review card or not. Narrowing goes in this order, so nothing is ever
-/// cut off at or above [`window_min_size`]: the sidebar becomes a rail; the
-/// page's zoom shrinks (down to `READABLE_ZOOM`, by the editor's fit); the
-/// panel narrows to [`PANEL_MIN`]; the card narrows to [`CARD_MIN`]; then
-/// the script gives way to the card, which shows the line under review —
-/// unless `keep_script` (the writer is rewriting or typing in the script):
-/// then the card gives way instead, so the keys never go to a hidden column.
-pub fn columns(width: f32, panel_open: bool, card: bool, keep_script: bool) -> Columns {
+/// The columns for a window `width` wide, with the panel open or not, a
+/// review card or not, and the other script `lined_up` on the left or not.
+/// Narrowing goes in this order, so nothing is ever cut off at or above
+/// [`window_min_size`]: the sidebar becomes a rail; the page's zoom shrinks
+/// (down to `READABLE_ZOOM`, by the editor's fit; both columns share it);
+/// the panel narrows to [`PANEL_MIN`]; the card narrows to [`CARD_MIN`];
+/// then the left column gives way (the script area shows the open script
+/// alone, with a note); then the script gives way to the card, which shows
+/// the line under review — unless `keep_script` (the writer is rewriting or
+/// typing in the script): then the card gives way instead, so the keys
+/// never go to a hidden column.
+pub fn columns(width: f32, panel_open: bool, card: bool, keep_script: bool, lined_up: bool) -> Columns {
+    if lined_up {
+        let (c, over) = share(width, panel_open, card, crate::layout::two_columns_min(), 2. * EDITOR_MIN + GUTTER);
+        if over <= 0. {
+            return Columns { left: true, ..c };
+        }
+        // The left gives way; the sidebar stays a rail (it gave way first).
+        let (c, over) = share_beside(width, true, panel_open, card, script_min());
+        return finish(c, over, width, card, keep_script);
+    }
+    let (c, over) = share(width, panel_open, card, script_min(), EDITOR_MIN);
+    finish(c, over, width, card, keep_script)
+}
+
+/// The columns beside a script area of at least `need`, and by how much
+/// they fall short of it (`> 0`) with the panel and card at their narrowest.
+/// With the panel open the sidebar is a rail already when the script area
+/// would be under `roomy` ([`EDITOR_MIN`] for one column).
+fn share(width: f32, panel_open: bool, card: bool, need: f32, roomy: f32) -> (Columns, f32) {
+    let panel = if panel_open { WIDTH } else { 0. };
+    let card_w = if card { CARD_WIDTH } else { 0. };
+    let area = width - SIDEBAR_WIDTH - panel - card_w;
+    let rail = (panel_open && area < roomy) || area < need;
+    share_beside(width, rail, panel_open, card, need)
+}
+
+/// [`share`] with the sidebar's look given.
+fn share_beside(width: f32, rail: bool, panel_open: bool, card: bool, need: f32) -> (Columns, f32) {
     let mut panel = if panel_open { WIDTH } else { 0. };
     let mut card_w = if card { CARD_WIDTH } else { 0. };
-    let rail = sidebar_collapsed(panel_open, card, width) || width - SIDEBAR_WIDTH - panel - card_w < script_min();
     let side = if rail { RAIL_WIDTH } else { SIDEBAR_WIDTH };
-    let mut over = side + panel + card_w + script_min() - width;
+    let mut over = side + panel + card_w + need - width;
     if over > 0. && panel_open {
         let d = over.min(WIDTH - PANEL_MIN);
         panel -= d;
@@ -149,27 +188,26 @@ pub fn columns(width: f32, panel_open: bool, card: bool, keep_script: bool) -> C
         card_w -= d;
         over -= d;
     }
+    (Columns { rail, card: card_w, panel, script: true, left: false }, over)
+}
+
+/// The last step for one script column: too little room, and the script
+/// or the card gives way.
+fn finish(c: Columns, over: f32, width: f32, card: bool, keep_script: bool) -> Columns {
     if over <= 0. || !card {
-        return Columns { rail, card: card_w, panel, script: true };
+        return c;
     }
+    let side = if c.rail { RAIL_WIDTH } else { SIDEBAR_WIDTH };
     if keep_script {
-        Columns { rail, card: 0., panel, script: true }
+        Columns { card: 0., ..c }
     } else {
-        Columns { rail, card: (width - side - panel).max(CARD_MIN), panel, script: false }
+        Columns { card: (width - side - c.panel).max(CARD_MIN), script: false, ..c }
     }
 }
 
 /// The narrowest the editor gets before the sidebar gives way (the page at
 /// about 70 % zoom; its fit-to-width zoom absorbs the rest).
 pub const EDITOR_MIN: f32 = 600.;
-
-/// Whether the sidebar shows as a rail: the panel is open and the editor
-/// would be narrower than [`EDITOR_MIN`] beside the columns showing (the
-/// card shows only in a review view).
-pub fn sidebar_collapsed(panel_open: bool, card: bool, window_width: f32) -> bool {
-    let columns = SIDEBAR_WIDTH + WIDTH + if card { CARD_WIDTH } else { 0. };
-    panel_open && window_width - columns < EDITOR_MIN
-}
 
 /// Cmd on macOS, Ctrl elsewhere (as in main.rs).
 macro_rules! sec {
@@ -729,46 +767,50 @@ mod tests {
     /// Nothing is cut off: the columns showing add up to the window at most.
     fn fits(width: f32, c: Columns) -> bool {
         let side = if c.rail { RAIL_WIDTH } else { SIDEBAR_WIDTH };
-        let script = if c.script { script_min() } else { 0. };
+        let script = match (c.script, c.left) {
+            (_, true) => crate::layout::two_columns_min(),
+            (true, false) => script_min(),
+            (false, false) => 0.,
+        };
         side + c.card + c.panel + script <= width + 0.01
     }
 
     #[test]
     fn columns_keep_the_full_look_on_wide_windows() {
         for (open, card) in [(true, true), (true, false), (false, true), (false, false)] {
-            let c = columns(1500., open, card, false);
+            let c = columns(1500., open, card, false, false);
             assert_eq!(c.panel, if open { WIDTH } else { 0. });
             assert_eq!(c.card, if card { CARD_WIDTH } else { 0. });
             assert!(c.script);
             // The sidebar as before: a rail only with the panel and card open.
             assert_eq!(c.rail, open && card);
         }
-        assert!(!columns(1200., false, true, false).rail);
+        assert!(!columns(1200., false, true, false, false).rail);
         // Everything at full width from rail + card + panel + the readable
         // column (about 1208 px) up.
         let full = RAIL_WIDTH + CARD_WIDTH + WIDTH + script_min();
         assert!(full < 1210., "{full}");
-        assert_eq!(columns(1210., true, true, false).panel, WIDTH);
+        assert_eq!(columns(1210., true, true, false, false).panel, WIDTH);
     }
 
     #[test]
     fn columns_narrow_panel_then_card_then_give_way() {
         // Rail + card + panel at full + the narrowest script: 44+380+360+347.
         let full = RAIL_WIDTH + CARD_WIDTH + WIDTH + script_min();
-        let c = columns(full - 40., true, true, false);
+        let c = columns(full - 40., true, true, false, false);
         assert_eq!((c.card, c.panel, c.script), (CARD_WIDTH, WIDTH - 40., true));
-        let c = columns(full - (WIDTH - PANEL_MIN) - 30., true, true, false);
+        let c = columns(full - (WIDTH - PANEL_MIN) - 30., true, true, false, false);
         assert_eq!((c.card, c.panel, c.script), (CARD_WIDTH - 30., PANEL_MIN, true));
         // Below the narrowest card and panel: the script column gives way.
-        let c = columns(900., true, true, false);
+        let c = columns(900., true, true, false, false);
         assert!(!c.script && c.panel == PANEL_MIN && c.card >= CARD_MIN, "{c:?}");
-        let c = columns(1100., true, true, false);
+        let c = columns(1100., true, true, false, false);
         assert!(c.script && c.card >= CARD_MIN && c.panel >= PANEL_MIN, "{c:?}");
         // Rewriting or typing in the script: the card gives way instead.
-        let c = columns(900., true, true, true);
+        let c = columns(900., true, true, true, false);
         assert!(c.script && c.card_hidden(true) && c.panel == PANEL_MIN, "{c:?}");
         // With room for everything, keeping the script changes nothing.
-        assert_eq!(columns(1100., true, true, true), columns(1100., true, true, false));
+        assert_eq!(columns(1100., true, true, true, false), columns(1100., true, true, false, false));
         // Every width from the minimum up fits, whatever is open.
         let (min, _) = window_min_size();
         let mut w = min;
@@ -781,7 +823,7 @@ mod tests {
                 (false, true, true),
                 (false, false, false),
             ] {
-                let c = columns(w, open, card, keep);
+                let c = columns(w, open, card, keep, false);
                 assert!(fits(w, c), "{w} {open} {card}: {c:?}");
                 assert!(c.script || (card && !keep), "the script only gives way to a card, never while kept");
                 // Whenever the script shows, it is at a readable zoom.
@@ -796,13 +838,95 @@ mod tests {
     }
 
     #[test]
+    fn lined_up_on_a_13_inch_macbook_air() {
+        // About 1,470 px: chat closed, both columns show (rail and card),
+        // at about 0.75 zoom.
+        let c = columns(1470., false, true, false, true);
+        assert!(c.left && c.script && c.rail && c.card == CARD_WIDTH, "{c:?}");
+        let z = crate::layout::zoom_for(crate::layout::two_columns(1470. - RAIL_WIDTH - CARD_WIDTH).right_w);
+        assert!((0.72..0.78).contains(&z), "{z}");
+        // Chat open: even the narrowest panel and card leave too little, so
+        // the English gives way; the script, panel and card show in full.
+        let c = columns(1470., true, true, false, true);
+        assert!(!c.left && c.script && c.left_hidden(true), "{c:?}");
+        assert_eq!((c.panel, c.card), (WIDTH, CARD_WIDTH));
+    }
+
+    #[test]
+    fn lined_up_at_1920_and_1100() {
+        // 1,920 px: everything; with the chat open the sidebar is a rail,
+        // as for one column, so the two columns keep a comfortable zoom.
+        for open in [false, true] {
+            let c = columns(1920., open, true, false, true);
+            assert!(c.left && c.rail == open && c.card == CARD_WIDTH, "{open}: {c:?}");
+            assert_eq!(c.panel, if open { WIDTH } else { 0. });
+        }
+        // 1,100 px, chat closed: both columns beside the rail without a
+        // card; with the card the left gives way.
+        let c = columns(1100., false, false, false, true);
+        assert!(c.left && c.rail, "{c:?}");
+        let c = columns(1100., false, true, false, true);
+        assert!(!c.left && c.script && c.card == CARD_WIDTH, "{c:?}");
+        // Chat open: the left gives way, then as with nothing lined up.
+        let c = columns(1100., true, true, false, true);
+        assert!(!c.left && c.rail, "{c:?}");
+        assert_eq!(Columns { left: false, ..c }, columns(1100., true, true, false, false));
+    }
+
+    #[test]
+    fn the_left_gives_way_after_the_panel_and_card_narrow() {
+        // Rail + narrowest panel + narrowest card + two readable columns.
+        let both = RAIL_WIDTH + PANEL_MIN + CARD_MIN + crate::layout::two_columns_min();
+        let c = columns(both + 1., true, true, false, true);
+        assert!(c.left && c.panel == PANEL_MIN && c.card < CARD_MIN + 2., "{c:?}");
+        let c = columns(both - 1., true, true, false, true);
+        assert!(!c.left && c.script, "{c:?}");
+        // A little wider: the panel narrows before anything else.
+        let c = columns(both + (CARD_WIDTH - CARD_MIN) + 20., true, true, false, true);
+        assert!(c.left && c.card == CARD_WIDTH && c.panel == PANEL_MIN + 20., "{c:?}");
+        // From the minimum window up: the left only shows with room for two
+        // readable columns, gives way before the card or the script, and
+        // nothing is cut off.
+        let (min, _) = window_min_size();
+        let mut w = min;
+        while w < 2400. {
+            for (open, card, keep) in [
+                (true, true, false),
+                (true, true, true),
+                (true, false, false),
+                (false, true, false),
+                (false, false, false),
+            ] {
+                let c = columns(w, open, card, keep, true);
+                assert!(fits(w, c), "{w} {open} {card}: {c:?}");
+                if !c.script || c.card_hidden(card) {
+                    assert!(!c.left, "the left gives way first: {w} {c:?}");
+                }
+                if c.left {
+                    let side = if c.rail { RAIL_WIDTH } else { SIDEBAR_WIDTH };
+                    let area = w - side - c.card - c.panel;
+                    let z = crate::layout::zoom_for(crate::layout::two_columns(area).right_w);
+                    assert!(z >= crate::layout::READABLE_ZOOM - 1e-3, "{w}: zoom {z}");
+                }
+                // Not lined up, nothing changes but the left.
+                let alone = columns(w, open, card, keep, false);
+                if !c.left {
+                    assert!(alone.script == c.script && alone.panel == c.panel, "{w}: {c:?} {alone:?}");
+                }
+            }
+            w += 7.;
+        }
+    }
+
+    #[test]
     fn sidebar_collapses_when_the_editor_would_be_too_narrow() {
         // Review view: sidebar, editor, card, panel.
-        assert!(sidebar_collapsed(true, true, 1500.));
-        assert!(!sidebar_collapsed(true, true, 1700.));
+        let rail = |open, card, w| columns(w, open, card, false, false).rail;
+        assert!(rail(true, true, 1500.));
+        assert!(!rail(true, true, 1700.));
         // The script view has no card: room to spare at 1500.
-        assert!(!sidebar_collapsed(true, false, 1500.));
-        assert!(sidebar_collapsed(true, false, 1100.));
-        assert!(!sidebar_collapsed(false, true, 1000.));
+        assert!(!rail(true, false, 1500.));
+        assert!(rail(true, false, 1100.));
+        assert!(!rail(false, true, 1100.));
     }
 }
