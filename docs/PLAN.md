@@ -306,6 +306,33 @@ Consequences and risks:
 - **Scope:** this is a platform. Design the module API early, because it shapes
   the core (ids, change events, storage), but build it after the review core.
 
+**Update after v0.6.0 (2026-11-17, with the user):**
+- **Start in the browser.** First step: the app serves modules on a local
+  address (localhost, with a per-session token) and opens them in the
+  writer's web browser. No webview work. A panel inside the app window stays
+  the goal (still liked), then a separate window if the panel fails on some
+  platform; the webview test below waits until then.
+- **The API is the agent tool set.** The app already serves the agent tools
+  over its socket (v0.6.0). A module calls the same tools (the read ones and
+  `suggest_changes`, same rules: suggestions only, never direct edits),
+  plus two new things: change events for live updates, and read/write of the
+  module's own data. No second API to keep in step.
+- **No special tool for building modules.** Any agent that can write files in
+  the project folder can build one: Claude Code, Cowork in Claude Desktop, or
+  a Claude Desktop chat with the Filesystem extension. The connector itself
+  stays unable to write arbitrary files. What we add is guidance
+  (`guide('module')`: folder layout, manifest, the API) and a small JS
+  library the app serves to every module.
+- **What we build is the hosting**: serving modules, the bridge to the
+  tools, change events, module data, the permissions in the manifest.
+- **Why modules over what exists:** a Claude Desktop artifact can already
+  draw a view of the script, but it's a snapshot, lives in claude.ai, and
+  holds no data the writer adds. Modules are for live views and for data tied
+  to the script (storyboards, a character bible).
+- **Still first:** which modules the writer wants, and stable scene identity
+  (open question 5) for anything that attaches data to scenes; the links file
+  and re-find from versions are a pattern to build on.
+
 ### Next test: a webview in the GPUI app on Wayland (not started)
 
 Decision so far: use `wry` directly (no full Tauri) if it works.
