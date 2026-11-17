@@ -43,8 +43,9 @@ use crate::links::{Links, Para, Row, Stamp};
 pub struct Alignment {
     /// (old id, new id), ascending on both sides.
     pub pairs: Vec<(ParaId, ParaId)>,
-    /// How many of `pairs` matched on exact text (step 1); the rest paired
-    /// by kind and likeness (step 2) and count as changed.
+    /// How many of `pairs` read the same as their old stamp: the ones step
+    /// 1 matched, plus step-2 pairs whose texts are equal (a blank line
+    /// still blank). The rest count as changed.
     pub exact: usize,
     /// New paragraphs nothing old paired with, in file order. For the
     /// made member these stay unlisted; for another member each gets a row.
@@ -59,7 +60,7 @@ pub struct Alignment {
 }
 
 impl Alignment {
-    /// Pairs found by position rather than exact text (step 2).
+    /// Pairs whose text differs from the old stamp (reworded lines).
     pub fn changed(&self) -> usize {
         self.pairs.len() - self.exact
     }
@@ -134,6 +135,10 @@ pub fn by_text(old: &BTreeMap<ParaId, Para>, new: &Script, is_caps: &dyn Fn(&Ele
                 let found = pair_stretch(&olds, &news);
                 let (found, rests) = find_splits(&olds, &news, found);
                 for (i, j) in found {
+                    let (kind, was) = olds[i];
+                    if stamp_text(kind, was, is_caps) == stamp_text(kind, &news[j].1, is_caps) {
+                        exact += 1;
+                    }
                     pairs.push((old[op.i1 + i].0, new_paras[op.j1 + j].id));
                 }
                 split.extend(rests.into_iter().map(|(h, r)| (new_paras[op.j1 + h].id, new_paras[op.j1 + r].id)));

@@ -72,8 +72,8 @@ fn c3_blanks_pair_by_position_only() {
     ]);
     let al = align(&o, &n);
     assert_eq!(al.pairs, pairs(&[(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)]));
-    assert_eq!(al.exact, 3, "H, C and the second H are exact; nothing blank is");
-    assert_eq!(al.changed(), 4);
+    assert_eq!(al.exact, 5, "H, C, the second H and the two blanks still blank read the same");
+    assert_eq!(al.changed(), 2, "only the two blanks filled in are reworded");
     assert!(al.new.is_empty() && al.gone.is_empty());
 }
 
@@ -85,8 +85,22 @@ fn blank_never_exact_even_with_unstamped_old() {
     let o = old(0, &[(A, ""), (A, "=")]);
     let n = script(&[(A, ""), (A, "  ")]);
     let al = align(&o, &n);
-    assert_eq!(al.exact, 0);
     assert_eq!(al.pairs, pairs(&[(0, 0), (1, 1)]));
+    assert_eq!(al.changed(), 0, "blank to blank is no change");
+}
+
+/// Final Draft rewrote every empty paragraph in another byte form and one
+/// blank was typed in: the blanks re-pair in step 2, but only the line
+/// typed in counts as reworded.
+#[test]
+fn blanks_repaired_after_a_resave_are_not_reworded() {
+    let o = old(0, &[(H, "=INT. HALL - DAY"), (A, "~"), (A, "~"), (C, "=ANA"), (D, "~"), (A, "~"), (A, "~")]);
+    let n = script(&[(H, "INT. HALL - DAY"), (A, ""), (A, " "), (C, "ANA"), (D, "Hola."), (A, ""), (A, "")]);
+    let al = align(&o, &n);
+    assert_eq!(al.pairs, pairs(&[(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)]));
+    assert_eq!(al.changed(), 1);
+    let n = script(&[(H, "INT. HALL - DAY"), (A, ""), (A, ""), (C, "ANA"), (D, ""), (A, ""), (A, "")]);
+    assert_eq!(align(&o, &n).changed(), 0);
 }
 
 #[test]
@@ -381,8 +395,8 @@ fn unchanged_file_keeps_everything() {
     ]);
     let (out, al) = re(&l, 1, &n, "bbbb");
     assert_eq!(out, l);
-    assert_eq!(al.exact, 4);
-    assert_eq!(al.changed(), 1);
+    assert_eq!(al.exact, 5);
+    assert_eq!(al.changed(), 0, "the blank still blank is no change");
 }
 
 const MULTI: &str = "\
