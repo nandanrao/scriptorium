@@ -14,8 +14,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use scriptorium_agent::ToolCall;
+use scriptorium_chat::exec::{Caller, FileScript, Script as _, run_call};
 use scriptorium_core::outline::annotate;
 use scriptorium_core::text::looks_same;
 use scriptorium_core::{ElementKind, ParaId, Script};
@@ -24,15 +26,12 @@ use scriptorium_review::file::{Case, FORMAT_HEADER, append_block, insert_id, par
 use scriptorium_review::matching::{Para, match_entries};
 use scriptorium_review::sessionfile;
 use scriptorium_review::{Entry, Line, Review, Session, Shape, Unplaced};
-use scriptorium_tools::{Ctx, LinksCtx, Outcome, Spot, Target, block_entry, item_numbers, suggestion_rows, uses_links};
+use scriptorium_tools::{Spot, block_entry, item_numbers, suggestion_rows};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::fsio::{LockError, SessionLock, write_atomic};
-use scriptorium_fsio::Folders;
-use scriptorium_fsio::opened::{
-    Opened, agent_may_write, agent_review, file_name, load, new_review_id, no_reviews, review_salt,
-};
+use scriptorium_fsio::opened::{Opened, file_name, load, new_review_id, no_reviews, review_salt};
 use scriptorium_fsio::ops;
 pub use scriptorium_fsio::ops::{Choice, SuggestionRef, output_path};
 
@@ -165,9 +164,10 @@ VERSIONS
 
 AGENT TOOLS
   scriptorium tool <script.fdx> <name> ['<json args>'] [--review-file <review.txt>]
-        run one of the tools the built-in agent and the MCP server use:
-        script_info, list_paragraphs, read_scene, read_script, list_reviews,
-        list_suggestions, suggest_change, suggest_changes. Arguments are a
+  scriptorium tool guide '{\"topic\": \"review\"}'     (guide takes no script)
+        run one of the tools the MCP server offers agents (`tool --list`;
+        the built-in agent's, plus attach_reviews, decide_suggestion,
+        edit_paragraph, undo, redo, write_script, guide…). Arguments are a
         JSON object, e.g. '{\"scene\": 2}'. Suggestions go to --review-file
         (created and attached if missing), else to the only attached review.
         --review-file is a path from the script's folder: an attached review,
@@ -176,11 +176,13 @@ AGENT TOOLS
         must be attached by the writer first (`reviews add`). Suggestions are
         only written into reviews inside the script's folder. Arguments the
         tool doesn't list are refused.
-        The read-only tools (all but suggest_*) never write, and show the
-        script as written if the saved session can't be used.
+        The script is the first argument, never `script` in the JSON.
+        The read-only tools never write, and show the script as written if
+        the saved session can't be used.
   scriptorium tool [<script.fdx>] --list [--json]
         the tools with a one-line description each; --json prints their
-        full specs (name, description, JSON schema of the arguments)
+        full specs (name, description, JSON schema of the arguments, the
+        script left out: it is the first argument)
 
 CONNECTING AI AGENTS (the app's Scriptorium › Connect an AI agent…)
   scriptorium connect claude-desktop|claude-code|codex
@@ -956,74 +958,20 @@ pub(crate) fn lock(script: &str) -> Result<Option<SessionLock>, String> {
     }
 }
 
-/// Where a `review_file` is (or will be): relative to the script's folder
-/// `dir` (or absolute), canonical where it exists, so its stored form matches
-/// the session's even before the file exists.
-fn review_location(dir: &Path, file: &str) -> PathBuf {
-    let p = sessionfile::resolve_path(dir, file);
-    if let Ok(at) = p.canonicalize() {
-        return at;
-    }
-    match (p.parent().map(Path::canonicalize), p.file_name()) {
-        (Some(Ok(folder)), Some(name)) => folder.join(name),
-        _ => p,
-    }
-}
-
-/// The first line of `new_version`'s result: `version new`'s summary for a
-/// version made now, [`scriptorium_tools::already_made`] for one made
-/// before (the links file's stamps don't give its counts as they are now).
-fn made_line(made: &scriptorium_fsio::versions::NewVersion) -> String {
-    use scriptorium_fsio::opened::file_name;
-    use scriptorium_fsio::versions::Made;
-    let (version, links) = (file_name(&made.version), file_name(&made.links));
-    match &made.made {
-        Made::Already => scriptorium_tools::already_made(&version, &links, &[]),
-        Made::Refound(msgs) => scriptorium_tools::already_made(&version, &links, msgs),
-        Made::New | Made::Adopted => made.summary().lines().next().unwrap_or_default().to_string(),
-    }
-}
-
-/// The pair for a tool's `Ctx::links`. A links file that can't be used is
-/// passed to a suggesting tool only when the script may be the version (it
-/// then refuses: a version's suggestions are placed by its rows).
-fn links_for<'a>(o: &'a Opened, name: &str) -> Option<Result<LinksCtx<'a>, String>> {
-    match o.pair_view()? {
-        Err(_) if scriptorium_tools::may_append(name) && !o.pair().maybe_made() => None,
-        v => Some(v.map(LinksCtx::from)),
-    }
-}
-
-/// The tools that only read: run on a read-only open, so a session that
-/// can't be used is a note (the script as written), as for `info` and `dump`.
-const READ_ONLY_TOOLS: &[&str] = &[
-    "script_info",
-    "list_paragraphs",
-    "read_scene",
-    "read_script",
-    "list_reviews",
-    "list_suggestions",
-    "list_versions",
-    "read_rows",
-];
-
-/// The tool specs `tool` accepts: the agent's catalogue, plus `before` on
-/// `suggest_change` and `review_file` on the suggesting tools.
-pub fn tool_specs() -> Vec<scriptorium_tools::ToolSpec> {
-    let mut specs = scriptorium_tools::catalogue(scriptorium_tools::Offer::Chat);
-    for spec in &mut specs {
-        if spec.name == "suggest_change" {
-            scriptorium_tools::add_before(spec);
-        }
-        scriptorium_tools::add_host_fields(spec, &[scriptorium_tools::HostField::ReviewFile]);
-    }
-    specs
-}
-
 /// `tool --list [--json]`: each tool's name and the first line of its
-/// description, or the full specs as JSON.
+/// description, or the full specs as JSON: the tools outside agents are
+/// offered ([`scriptorium_tools::Offer::Agent`]), as MCP lists them.
 fn tool_list(json: bool) -> String {
-    let specs = tool_specs();
+    let mut specs = scriptorium_tools::catalogue(scriptorium_tools::Offer::Agent);
+    // The script is the command's first argument, not a tool argument.
+    for spec in &mut specs {
+        if let Some(props) = spec.schema.get_mut("properties").and_then(Value::as_object_mut) {
+            props.remove("script");
+        }
+        if let Some(required) = spec.schema.get_mut("required").and_then(Value::as_array_mut) {
+            required.retain(|r| r != "script");
+        }
+    }
     if json {
         return serde_json::to_string_pretty(&specs).expect("specs serialize") + "\n";
     }
@@ -1052,7 +1000,12 @@ fn tool_command(args: &[&str], notes: &mut Vec<String>) -> Result<String, String
         }
         return Ok(tool_list(json));
     }
-    let [script, rest @ ..] = args else { return Err(format!("wrong arguments for `tool`\n\n{USAGE}")) };
+    // `guide` needs no script: `tool guide '{"topic": "review"}'`.
+    let (script, rest) = match args {
+        ["guide", ..] => (None, args),
+        [script, rest @ ..] => (Some(*script), rest),
+        [] => return Err(format!("wrong arguments for `tool`\n\n{USAGE}")),
+    };
     let (mut name, mut json, mut review_file) = (None, None, None);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -1068,176 +1021,68 @@ fn tool_command(args: &[&str], notes: &mut Vec<String>) -> Result<String, String
         Some(j) => serde_json::from_str(j).map_err(|e| format!("the tool arguments aren't JSON: {e}"))?,
         None => Value::Object(Default::default()),
     };
-    tool(script, name, &args, review_file, notes)
+    tool(script, name, args, review_file, notes)
 }
 
-/// Run one `scriptorium_tools` tool on the live document of `script` and
-/// carry out what it asks (the host contract: the tool never writes; here
-/// the review file is written first, then the session). `args` is the
-/// tool's JSON arguments; `review_file` (or `review_file` in `args`) is
-/// where suggestions go, as a path from the script's folder: an attached
-/// review, or else a `*.review.txt` inside the folder, created and attached
-/// if missing ([`scriptorium_fsio::review_in_folder`]); else they go to the
-/// only attached review. Suggestions are written only into files inside the
-/// script's folder ([`scriptorium_fsio::opened::agent_may_write`]). Read-only
-/// tools never write, and a saved session that can't be used is a note for
-/// them rather than an error. Returns the tool result, ending in a newline.
-pub fn tool(
-    script: &str,
+/// Runs one tool on `script` as an outside agent would
+/// ([`scriptorium_chat::exec::run_call`] with [`Caller::Agent`] over the
+/// script's files, waiting for the session lock up to
+/// [`scriptorium_fsio::LOCK_WAIT`]): the executor MCP and the app use.
+/// `args` is the tool's JSON arguments, without `script` (it is the command
+/// line's); `review_file` (the `--review-file` flag, or in `args`) is where
+/// suggestions go, relative to the script's folder. Notes from opening the
+/// script go to `notes`. Returns the tool result, ending in a newline.
+fn tool(
+    script: Option<&str>,
     name: &str,
-    args: &Value,
+    mut args: Value,
     review_file: Option<&str>,
     notes: &mut Vec<String>,
 ) -> Result<String, String> {
-    let mut args = args.clone();
-    // Only the arguments `tool --list --json` shows (typos and made-up ones
-    // are refused rather than ignored).
-    if let Some(spec) = tool_specs().iter().find(|s| s.name == name) {
-        scriptorium_tools::check_args(spec, &args).map_err(|e| e.to_string())?;
+    let map = args.as_object_mut().ok_or("the tool arguments must be a JSON object")?;
+    if map.contains_key("script") {
+        return Err("give the script as the first argument, not as `script` in the tool arguments".into());
     }
-    let _lock = if READ_ONLY_TOOLS.contains(&name) { None } else { Some(lock(script)?) };
-    let mut o = if READ_ONLY_TOOLS.contains(&name) {
-        Opened::open_read_only(script, notes)?
-    } else {
-        Opened::open(script, &[], notes)?
-    };
-    // `review_file` (the parameter, or in the JSON): a path from the
-    // script's folder, passed on in the form the session stores, so
-    // `find_review` sees an attached file as attached.
-    let from_json = args.get("review_file").and_then(Value::as_str).map(str::to_string);
-    let review_named = review_file.map(str::to_string).or(from_json);
-    if let Some(f) = &review_named {
-        let at = review_location(&o.dir, f);
-        let map = args.as_object_mut().ok_or("the tool arguments must be a JSON object")?;
-        map.insert("review_file".into(), Value::String(sessionfile::stored_path(&o.dir, &at)));
+    if let Some(f) = review_file {
+        map.insert("review_file".into(), Value::String(f.into()));
     }
-    let outcome = {
-        let fdx = &o.fdx;
-        let caps = |k: &ElementKind| fdx.is_caps(k.name());
-        let ctx = Ctx {
-            doc: &o.doc,
-            session: &o.session,
-            script_name: &o.script_name,
-            is_caps: &caps,
-            default_review: (o.session.reviews.len() == 1).then_some(0),
-            links: uses_links(name).then(|| links_for(&o, name)).flatten(),
+    // `guide` takes no script, even when one is given.
+    let Some(script) = script.filter(|_| name != "guide") else {
+        let call = ToolCall {
+            id: "cli".into(),
+            name: name.into(),
+            input: args,
+            input_error: None,
+            raw_input: None,
+            extra: None,
         };
-        if let Some(Err(reason)) = &ctx.links {
-            // The tool's error is the reason: not said again as notes (it
-            // may join several broken links files' notes).
-            notes.retain(|n| n.is_empty() || !reason.contains(n.as_str()));
-        }
-        scriptorium_tools::call(&ctx, name, &args).map_err(|e| e.to_string())?
+        let done = run_call(&mut NoScript, Caller::Agent, &call);
+        return if done.result.is_error { Err(done.result.content) } else { Ok(done.result.content + "\n") };
     };
-    let append = match outcome {
-        Outcome::Text(t) => return Ok(t + "\n"),
-        Outcome::Append(a) => a,
-        Outcome::NewVersion(v) => {
-            // Under this script's lock (taken above: `new_version` writes),
-            // as `version new` runs; it opens the script again from its files.
-            drop(o);
-            let made = scriptorium_fsio::versions::version_new(
-                Path::new(script),
-                &v.language,
-                Some(&v.original_language),
-                None,
-                notes,
-            )?;
-            let first = made_line(&made);
-            return Ok(scriptorium_tools::new_version_message(&first, &made.version.display().to_string(), true) + "\n");
-        }
-    };
-    // Never reached for a read-only open (only suggesting tools append), but
-    // a session discarded by one must never be saved over.
-    if READ_ONLY_TOOLS.contains(&name) {
-        return Err(format!("{name} can't change anything"));
-    }
-    // The review it goes into, and whether it was attached before this run
-    // (only then can its file have changed since it was read).
-    // `new_file`: a review created by this call (not on disk yet; its
-    // folder may still have to be made).
-    let mut new_file = None;
-    let (mut r, was_attached) = match &append.target {
-        Target::Own => {
-            return Err(
-                "no review to add to (several or none are attached): give review_file, the review file to add to"
-                    .into(),
-            );
-        }
-        Target::Review { index, .. } => (*index, true),
-        Target::File(stored) => match scriptorium_tools::find_review(&o.session, stored) {
-            Some(r) => (r, true),
-            None => {
-                // Not attached: the agent may only name a review in the
-                // script's folder (the rule the chat agent follows too), and
-                // an existing file there only if it reads as a review.
-                let named = review_named.as_deref().expect("a file target comes from review_file");
-                let (at, _) =
-                    agent_review(&o.dir, named, Folders::MayCreate).map_err(|e| format!("review_file {e}"))?;
-                if at.exists() {
-                    // Attached the way `reviews add` does (its saved
-                    // decisions applied, its `Id:` pinned).
-                    let at_str = at.to_string_lossy().to_string();
-                    let mut more = vec![];
-                    o = Opened::open(script, &[&at_str], &mut more)?;
-                    notes.extend(more.into_iter().filter(|n| !notes.contains(n)).collect::<Vec<_>>());
-                    (o.given[0], false)
-                } else {
-                    let header = format!("{FORMAT_HEADER}\nScript: {}\n\n", o.script_name);
-                    let text = insert_id(&header, &new_review_id(&header, &review_salt(&at)));
-                    let original = o.fdx.to_script();
-                    let fdx = &o.fdx;
-                    let caps = |k: &ElementKind| fdx.is_caps(k.name());
-                    let rows = o.row_resolver();
-                    let review = Review::open_live(
-                        stored.clone(),
-                        &text,
-                        &original,
-                        &o.doc,
-                        caps,
-                        &o.script_name,
-                        rows.as_deref(),
-                    )
-                    .with_path(stored.clone());
-                    new_file = Some(at);
-                    (o.session.add(review)?, false)
-                }
-            }
-        },
-    };
-    // Another process may have written the file since it was read: then
-    // start again from what's on disk (apply re-validates against it).
-    if was_attached {
-        let stored = o.session.reviews[r].path.clone();
-        let disk = std::fs::read_to_string(o.review_path(r)).ok();
-        if disk.is_some_and(|d| d != o.session.reviews[r].text()) {
-            let mut more = vec![];
-            o = Opened::open(script, &[], &mut more)?;
-            notes.extend(more.into_iter().filter(|n| !notes.contains(n)).collect::<Vec<_>>());
-            r = scriptorium_tools::find_review(&o.session, &stored)
-                .ok_or(format!("{stored} was detached meanwhile; run the tool again"))?;
+    map.insert("script".into(), Value::String(script.into()));
+    let mut files = FileScript::new(Path::new(script))?.with_lock_wait(scriptorium_fsio::LOCK_WAIT);
+    let call =
+        ToolCall { id: "cli".into(), name: name.into(), input: args, input_error: None, raw_input: None, extra: None };
+    let done = run_call(&mut files, Caller::Agent, &call);
+    for n in files.take_notes() {
+        // A note the error already says (a links file that can't be read)
+        // isn't said again.
+        let said = done.result.is_error && !n.is_empty() && done.result.content.contains(n.as_str());
+        if !said && !notes.contains(&n) {
+            notes.push(n);
         }
     }
-    // Wherever the review came from (a session file may list any path), an
-    // agent writes only into a review inside the script's folder. A review
-    // made here was checked by `agent_review` above.
-    if new_file.is_none() {
-        agent_may_write(&o.dir, &o.review_path(r))?;
+    if done.result.is_error { Err(done.result.content) } else { Ok(done.result.content + "\n") }
+}
+
+/// The script of `tool guide`: never opened (`guide` reads none).
+struct NoScript;
+
+impl scriptorium_chat::exec::Script for NoScript {
+    fn open(
+        &mut self,
+        _writes: bool,
+    ) -> Result<Box<dyn scriptorium_chat::exec::ReviewStore + '_>, scriptorium_chat::exec::ReviewError> {
+        Err(scriptorium_chat::exec::ReviewError::Failed("no script given".into()))
     }
-    let fdx = &o.fdx;
-    let caps = |k: &ElementKind| fdx.is_caps(k.name());
-    let rows = o.row_resolver();
-    let applied = scriptorium_tools::apply(&mut o.session, &o.doc, r, append, &caps, rows.as_deref())
-        .map_err(|e| e.to_string())?;
-    if let Some(text) = &applied.file_text {
-        // Its folder is made only now that there is something to write.
-        if let Some(parent) = new_file.as_deref().and_then(Path::parent) {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("can't create the folder {}: {e}", parent.display()))?;
-        }
-        let path = o.review_path(r);
-        o.write_review(&path, text)?;
-        o.save()?;
-    }
-    Ok(applied.message + "\n")
 }

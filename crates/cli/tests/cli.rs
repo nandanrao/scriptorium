@@ -429,13 +429,25 @@ fn tool_numbers_by_script_position_like_suggestions_and_decide() {
 fn tool_list_prints_the_catalogue() {
     let f = Folder::new("toollist");
     let list = f.ok(&["tool", "--list"]);
-    assert_eq!(list.lines().count(), 11, "{list}");
+    // What outside agents are offered, as MCP lists it.
+    let offered = scriptorium_tools::catalogue(scriptorium_tools::Offer::Agent);
+    assert_eq!(list.lines().count(), offered.len(), "{list}");
+    assert!(list.lines().any(|l| l.starts_with("write_script ")), "{list}");
     assert!(list.lines().any(|l| l.starts_with("suggest_change ") && l.contains("Propose")), "{list}");
     assert_eq!(f.ok(&["tool", "film.fdx", "--list"]), list);
     let specs: serde_json::Value = serde_json::from_str(&f.ok(&["tool", "--list", "--json"])).unwrap();
     let suggest = specs.as_array().unwrap().iter().find(|s| s["name"] == "suggest_change").unwrap();
     assert!(suggest["schema"]["properties"]["review_file"].is_object(), "{suggest}");
     assert!(suggest["schema"]["properties"]["before"].is_object(), "{suggest}");
+    // The script is the first argument, not a tool argument.
+    for spec in specs.as_array().unwrap() {
+        assert!(spec["schema"]["properties"].get("script").is_none(), "{spec}");
+        assert!(!spec["schema"]["required"].as_array().unwrap().contains(&serde_json::json!("script")), "{spec}");
+    }
+    // `guide` needs no script.
+    let guide = f.ok(&["tool", "guide", r#"{"topic": "review"}"#]);
+    assert!(guide.contains("review_file"), "{guide}");
+    assert_eq!(f.ok(&["tool", "film.fdx", "guide", r#"{"topic": "review"}"#]), guide);
     let (ok, _) = f.run(&["tool", "--list", "a", "b"]);
     assert!(!ok);
 }
@@ -463,15 +475,29 @@ fn tool_runs_from_the_library() {
     let f = Folder::new("toollib");
     let script = f.path("film.fdx").to_string_lossy().to_string();
     let mut notes = vec![];
-    let out = scriptorium_cli::tool(&script, "read_scene", &serde_json::json!({"scene": 1}), None, &mut notes).unwrap();
+    let out = scriptorium_cli::run(&["tool", &script, "read_scene", r#"{"scene": 1}"#], &mut notes).unwrap();
     assert!(out.contains("¶1 Laura smiles.") && out.ends_with('\n'), "{out}");
     let review = f.path("lib.review.txt").to_string_lossy().to_string();
-    let args = serde_json::json!({"paragraph_id": 1, "options": ["Laura grins."]});
-    let out = scriptorium_cli::tool(&script, "suggest_change", &args, Some(&review), &mut notes).unwrap();
+    let args = r#"{"paragraph_id": 1, "options": ["Laura grins."]}"#;
+    let out =
+        scriptorium_cli::run(&["tool", &script, "suggest_change", args, "--review-file", &review], &mut notes).unwrap();
     assert!(out.contains("#1"), "{out}");
     assert!(std::fs::read_to_string(&review).unwrap().contains("PARA: 1"));
-    let err = scriptorium_cli::tool(&script, "no_such_tool", &serde_json::json!({}), None, &mut notes).unwrap_err();
+    let err = scriptorium_cli::run(&["tool", &script, "no_such_tool", "{}"], &mut notes).unwrap_err();
     assert!(err.contains("unknown tool"), "{err}");
+    // The script is the command line's, never the JSON's.
+    let err = scriptorium_cli::run(&["tool", &script, "read_scene", r#"{"scene": 1, "script": "x.fdx"}"#], &mut notes)
+        .unwrap_err();
+    assert!(err.contains("first argument"), "{err}");
+    // The tools only outside agents get run here too (the same executor as MCP).
+    let edit = r#"{"paragraph_id": 1, "text": "Laura laughs."}"#;
+    scriptorium_cli::run(&["tool", &script, "edit_paragraph", edit], &mut notes).unwrap();
+    assert!(scriptorium_cli::run(&["dump", &script], &mut notes).unwrap().contains("Laura laughs."));
+    scriptorium_cli::run(&["tool", &script, "undo"], &mut notes).unwrap();
+    assert!(scriptorium_cli::run(&["dump", &script], &mut notes).unwrap().contains("Laura smiles."));
+    scriptorium_cli::run(&["tool", &script, "redo"], &mut notes).unwrap();
+    let err = scriptorium_cli::run(&["tool", &script, "redo"], &mut notes).unwrap_err();
+    assert!(err.contains("nothing to redo"), "{err}");
 }
 
 /// Concurrent commands each decide a different suggestion: the session lock

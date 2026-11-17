@@ -1,11 +1,11 @@
 //! `scriptorium-mcp`: Scriptorium as MCP tools, for Claude in Cowork, Claude
 //! Desktop and Claude Code (shipped inside the Scriptorium plugin).
 //!
-//! Every tool runs in-process through the `scriptorium_cli` library, the same
-//! code the `scriptorium` command line runs. That keeps one code path for
-//! agents (AGENTS.md rule 5): the server can do exactly what the CLI can, works
-//! on the same session file as the app, and shares its reading and suggesting
-//! tools (`scriptorium_tools`) with the app's built-in agent.
+//! Every tool runs in-process through the one tool executor
+//! (`scriptorium_chat::exec::run_call`), the code the `scriptorium tool`
+//! command and the app's built-in agent run. That keeps one code path for
+//! agents (AGENTS.md rule 5): the server can do exactly what the CLI can, and
+//! works on the same session file as the app.
 //!
 //! Transport: MCP over stdio, one JSON-RPC message per line. Hand-written on
 //! serde_json because the server only needs `initialize`, `tools/list` and

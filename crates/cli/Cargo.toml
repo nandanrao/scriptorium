@@ -16,15 +16,18 @@ path = "src/main.rs"
 
 [features]
 default = ["chat"]
-# `chat`, `threads` and `accounts`: the built-in agent, with providers, the
-# OS keyring, HTTP and Ctrl+C handling. The MCP server builds without it.
-chat = ["dep:ctrlc", "dep:scriptorium-agent", "dep:scriptorium-chat", "dep:scriptorium-providers"]
+# `chat`, `threads` and `accounts`: the built-in agent, with the OS keyring
+# and Ctrl+C handling. Without it the CLI still runs `tool` (the executor's
+# shell brings the providers' HTTP, not the keyring).
+chat = ["dep:ctrlc", "dep:scriptorium-providers"]
 
 [dependencies]
 # Ctrl+C stops a `chat` run through its cancel token.
 ctrlc = { workspace = true, optional = true }
-scriptorium-agent = { workspace = true, optional = true }
-scriptorium-chat = { workspace = true, optional = true }
+scriptorium-agent.workspace = true
+# The tool executor (`tool`): always, also without `chat` (the MCP server).
+# Its shell brings the providers' HTTP but not the keyring.
+scriptorium-chat.workspace = true
 # `connect`: writing agents' settings (step E2).
 scriptorium-connect.workspace = true
 scriptorium-core.workspace = true

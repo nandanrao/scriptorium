@@ -524,6 +524,12 @@ the same executor, and every MCP test passes unchanged over it.
   `scriptorium_cli::tool` and the MCP crate's copy of the specs.
 - Tests: the same tool results as before on the fixtures. Snapshot each
   tool's text before A4 and compare after.
+- As built (accepted in review): the busy wording is now exec's "The
+  script's files are busy in another program; try again." for the CLI
+  `tool` and MCP; a refused `review_file` shows the path as the agent gave
+  it, not joined to the script's folder; malformed arguments use
+  `check_args`'s wording. `tool --list --json` leaves `script` out (it is
+  the first argument), and `tool guide` takes no script.
 
 # Phase B — the connector and the link
 

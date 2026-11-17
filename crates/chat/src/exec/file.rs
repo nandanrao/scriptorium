@@ -232,12 +232,6 @@ impl ReviewStore for FileStore<'_> {
         ops::attach(&mut self.o, self.script).map_err(ReviewError::Failed)
     }
 
-    fn detach(&mut self, files: &[String]) -> Result<String, ReviewError> {
-        self.writable()?;
-        let files: Vec<&str> = files.iter().map(String::as_str).collect();
-        ops::detach(self.script, &files).map_err(ReviewError::Failed)
-    }
-
     /// The review picked as the CLI's `decide` picks it for an agent
     /// ([`Opened::open_one`], never from the current folder), the script
     /// opened again with it.

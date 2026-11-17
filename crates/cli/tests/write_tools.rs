@@ -44,7 +44,7 @@ impl Folder {
     }
 
     fn tool(&self, script: &str, name: &str, args: Value) -> Result<String, String> {
-        scriptorium_cli::tool(&self.path(script), name, &args, None, &mut vec![])
+        scriptorium_cli::run(&["tool", &self.path(script), name, &args.to_string()], &mut vec![])
     }
 
     fn run(&self, args: &[&str]) -> Result<String, String> {

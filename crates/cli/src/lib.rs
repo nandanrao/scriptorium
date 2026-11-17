@@ -25,5 +25,5 @@ mod rows;
 pub mod structure;
 mod version_new;
 
-pub use commands::{Choice, Failed, SuggestionRef, USAGE, run, run_command, tool, tool_specs};
+pub use commands::{Choice, Failed, SuggestionRef, USAGE, run, run_command};
 pub use fsio::{SessionLock, write_atomic};
