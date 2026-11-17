@@ -99,11 +99,9 @@ pub struct LaidRow {
 }
 
 /// Which member is the version (the one `created:` marks; `b` if none is
-/// marked) and which the original.
+/// marked) and which the original: [`Links::sides`].
 pub fn sides(links: &Links) -> (usize, usize) {
-    let version = links.made().unwrap_or(1);
-    let original = if version == 0 { 1 } else { 0 };
-    (original, version)
+    links.sides()
 }
 
 /// Every row's live paragraphs per member: the listed ids still in each

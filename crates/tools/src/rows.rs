@@ -8,25 +8,26 @@
 //! original it is swapped for this/other, and no row needs work there
 //! (only the version is written).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use scriptorium_core::{Document, ParaId, Paragraph, Script};
 use scriptorium_review::Session;
-use scriptorium_versions::{LaidRow, RowStatus};
+use scriptorium_versions::{LaidRow, Links, RowStatus};
 use serde_json::{Value, json};
 
 use crate::ToolError;
 use crate::reviews::item_numbers;
 
 /// A pair's rows as the host laid them out, for the script the tools are
-/// called on.
+/// called on. Hosts build it with [`LinksCtx::new`].
 #[derive(Debug, Clone)]
-pub struct LinksCtx {
+pub struct LinksCtx<'a> {
     /// The rows, in the links file's order (numbered from 1).
     pub rows: Vec<LaidRow>,
     /// Each member's script as the rows read it (indexed by member): the
     /// version's live script, the original's file.
-    pub scripts: Vec<Script>,
+    pub scripts: Vec<Cow<'a, Script>>,
     /// Each member's label: its language's name, or its file stem.
     pub labels: Vec<String>,
     /// The member the tools are called on.
@@ -104,7 +105,29 @@ impl RowView {
     }
 }
 
-impl LinksCtx {
+impl<'a> LinksCtx<'a> {
+    /// The rows of the pair `links` laid out for member `this` (the script
+    /// the tools are called on): `rows` and `scripts` as laid out
+    /// (`scriptorium_fsio::versions::LoadedPair::lay_out`), and `placed`, the
+    /// (review, item) of each suggestion its rows index.
+    pub fn new(
+        links: &Links,
+        this: usize,
+        rows: Vec<LaidRow>,
+        scripts: Vec<Cow<'a, Script>>,
+        placed: impl IntoIterator<Item = (usize, usize)>,
+    ) -> Self {
+        LinksCtx {
+            rows,
+            scripts,
+            labels: (0..links.members.len()).map(|m| links.label(m)).collect(),
+            this,
+            version: links.sides().1,
+            same_language: links.same_language(),
+            placed: placed.into_iter().collect(),
+        }
+    }
+
     /// Whether the rows are shown on the version.
     pub fn on_version(&self) -> bool {
         self.this == self.version

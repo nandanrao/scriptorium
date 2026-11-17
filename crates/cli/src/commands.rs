@@ -42,7 +42,9 @@ SCRIPTS
   scriptorium dump <script.fdx> [--json] every paragraph with its id, type, scene and speaker
   scriptorium roundtrip <script.fdx>     check that a no-op save is byte-identical
   info and dump read the script as it is now in the saved session (with its
-  decisions and edits); roundtrip reads the file.
+  decisions and edits); roundtrip reads the file. Like every command that
+  opens a script, info and dump first find again a version lined up with it
+  that changed outside Scriptorium (updating its links file) and say so.
 
 REVIEWING
   These work on the same saved session as the app (<script>.scriptorium.json

@@ -481,3 +481,24 @@ fn label_falls_back_to_the_file_stem() {
     l.members[0].language = Some("xx".into());
     assert_eq!(l.members[0].label(), "xx");
 }
+
+#[test]
+fn sides_labels_and_language() {
+    let mut l = links::parse(EXAMPLE).unwrap();
+    assert_eq!(l.sides(), (0, 1));
+    assert!(l.is_version(1) && !l.is_version(0));
+    assert_eq!((l.label(0), l.label(1)), ("English".to_string(), "Español".to_string()));
+    assert!(!l.same_language());
+    // Two files in one language: named by their stems, and "blank" applies.
+    l.members[1].language = Some("EN".into());
+    assert_eq!((l.label(0), l.label(1)), ("PURPLE LIST".to_string(), "PURPLE LIST.es".to_string()));
+    assert!(l.same_language());
+    // Neither named: not the same language.
+    l.members[0].language = None;
+    l.members[1].language = None;
+    assert!(!l.same_language());
+    // The made member is the version, whichever letter it is.
+    l.members[1].created = None;
+    l.members[0].created = Some("version new".into());
+    assert_eq!(l.sides(), (1, 0));
+}

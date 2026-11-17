@@ -60,10 +60,15 @@ impl Opened {
         Self::open_with(script, extra, false, notes)
     }
 
-    /// Open for reading only (`info`, `dump`): a saved session that can't be
-    /// used is a note, and the script is read as written. Notes about review
-    /// files are left out (these commands don't show reviews). Never save the
-    /// result.
+    /// Open for reading only (`info`, `dump`, `versions`, `rows`): a saved
+    /// session that can't be used is a note, and the script is read as
+    /// written. Notes about review files are left out (these commands don't
+    /// show reviews). Never save the result.
+    ///
+    /// The script's pair is loaded as on every open: a member changed outside
+    /// Scriptorium is re-found, which may rewrite the links file (its ids and
+    /// hashes only, under the links lock), and notes about the pair (re-finds,
+    /// a links file that can't be used) are given.
     pub fn open_read_only(script: &str, notes: &mut Vec<String>) -> Result<Self, String> {
         Self::open_with(script, &[], true, notes)
     }
@@ -318,6 +323,13 @@ impl Opened {
     /// [`Session::append_entries`]: `None` without a pair or on the original.
     pub fn row_resolver(&self) -> Option<Box<RowResolver<'static>>> {
         self.pair.resolver(&self.fdx, &self.doc)
+    }
+
+    /// The pair's rows as they read now ([`crate::versions::LoadedPair::lay_out`]
+    /// for this script, its session and live document); `None` when the
+    /// pair didn't load.
+    pub fn lay_out_pair(&self) -> Option<crate::versions::LaidOut<'_>> {
+        self.pair.loaded().map(|p| p.lay_out(&self.fdx, &self.session, &self.doc))
     }
 
     /// Save the session (and pin new reviews' ids into their files first).

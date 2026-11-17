@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use scriptorium_fsio::opened::Opened;
-use scriptorium_fsio::versions::{LaidOut, LoadedPair, PairState};
+use scriptorium_fsio::versions::{LoadedPair, PairState};
 use scriptorium_tools::{LinksCtx, ParaView};
 use scriptorium_versions::{Note, RowStatus};
 use serde_json::{Value, json};
@@ -44,47 +44,33 @@ pub fn command(cmd: &str, args: &[&str], notes: &mut Vec<String>) -> Result<Stri
     }
 }
 
-/// A script opened with its pair (loaded and re-found when it was opened),
-/// laid out.
-struct Shown {
-    o: Opened,
-    ctx: LinksCtx,
-}
-
-impl Shown {
-    fn pair(&self) -> &LoadedPair {
-        self.o.pair().loaded().expect("opened with a pair")
-    }
-}
-
-/// The rows of `pair` laid out, as the tools see them.
-pub fn links_ctx(pair: &LoadedPair, laid: LaidOut) -> LinksCtx {
-    let (_, version) = scriptorium_versions::rows::sides(&pair.links);
-    LinksCtx {
-        rows: laid.rows,
-        scripts: laid.scripts,
-        labels: (0..pair.links.members.len()).map(|m| pair.label(m)).collect(),
-        this: pair.this,
-        version,
-        same_language: pair.same_language(),
-        placed: laid.placed.iter().map(|p| (p.review, p.item)).collect(),
-    }
-}
-
-/// Open `script` read-only with its pair. `Ok(None)`: no links file beside
-/// it names it; a links file that names it but can't be used is an error.
-fn open(script: &str, notes: &mut Vec<String>) -> Result<Option<Shown>, String> {
+/// Open `script` read-only with its pair (loaded and re-found when it was
+/// opened). `Ok(None)`: no links file beside it names it; a links file that
+/// names it but can't be used is an error.
+fn open(script: &str, notes: &mut Vec<String>) -> Result<Option<Opened>, String> {
     let o = Opened::open_read_only(script, notes)?;
-    let ctx = match o.pair() {
-        PairState::None => return Ok(None),
+    match o.pair() {
+        PairState::None => Ok(None),
         PairState::Unusable { reason, .. } => {
-            // Said as the error, not twice.
-            notes.retain(|n| n != reason);
-            return Err(reason.clone());
+            // Said as the error, not again as notes (a reason may join
+            // several broken links files' notes).
+            notes.retain(|n| !reason.contains(n.as_str()));
+            Err(reason.clone())
         }
-        PairState::Loaded(pair) => links_ctx(pair, pair.lay_out(&o)),
-    };
-    Ok(Some(Shown { o, ctx }))
+        PairState::Loaded(_) => Ok(Some(o)),
+    }
+}
+
+/// The pair `o` was opened with.
+fn pair(o: &Opened) -> &LoadedPair {
+    o.pair().loaded().expect("opened with a pair")
+}
+
+/// `o`'s rows laid out, as the tools see them.
+fn ctx(o: &Opened) -> LinksCtx<'_> {
+    let pair = pair(o);
+    let laid = pair.lay_out(&o.fdx, &o.session, &o.doc);
+    LinksCtx::new(&pair.links, pair.this, laid.rows, laid.scripts, laid.placed.iter().map(|p| (p.review, p.item)))
 }
 
 fn no_pair(script: &str) -> String {
@@ -102,29 +88,29 @@ const STATUSES: [RowStatus; 6] = [
 ];
 
 fn versions(script: &str, json: bool, notes: &mut Vec<String>) -> Result<String, String> {
-    let Some(s) = open(script, notes)? else {
+    let Some(o) = open(script, notes)? else {
         return Ok(if json { json!({ "pair": null }).to_string() + "\n" } else { no_pair(script) + "\n" });
     };
-    let pair = s.pair();
+    let pair = pair(&o);
+    let ctx = ctx(&o);
     let on_version = pair.this_is_version();
     let member = |m: usize| {
         let x = &pair.links.members[m];
         json!({
             "file": x.file,
             "language": x.language,
-            "label": pair.label(m),
+            "label": pair.links.label(m),
             "made": x.created.is_some(),
         })
     };
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for r in &s.ctx.rows {
-        *counts.entry(s.ctx.status_key(r.status)).or_default() += 1;
+    for r in &ctx.rows {
+        *counts.entry(ctx.status_key(r.status)).or_default() += 1;
     }
-    let needs = if on_version { s.ctx.rows.iter().filter(|r| r.needs).count() } else { 0 };
+    let needs = if on_version { ctx.rows.iter().filter(|r| r.needs).count() } else { 0 };
     // Rows with nothing listed on the version's side: lines new in the
     // original (or version lines removed on purpose).
-    let new_rows: Vec<usize> = s
-        .ctx
+    let new_rows: Vec<usize> = ctx
         .rows
         .iter()
         .enumerate()
@@ -141,7 +127,7 @@ fn versions(script: &str, json: bool, notes: &mut Vec<String>) -> Result<String,
                 "other": member(pair.other_index()),
                 "other_path": pair.other_path.display().to_string(),
                 "this_is_version": on_version,
-                "rows": s.ctx.rows.len(),
+                "rows": ctx.rows.len(),
                 "status": counts,
                 "needs": needs,
                 "new_in_original": new_rows,
@@ -156,9 +142,7 @@ fn versions(script: &str, json: bool, notes: &mut Vec<String>) -> Result<String,
         if let Some(code) = &x.language {
             what.push(format!("{} ({code})", scriptorium_versions::language_name(code)));
         }
-        what.push(
-            if m == scriptorium_versions::rows::sides(&pair.links).1 { "the version" } else { "the original" }.into(),
-        );
+        what.push(if pair.links.is_version(m) { "the version" } else { "the original" }.into());
         if x.created.is_some() {
             what.push("made by Scriptorium".into());
         }
@@ -171,12 +155,12 @@ fn versions(script: &str, json: bool, notes: &mut Vec<String>) -> Result<String,
     let _ = writeln!(out, "links    {links}");
     let mut parts = vec![];
     for st in STATUSES {
-        let n = s.ctx.rows.iter().filter(|r| r.status == st).count();
+        let n = ctx.rows.iter().filter(|r| r.status == st).count();
         if n > 0 {
-            parts.push(format!("{n} {}", s.ctx.status_label(st)));
+            parts.push(format!("{n} {}", ctx.status_label(st)));
         }
     }
-    let _ = writeln!(out, "rows     {}: {}", s.ctx.rows.len(), parts.join(", "));
+    let _ = writeln!(out, "rows     {}: {}", ctx.rows.len(), parts.join(", "));
     if on_version {
         let _ = writeln!(out, "needs    {needs}");
     }
@@ -194,25 +178,25 @@ fn rows(
     json: bool,
     notes: &mut Vec<String>,
 ) -> Result<String, String> {
-    let s = open(script, notes)?.ok_or_else(|| no_pair(script))?;
+    let o = open(script, notes)?.ok_or_else(|| no_pair(script))?;
+    let ctx = ctx(&o);
     let scene = scene.map(|q| Value::String(q.to_string()));
-    let views = s
-        .ctx
-        .views(&s.o.session, &s.o.doc, scene.as_ref(), needs_only)
+    let views = ctx
+        .views(&o.session, &o.doc, scene.as_ref(), needs_only)
         .map_err(|e| e.to_string().replace("`scene`", "--scene"))?;
     if json {
         let list: Vec<Value> = views.iter().map(|v| v.to_json()).collect();
         return Ok(serde_json::to_string_pretty(&Value::Array(list)).expect("json") + "\n");
     }
-    let pair = s.pair();
+    let pair = pair(&o);
     let (this_m, other_m) = (pair.this, pair.other_index());
     let mut out = String::new();
     let _ = writeln!(
         out,
         "# {} ({}) | {} ({})",
-        pair.label(this_m),
+        pair.links.label(this_m),
         pair.links.members[this_m].file,
-        pair.label(other_m),
+        pair.links.label(other_m),
         pair.links.members[other_m].file
     );
     let cell = |v: &[ParaView]| -> String {

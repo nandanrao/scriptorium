@@ -177,12 +177,17 @@ pub fn version_new(
     let mut open_notes = vec![];
     let o = Opened::open(&script_str, &[], &mut open_notes)?;
     let ours = o.pair().links_path().is_some_and(|at| crate::same_file(at, &links_path));
-    let at_open: Vec<String> = match o.pair() {
-        PairState::Loaded(p) if ours => p.refound.clone(),
-        PairState::Unusable { reason, .. } if ours => vec![reason.clone()],
-        _ => vec![],
+    // Re-finds of this pair go into the result (`Made::Refound`); this pair
+    // unusable at open (the version missing, say) is said by what follows,
+    // so it is dropped from the notes, never reported as a re-find.
+    let (refound_at_open, unusable_at_open) = match o.pair() {
+        PairState::Loaded(p) if ours => (p.refound.clone(), None),
+        PairState::Unusable { reason, .. } if ours => (vec![], Some(reason.clone())),
+        _ => (vec![], None),
     };
-    notes.extend(open_notes.into_iter().filter(|n| !at_open.contains(n)));
+    notes.extend(
+        open_notes.into_iter().filter(|n| !refound_at_open.contains(n) && unusable_at_open.as_ref() != Some(n)),
+    );
     let as_file = o.fdx.write_script(o.doc.script()).map_err(|e| format!("{script_name}: {e}"))?;
     if as_file != o.raw {
         return Err(format!(
@@ -227,7 +232,7 @@ pub fn version_new(
         // Usually found again when the original was opened above; whatever
         // changed since is found here, through the one re-find.
         let found = refind_locked(&guard, &dir, pair, &text, 0, &script, &o.fdx)?;
-        let msgs: Vec<String> = at_open.into_iter().chain(found.msgs).collect();
+        let msgs: Vec<String> = refound_at_open.into_iter().chain(found.msgs).collect();
         let made = if msgs.is_empty() { Made::Already } else { Made::Refound(msgs) };
         return Ok(result(version_path, links_path, made, &found.links));
     }

@@ -314,3 +314,16 @@ fn a_rerun_finds_again_once_and_says_it_once() {
     let lock = f.at("film.es.links.lock");
     assert!(scriptorium_fsio::SessionLock::acquire(&lock, std::time::Duration::ZERO).is_ok());
 }
+
+#[test]
+fn the_pair_unusable_at_open_is_said_once_and_not_as_a_refind() {
+    let f = Folder::new("unusable-once");
+    f.make().unwrap();
+    std::fs::rename(f.version(), f.at("pelicula.fdx")).unwrap();
+    let mut notes = vec![];
+    let err = version_new(&f.script(), "es", Some("en"), None, &mut notes).unwrap_err();
+    assert!(err.contains("film.es.fdx is missing"), "{err}");
+    // Opening the original found the pair unusable for the same reason:
+    // not repeated as a note.
+    assert!(notes.iter().all(|n| !n.contains("is missing")), "{notes:?}");
+}

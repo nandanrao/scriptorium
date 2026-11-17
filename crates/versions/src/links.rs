@@ -148,6 +148,41 @@ impl Member {
 }
 
 impl Links {
+    /// Which member is the original and which the version, as
+    /// `(original, version)`: the version is the member `created:` marks,
+    /// or `b` when none is marked.
+    pub fn sides(&self) -> (usize, usize) {
+        let version = self.made().unwrap_or(1);
+        (if version == 0 { 1 } else { 0 }, version)
+    }
+
+    /// Whether member `m` is the version ([`Self::sides`]): the side that
+    /// is written and gets `ROW:` suggestions.
+    pub fn is_version(&self, m: usize) -> bool {
+        self.sides().1 == m
+    }
+
+    /// What the app and tools call member `m`: its language's name, or its
+    /// file stem when it has none, or when both members would read the same
+    /// (two files in one language).
+    pub fn label(&self, m: usize) -> String {
+        let labels: Vec<String> = self.members.iter().map(Member::label).collect();
+        if labels.iter().filter(|l| **l == labels[m]).count() > 1 {
+            let file = &self.members[m].file;
+            return file.rsplit_once('.').map_or(file.as_str(), |(stem, _)| stem).to_string();
+        }
+        labels[m].clone()
+    }
+
+    /// Whether both members name the same language (both named, ignoring
+    /// case): a blank version line then reads "blank", not "not yet
+    /// translated".
+    pub fn same_language(&self) -> bool {
+        let (o, v) = self.sides();
+        let lang = |m: usize| self.members[m].language.as_deref().map(str::to_lowercase);
+        lang(o).is_some() && lang(o) == lang(v)
+    }
+
     /// Index of the member Scriptorium made (`created:`), if any.
     pub fn made(&self) -> Option<usize> {
         self.members.iter().position(|m| m.created.is_some())
