@@ -140,21 +140,37 @@ Spelling, grammar and naturalness suggestions, reviewed line by line.
 - To work out: splitting a full script into chunks (token limits, cost, keeping
   context such as character voice across chunks).
 
-### 2. Translation versions
+### 2. Versions (translation first) — planned 2026-11-17, for v0.5.0
 
-A project holds the script in several languages, and versions of each. The
-writer is multilingual and writes every version; AI only helps keep them in step.
-Paragraphs are aligned across languages. When one changes, its counterparts are
-marked stale, AI proposes an update to each, and the writer reviews it in the
-same review UI: what changed in the source, the current target paragraph, and
-the proposed update, ready to accept or rewrite.
-- Depends on open questions 2 and 5 (source of truth, paragraph identity).
-  This feature drives the data model, so design it first even if it ships later.
-- Aligning two existing scripts needs matching (heuristic or AI) plus manual
-  fixes. Added, split or merged paragraphs and scenes are the hard cases.
-- To work out: is one language the master, or can either lead? Must versions
-  stay 1:1 in structure? Are "versions" Final Draft revision sets (colored
-  pages, e.g. PURPLE LIST) or our own snapshots? One `.fdx` per language?
+Plan: [plans/versions.md](plans/versions.md). Phases A and B are built on
+this branch and ship together as v0.5.0, with the chat panel. Decided with
+the user:
+- **One concept, versions.** A version is any `.fdx` lined up against
+  another (a translation, an older draft, a co-writer's copy), with an
+  optional language. One `.fdx` per version; one window, one script.
+  Internal names stay neutral; "translation" is only a label.
+- **The view is the review view** plus a read-only script lined up row by
+  row on the left, with a status dot per row. Suggestions only on the right.
+- **Links** are a readable sidecar file per pair (`*.links.txt`): rows of
+  paragraph ids that never cross, each paragraph's text when last in sync.
+- **A new version in another language starts as placeholders**: headings
+  and names copied, other lines blank, spliced from the original's bytes,
+  pre-linked 1:1.
+- **Translating is suggesting**: ordinary suggestions in an ordinary review
+  on the version, placed by the row's content (so Final Draft saves don't
+  strand them). "In sync" is derived from the stamps and the decided
+  suggestions, so undo needs no new state.
+- **Re-find** maps a file back onto the links file after Final Draft edits
+  (exact text, then same-kind lines by position).
+- **Write .fdx overwrites a version Scriptorium made** (app only, guarded
+  by hash checks); every other file keeps `(scriptorium).fdx`. Undo starts
+  again after it.
+- **One machine**: both files of a pair in one folder on one computer.
+- Phases: A placeholder versions, rows, suggesting by row, write in place
+  and re-find, through the CLI, MCP, the chat panel and the Mac plugin;
+  B the left column beside the card and the chat panel; later C link edits
+  and added lines, D context, brief and glossary, E linking two existing
+  files, F same-language versions.
 
 ### 3. Feedback review
 
