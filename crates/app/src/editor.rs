@@ -254,6 +254,25 @@ impl ScriptEditor {
         cx.notify();
     }
 
+    /// The first and last paragraphs on screen as last painted (for
+    /// `where_is_writer`); `None` before the list is drawn.
+    pub(crate) fn visible(&self) -> Option<(ParaId, ParaId)> {
+        let v = self.viewport;
+        if v.size.height <= px(0.) {
+            return None;
+        }
+        let paras = self.doc.paragraphs();
+        let first = self.list.logical_scroll_top().item_ix.min(paras.len().checked_sub(1)?);
+        let mut last = first;
+        for ix in first + 1..paras.len() {
+            match self.list.bounds_for_item(ix) {
+                Some(b) if b.top() < v.bottom() => last = ix,
+                _ => break,
+            }
+        }
+        Some((paras[first].id, paras[last].id))
+    }
+
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
     }

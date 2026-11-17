@@ -8,7 +8,7 @@
 use gpui::{Action, Menu, MenuItem};
 
 use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
-use crate::connect::InstallCli;
+use crate::connect::{ConnectAgent, InstallCli};
 use crate::new_version::{MarkInSync, MarkNotInSync, NewVersion};
 use crate::script_view::{ApplyToFdx, NextView, PrevView, RedoAny, SaveAndQuit, ShowScript, UndoAny};
 use crate::workspace::{About, AddReview, Open};
@@ -44,6 +44,7 @@ pub fn definition() -> Vec<MenuDef> {
                 entry("About Scriptorium", || Box::new(About), None, false),
                 Item::Separator,
                 entry("AI accounts…", || Box::new(OpenAccounts), None, false),
+                entry("Connect an AI agent…", || Box::new(ConnectAgent), None, false),
                 entry("Install command-line tool…", || Box::new(InstallCli), None, false),
                 Item::Separator,
                 entry("Quit Scriptorium", || Box::new(SaveAndQuit), Some("q"), false),
@@ -84,7 +85,8 @@ pub fn definition() -> Vec<MenuDef> {
 
 /// The File dropdown drawn on Linux: the File menu, Edit's Undo and Redo,
 /// the agent panel, then the application menu's items (About, AI accounts,
-/// Install command-line tool, Quit, which live in the application menu on macOS).
+/// Connect an AI agent, Install command-line tool, Quit, which live in the
+/// application menu on macOS).
 pub fn file_dropdown() -> Vec<Item> {
     let mut defs = definition();
     let mut file = std::mem::take(&mut defs[1].items);
@@ -181,6 +183,7 @@ mod tests {
                 "-",
                 "About Scriptorium",
                 "AI accounts…",
+                "Connect an AI agent…",
                 "Install command-line tool…",
                 "Quit Scriptorium"
             ]

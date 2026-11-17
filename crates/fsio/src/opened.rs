@@ -285,17 +285,11 @@ impl Opened {
     /// The attached review `p` names: its stored path, its name, or its file
     /// name (or the start of it), ignoring case.
     fn find_attached(&self, p: &str) -> Option<usize> {
-        let p_lower = p.to_lowercase();
-        self.session.reviews.iter().position(|r| {
-            r.path == p
-                || r.name.to_lowercase() == p_lower
-                || file_name(Path::new(&r.path)).to_lowercase() == p_lower
-                || file_name(Path::new(&r.path)).to_lowercase().starts_with(&p_lower)
-        })
+        find_attached(&self.session, p)
     }
 
     pub fn names(&self) -> String {
-        self.session.reviews.iter().map(|r| r.path.as_str()).collect::<Vec<_>>().join(", ")
+        attached_names(&self.session)
     }
 
     /// Element kinds this script shows in capitals.
@@ -406,6 +400,24 @@ impl Opened {
     pub fn text(&self, para: ParaId) -> String {
         self.doc.paragraph(para).map(|p| p.text()).unwrap_or_default()
     }
+}
+
+/// The review of `session` that `p` names: its stored path, its name, or its
+/// file name (or the start of it), ignoring case (as [`Opened::open_one`]
+/// picks one; the app's live store picks alike).
+pub fn find_attached(session: &Session, p: &str) -> Option<usize> {
+    let p_lower = p.to_lowercase();
+    session.reviews.iter().position(|r| {
+        r.path == p
+            || r.name.to_lowercase() == p_lower
+            || file_name(Path::new(&r.path)).to_lowercase() == p_lower
+            || file_name(Path::new(&r.path)).to_lowercase().starts_with(&p_lower)
+    })
+}
+
+/// The stored paths of `session`'s reviews, for messages.
+pub fn attached_names(session: &Session) -> String {
+    session.reviews.iter().map(|r| r.path.as_str()).collect::<Vec<_>>().join(", ")
 }
 
 /// What a writer does to let agents use a review file that isn't one yet

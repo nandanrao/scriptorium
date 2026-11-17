@@ -17,6 +17,7 @@ pub mod agent;
 mod args;
 mod block;
 mod catalogue;
+pub mod context;
 pub mod guidance;
 pub mod prompt;
 mod read;
@@ -259,6 +260,9 @@ pub fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<Outcome, ToolError> {
         "suggest_changes" => suggest::suggest_changes(ctx, &a),
         "new_version" => rows::new_version(ctx, &a),
         "guide" => guidance::guide(args).map(Outcome::Text),
+        // On the files there is no writer to place; the app answers it
+        // itself from its open view (`context::text`).
+        context::NAME => Ok(Outcome::Text(context::ON_FILES.to_string())),
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }

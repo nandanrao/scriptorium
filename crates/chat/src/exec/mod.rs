@@ -651,10 +651,10 @@ fn find_by_id(store: &dyn ReviewStore, id: &str) -> Result<Option<PathBuf>, Revi
 ///   from the resolved path ([`review_salt`]); [`apply_named`] writes it
 ///   (and makes its folder) only when there is something to write.
 fn file_review(store: &mut dyn ReviewStore, path: &str, agent: bool) -> Result<(usize, Got), ReviewError> {
-    let stored = stored_path(store.dir(), &review_location(store.dir(), path));
-    if let Some(r) = scriptorium_tools::find_review(store.session(), &stored) {
+    if let Some(r) = attached_review_file(store.dir(), store.session(), path) {
         return Ok((recheck(store, r)?, Got::Attached));
     }
+    let stored = stored_path(store.dir(), &review_location(store.dir(), path));
     // `opened::agent_review`'s checks, reading the file through the store.
     let refuse = |e: String| ReviewError::Failed(format!("review_file {e}"));
     let at = agent_file_in_folder(store.dir(), path, ".review.txt", Folders::MayCreate).map_err(refuse)?;
@@ -686,6 +686,13 @@ fn file_review(store: &mut dyn ReviewStore, path: &str, agent: bool) -> Result<(
     .with_path(stored);
     let r = store.add_new(review)?;
     Ok((r, Got::New(at)))
+}
+
+/// The review of `session` an outside agent's `review_file` `file` names,
+/// if it is attached (however it is spelt), as the suggesting tools find it:
+/// such a call writes only that review's file, never the session.
+pub fn attached_review_file(dir: &Path, session: &Session, file: &str) -> Option<usize> {
+    scriptorium_tools::find_review(session, &stored_path(dir, &review_location(dir, file)))
 }
 
 /// Where review file `file` (relative to the script's folder `dir`, or

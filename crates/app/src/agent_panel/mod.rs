@@ -33,7 +33,7 @@ pub mod composer;
 #[cfg(debug_assertions)]
 mod debug_fixture;
 pub mod driver;
-mod live;
+pub(crate) mod live;
 pub mod messages;
 pub mod threads;
 mod view_model;

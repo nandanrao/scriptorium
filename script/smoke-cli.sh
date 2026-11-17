@@ -36,7 +36,7 @@ list=$(printf '%s\n' "$out" | sed -n 2p)
 for want in '"id":1' '"result":{' '"protocolVersion":"2025-06-18"' '"name":"scriptorium"'; do
   case "$init" in *"$want"*) ;; *) fail "initialize reply lacks $want: $init" ;; esac
 done
-for want in '"id":2' '"result":{"tools":[' '"name":"suggest_changes"'; do
+for want in '"id":2' '"result":{"tools":[' '"name":"suggest_changes"' '"name":"where_is_writer"'; do
   case "$list" in *"$want"*) ;; *) fail "tools/list reply lacks $want: $(printf '%s' "$list" | cut -c1-400)" ;; esac
 done
 

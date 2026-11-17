@@ -20,6 +20,13 @@
 //!   ([`ScriptView::editing_paras`], via [`ReviewStore::editing_paras`]).
 //! - Reading opens no lock and reloads nothing: the tools see the live
 //!   document and session as they are.
+//! - The host operations an outside agent has (decide, edit, undo/redo,
+//!   write the script, attach, detach) run through the view
+//!   (`script_view/agent_ops.rs`), with the files' words; the agent link
+//!   saves the session before it answers.
+//! - A review an outside agent's `review_file` makes ([`ReviewStore::add_new`])
+//!   is kept attached through a reload once written, like one the view
+//!   attached.
 //!
 //! Agent proposals are not undo steps (appended review lines, like CLI
 //! suggestions); the writer's decisions on them are, as for any review.
@@ -29,7 +36,8 @@ use std::path::{Path, PathBuf};
 use gpui::Context;
 use scriptorium_chat::exec::{ReviewError, ReviewStore, Script, create_new, new_version_result};
 use scriptorium_core::{Document, ElementKind, ParaId};
-use scriptorium_review::{RowResolver, Session};
+use scriptorium_fsio::ops::{Choice, SuggestionRef};
+use scriptorium_review::{Review, RowResolver, Session};
 use scriptorium_versions::PairView;
 
 use crate::script_view::{LiveError, ScriptView, SessionLease};
@@ -73,7 +81,15 @@ impl Script for LiveScript<'_, '_> {
         let caps = Box::new(self.view.caps());
         let name = self.view.script_name();
         let dir = self.view.script_dir().to_path_buf();
-        Ok(Box::new(LiveStore { view: &mut *self.view, cx: &mut *self.cx, _lease: lease, caps, name, dir }))
+        Ok(Box::new(LiveStore {
+            view: &mut *self.view,
+            cx: &mut *self.cx,
+            _lease: lease,
+            caps,
+            name,
+            dir,
+            added: vec![],
+        }))
     }
 
     fn take_notes(&mut self) -> Vec<String> {
@@ -93,6 +109,10 @@ struct LiveStore<'s, 'b> {
     name: String,
     /// The script's folder, canonical (the view opens the script canonical).
     dir: PathBuf,
+    /// Stored paths of reviews this opening added before writing them
+    /// ([`ReviewStore::add_new`]): once written, the view keeps them attached
+    /// through a reload until the session is saved.
+    added: Vec<String>,
 }
 
 impl LiveStore<'_, '_> {
@@ -180,8 +200,56 @@ impl ReviewStore for LiveStore<'_, '_> {
         let path = self.view.review_file(r);
         scriptorium_fsio::write_atomic(&path, text.as_bytes())
             .map_err(|e| ReviewError::Failed(format!("{}: {e}", path.display())))?;
+        if self.added.contains(&self.view.session().reviews[r].path) {
+            self.view.keep_attached(path);
+        }
         self.view.after_agent_change(self.cx);
         Ok(())
+    }
+
+    /// Added to the view's session; once written ([`Self::write`]) it is
+    /// kept attached through a reload, like a review the view attached. (Not
+    /// before: one taken out again unwritten has no file to keep.)
+    fn add_new(&mut self, review: Review) -> Result<usize, ReviewError> {
+        let path = review.path.clone();
+        let r = self.session_mut().0.add(review).map_err(ReviewError::Failed)?;
+        self.added.push(path);
+        Ok(r)
+    }
+
+    // The host operations, through the view (`script_view/agent_ops.rs`).
+
+    fn attach_reviews(&mut self, files: &[PathBuf]) -> Result<String, ReviewError> {
+        self.writable()?;
+        self.view.agent_attach(files, self.cx).map_err(live_err)
+    }
+
+    /// `files` already resolved against [`Self::dir`] (`Script::detach`'s
+    /// default): the view's session, never the session file under it (its
+    /// next save would write the review back).
+    fn detach(&mut self, files: &[String]) -> Result<String, ReviewError> {
+        self.writable()?;
+        self.view.agent_detach(files, self.cx).map_err(live_err)
+    }
+
+    fn decide(&mut self, review: Option<&str>, n: SuggestionRef, choice: Choice) -> Result<String, ReviewError> {
+        self.writable()?;
+        self.view.agent_decide(review, n, choice, self.cx).map_err(live_err)
+    }
+
+    fn edit(&mut self, para: u64, text: &str) -> Result<String, ReviewError> {
+        self.writable()?;
+        self.view.agent_edit(para, text, self.cx).map_err(live_err)
+    }
+
+    fn undo_redo(&mut self, redo: bool) -> Result<String, ReviewError> {
+        self.writable()?;
+        self.view.agent_undo_redo(redo, self.cx).map_err(live_err)
+    }
+
+    fn write_script(&mut self, output: Option<&str>) -> Result<String, ReviewError> {
+        self.writable()?;
+        self.view.agent_write(output, self.cx).map_err(live_err)
     }
 }
 
@@ -317,5 +385,250 @@ mod tests {
         let out: serde_json::Value = serde_json::from_str(&rows.result.content).unwrap();
         let rows = out["rows"].as_array().unwrap();
         assert!(rows.iter().any(|r| r["needs"] == json!(true)), "{rows:?}");
+    }
+
+    /// An outside agent's call on the live view, as the agent link runs it.
+    fn agent(v: &mut ScriptView, cx: &mut Context<ScriptView>, name: &str, input: serde_json::Value) -> (String, bool) {
+        let done = run_call(&mut LiveScript::new(v, cx), Caller::Agent, &call(name, input));
+        (done.result.content, done.result.is_error)
+    }
+
+    fn ok(got: (String, bool)) -> String {
+        assert!(!got.1, "{}", got.0);
+        got.0
+    }
+
+    fn err(got: (String, bool)) -> String {
+        assert!(got.1, "not refused: {}", got.0);
+        got.0
+    }
+
+    fn line(v: &ScriptView, cx: &gpui::App, para: u64) -> String {
+        v.live_doc(cx).paragraph(ParaId(para)).map(|p| p.text()).unwrap_or_default()
+    }
+
+    const GOING: &str = "I am going to town tomorrow.";
+
+    /// Each host operation on the live view, with the files' words; an
+    /// agent's decision is an undo step; its `.fdx` is Write .fdx's, byte
+    /// for byte.
+    #[gpui::test]
+    fn the_host_operations_run_on_the_live_view(cx: &mut TestAppContext) {
+        let f = Folder::new("ops");
+        let w = open(cx, &f.0.join("film.fdx"));
+        w.update(cx, |v, window, cx| {
+            let suggest =
+                json!({"paragraph_id": 2, "options": ["I go to town tomorrow."], "review_file": "notes.review.txt"});
+            ok(agent(v, cx, "suggest_change", suggest));
+            // Decide, and the card moves on (none left).
+            let out = ok(agent(v, cx, "decide_suggestion", json!({"n": 1, "decision": "accept"})));
+            assert!(out.starts_with("#1 ") && out.contains("I go to town tomorrow."), "{out}");
+            assert_eq!(line(v, cx, 2), "I go to town tomorrow.");
+            // Undo takes the agent's decision back; redo puts it back.
+            assert_eq!(ok(agent(v, cx, "undo", json!({}))), format!("¶2: {GOING}"));
+            assert_eq!(line(v, cx, 2), GOING);
+            ok(agent(v, cx, "redo", json!({})));
+            assert_eq!(line(v, cx, 2), "I go to town tomorrow.");
+            let out = err(agent(v, cx, "decide_suggestion", json!({"n": 1, "decision": "accept", "review": "nope"})));
+            assert!(out.contains("no attached review matches \"nope\""), "{out}");
+            // Edit a line.
+            assert_eq!(
+                ok(agent(v, cx, "edit_paragraph", json!({"paragraph_id": 0, "text": "INT. BARN - DAY"}))),
+                "¶0: INT. BARN - DAY"
+            );
+            assert_eq!(line(v, cx, 0), "INT. BARN - DAY");
+            err(agent(v, cx, "edit_paragraph", json!({"paragraph_id": 99, "text": "x"})));
+            // Write: the default output, as Write .fdx writes it.
+            let out = ok(agent(v, cx, "write_script", json!({})));
+            assert!(out.contains("film (scriptorium).fdx") && out.contains("2 paragraphs changed"), "{out}");
+            let by_agent = std::fs::read(f.0.join("film (scriptorium).fdx")).unwrap();
+            std::fs::remove_file(f.0.join("film (scriptorium).fdx")).unwrap();
+            v.apply_to_fdx(&crate::script_view::ApplyToFdx, window, cx);
+            assert_eq!(std::fs::read(f.0.join("film (scriptorium).fdx")).unwrap(), by_agent);
+            ok(agent(v, cx, "write_script", json!({"output": "copy.fdx"})));
+            assert_eq!(std::fs::read(f.0.join("copy.fdx")).unwrap(), by_agent);
+            let out = err(agent(v, cx, "write_script", json!({"output": "film.fdx"})));
+            assert!(out.contains("already exists"), "{out}");
+            err(agent(v, cx, "write_script", json!({"output": "../out.fdx"})));
+            // Detach, then attach again: the text keeps the decision.
+            let out = ok(agent(v, cx, "detach_reviews", json!({"files": ["notes.review.txt"]})));
+            // Named as the files route names it: resolved in the script's folder.
+            let at = f.0.join("notes.review.txt");
+            assert_eq!(out, format!("removed {} (the script's text keeps its decisions)", at.display()));
+            assert!(v.session().reviews.is_empty());
+            assert_eq!(line(v, cx, 2), "I go to town tomorrow.");
+            let out = err(agent(v, cx, "detach_reviews", json!({"files": ["notes.review.txt"]})));
+            assert!(out.contains("isn't attached"), "{out}");
+            let out = ok(agent(v, cx, "attach_reviews", json!({"files": ["notes.review.txt"]})));
+            assert_eq!(out, "attached notes.review.txt (1 suggestions)");
+            assert_eq!(v.session().reviews.len(), 1);
+            // Attaching it again changes nothing.
+            ok(agent(v, cx, "attach_reviews", json!({"files": ["notes.review.txt"]})));
+            assert_eq!(v.session().reviews.len(), 1);
+            std::fs::write(f.0.join("run.sh"), "echo hi").unwrap();
+            err(agent(v, cx, "attach_reviews", json!({"files": ["run.sh"]})));
+        })
+        .unwrap();
+    }
+
+    /// Whether an outside agent's call was busy (to be tried again).
+    fn busy(v: &mut ScriptView, cx: &mut Context<ScriptView>, name: &str, input: serde_json::Value) -> bool {
+        run_call(&mut LiveScript::new(v, cx), Caller::Agent, &call(name, input)).busy
+    }
+
+    /// While the writer rewrites a line, an agent changes nothing in the
+    /// session (it couldn't be saved before the reply): busy, to be tried
+    /// again. Suggestions into an attached review go on.
+    #[gpui::test]
+    fn nothing_changes_while_the_writer_rewrites(cx: &mut TestAppContext) {
+        let f = Folder::new("rewriting");
+        let w = open(cx, &f.0.join("film.fdx"));
+        w.update(cx, |v, window, cx| {
+            let suggest =
+                json!({"paragraph_id": 2, "options": ["I go to town tomorrow."], "review_file": "notes.review.txt"});
+            ok(agent(v, cx, "suggest_change", suggest));
+            let es = json!({"paragraph_id": 0, "options": ["EXT. GRANJA - NOCHE"], "review_file": "es.review.txt"});
+            ok(agent(v, cx, "suggest_change", es));
+            let id = v.session().reviews[0].id.clone();
+            v.rewrite_for_test(&id, 1, window, cx);
+            assert!(v.is_rewriting());
+            let typed = line(v, cx, 2);
+            v.take_autosave_for_test();
+            assert!(busy(v, cx, "undo", json!({})));
+            assert!(busy(v, cx, "redo", json!({})));
+            assert!(busy(v, cx, "write_script", json!({})));
+            assert!(!f.0.join("film (scriptorium).fdx").exists());
+            assert!(busy(v, cx, "decide_suggestion", json!({"n": 1, "decision": "keep"})));
+            let edit = |p: u64| json!({"paragraph_id": p, "text": "Hello."});
+            assert_eq!(err(agent(v, cx, "edit_paragraph", edit(2))), scriptorium_chat::exec::EDITING_LINE);
+            assert!(busy(v, cx, "edit_paragraph", edit(0)));
+            assert!(busy(v, cx, "detach_reviews", json!({"files": ["notes.review.txt"]})));
+            assert!(busy(v, cx, "attach_reviews", json!({"files": ["notes.review.txt"]})));
+            assert!(!v.take_autosave_for_test(), "a refused call marks nothing changed");
+            // The rewrite is untouched.
+            assert!(v.is_rewriting());
+            assert_eq!(line(v, cx, 2), typed);
+            assert_eq!(v.session().reviews.len(), 2);
+            // A translation into an attached review goes on; the line
+            // being rewritten is refused.
+            let batch = json!({"suggestions": [
+                {"paragraph_id": 1, "options": ["CÉSAR"]},
+                {"paragraph_id": 2, "options": ["Voy al pueblo mañana."]},
+            ], "review_file": "es.review.txt"});
+            let out = ok(agent(v, cx, "suggest_changes", batch));
+            assert!(out.contains(scriptorium_chat::exec::EDITING_LINE), "{out}");
+            assert_eq!(v.session().reviews[1].items.len(), 2);
+            assert!(std::fs::read_to_string(f.0.join("es.review.txt")).unwrap().contains("CÉSAR"));
+            assert!(v.is_rewriting());
+        })
+        .unwrap();
+    }
+
+    /// A call that fails changes nothing, as on the files (which save
+    /// nothing then): a review it attached is taken off again, all of
+    /// `attach_reviews` or none, and the view isn't marked changed.
+    #[gpui::test]
+    fn a_failed_call_leaves_the_view_as_it_was(cx: &mut TestAppContext) {
+        let f = Folder::new("failed");
+        let w = open(cx, &f.0.join("film.fdx"));
+        w.update(cx, |v, _, cx| {
+            let suggest =
+                json!({"paragraph_id": 2, "options": ["I go to town tomorrow."], "review_file": "notes.review.txt"});
+            ok(agent(v, cx, "suggest_change", suggest));
+            // The same review under another name: attaching both fails.
+            std::fs::copy(f.0.join("notes.review.txt"), f.0.join("copy.review.txt")).unwrap();
+            ok(agent(v, cx, "detach_reviews", json!({"files": ["notes.review.txt"]})));
+            assert!(v.session().reviews.is_empty());
+            v.take_autosave_for_test();
+            let both = json!({"files": ["notes.review.txt", "copy.review.txt"]});
+            let out = err(agent(v, cx, "attach_reviews", both));
+            assert!(out.contains("same file"), "{out}");
+            assert!(v.session().reviews.is_empty(), "all or none");
+            // A decision that fails keeps no review it attached.
+            let decide = json!({"review": "notes.review.txt", "n": 9, "decision": "accept"});
+            let out = err(agent(v, cx, "decide_suggestion", decide));
+            assert!(out.contains("no suggestion 9"), "{out}");
+            assert!(v.session().reviews.is_empty());
+            err(agent(v, cx, "edit_paragraph", json!({"paragraph_id": 99, "text": "x"})));
+            assert!(!v.take_autosave_for_test(), "a failed call marks nothing changed");
+            // And when it works, it is kept.
+            let decide = json!({"review": "notes.review.txt", "n": 1, "decision": "accept"});
+            ok(agent(v, cx, "decide_suggestion", decide));
+            assert_eq!(v.session().reviews.len(), 1);
+            assert_eq!(line(v, cx, 2), "I go to town tomorrow.");
+            assert!(v.take_autosave_for_test());
+        })
+        .unwrap();
+    }
+
+    /// The version Scriptorium made is written in place by the writer
+    /// (Write .fdx); an agent writes it only to an `output`.
+    #[gpui::test]
+    fn the_made_version_is_written_only_to_an_output(cx: &mut TestAppContext) {
+        let f = Folder::new("made");
+        let w = open(cx, &f.0.join("film.fdx"));
+        w.update(cx, |v, _, cx| {
+            ok(agent(v, cx, "new_version", json!({"language": "es", "original_language": "en"})));
+        })
+        .unwrap();
+        let w = open(cx, &f.0.join("film.es.fdx"));
+        w.update(cx, |v, _, cx| {
+            let out = err(agent(v, cx, "write_script", json!({})));
+            assert!(out.contains("Write .fdx") && out.contains("give `output`"), "{out}");
+            ok(agent(v, cx, "write_script", json!({"output": "film.es copy.fdx"})));
+        })
+        .unwrap();
+        assert!(f.0.join("film.es copy.fdx").exists());
+        assert!(!f.0.join("film.es (scriptorium).fdx").exists());
+    }
+
+    /// A review an agent's call made (a new `review_file`) stays attached
+    /// when another program writes the session before the app saves it.
+    #[gpui::test]
+    fn a_new_agent_review_survives_a_reload_before_the_save(cx: &mut TestAppContext) {
+        let f = Folder::new("kept");
+        let script = f.0.join("film.fdx");
+        let w = open(cx, &script);
+        w.update(cx, |v, _, cx| {
+            let suggest = json!({"paragraph_id": 2, "options": ["I go to town."], "review_file": "notes.review.txt"});
+            ok(agent(v, cx, "suggest_change", suggest));
+        })
+        .unwrap();
+        // Another program: its own review, into the session file.
+        let mut files = scriptorium_chat::exec::FileScript::new(&script).unwrap();
+        let other = json!({"paragraph_id": 1, "options": ["CESAR (V.O.)"], "review_file": "other.review.txt"});
+        let done = run_call(&mut files, Caller::Agent, &call("suggest_change", other));
+        assert!(!done.result.is_error, "{}", done.result.content);
+        w.update(cx, |v, _, cx| {
+            v.reload_or_busy(cx).unwrap();
+            let mut names: Vec<&str> = v.session().reviews.iter().map(|r| r.path.as_str()).collect();
+            names.sort();
+            assert_eq!(names, ["notes.review.txt", "other.review.txt"]);
+        })
+        .unwrap();
+    }
+
+    /// An agent decides the suggestion the card shows: the card moves on,
+    /// as after a key.
+    #[gpui::test]
+    fn the_card_moves_on_after_an_agent_decides_it(cx: &mut TestAppContext) {
+        let f = Folder::new("card");
+        let w = open(cx, &f.0.join("film.fdx"));
+        w.update(cx, |v, window, cx| {
+            let suggest = json!({"suggestions": [
+                {"paragraph_id": 1, "options": ["CESAR (V.O.)"]},
+                {"paragraph_id": 2, "options": ["I go to town."]},
+            ], "review_file": "notes.review.txt"});
+            ok(agent(v, cx, "suggest_changes", suggest));
+            let id = v.session().reviews[0].id.clone();
+            v.show_suggestion(&id, 1, window, cx);
+            assert_eq!(v.card_for_test(), Some((0, 0)));
+            ok(agent(v, cx, "decide_suggestion", json!({"n": 1, "decision": "keep"})));
+            assert_eq!(v.card_for_test(), Some((0, 1)));
+            // A decision on another suggestion leaves the card where it is.
+            ok(agent(v, cx, "decide_suggestion", json!({"n": 1, "decision": "undecide"})));
+            assert_eq!(v.card_for_test(), Some((0, 1)));
+        })
+        .unwrap();
     }
 }

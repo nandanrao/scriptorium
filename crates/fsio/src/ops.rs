@@ -11,9 +11,10 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use scriptorium_core::{ParaId, Paragraph};
+use scriptorium_core::{Document, ParaId, Paragraph, Selection};
+use scriptorium_fdx::FdxFile;
 use scriptorium_review::sessionfile::{self, SessionFile};
-use scriptorium_review::{Decision, Line, Status};
+use scriptorium_review::{Decision, Line, Session, Status};
 use scriptorium_tools::{item_numbered, item_numbers};
 
 use crate::opened::{Opened, file_name, script_dir};
@@ -59,9 +60,15 @@ pub enum Choice {
 /// count. `script` is the script as the caller named it (for the hint).
 pub fn attach(o: &mut Opened, script: &str) -> Result<String, String> {
     o.save()?;
+    Ok(attach_text(&o.session, &o.given, script))
+}
+
+/// [`attach`]'s result for reviews `given` of `session`, each with its
+/// suggestion count (every host words it the same).
+pub fn attach_text(session: &Session, given: &[usize], script: &str) -> String {
     let mut out = String::new();
-    for &r in &o.given {
-        let review = &o.session.reviews[r];
+    for &r in given {
+        let review = &session.reviews[r];
         let _ = writeln!(out, "attached {} ({} suggestions)", review.path, review.items.len());
         if !review.unmatched.is_empty() {
             let _ = writeln!(
@@ -74,7 +81,7 @@ pub fn attach(o: &mut Opened, script: &str) -> Result<String, String> {
             let _ = writeln!(out, "  warning: {w}");
         }
     }
-    Ok(out)
+    out
 }
 
 /// Detach review files from `script` (as attached, or paths from the current
@@ -111,18 +118,35 @@ pub fn detach(script: &str, files: &[&str]) -> Result<String, String> {
 /// Decide suggestion `n` of review `r` (as [`Opened::open_one`] picked it),
 /// and save. Returns the suggestion's new status and line.
 pub fn decide(o: &mut Opened, r: usize, n: SuggestionRef, choice: Choice) -> Result<String, String> {
-    let count = o.session.reviews[r].items.len();
+    let sel = o.sel();
+    let out = decide_in(&o.session, &mut o.doc, sel, r, n, choice)?;
+    o.save()?;
+    Ok(out)
+}
+
+/// [`decide`] on a session and document held elsewhere (the app's live
+/// view), without saving: the decision is one step on `doc` (`sel` the
+/// selection it records). Returns the same text.
+pub fn decide_in(
+    session: &Session,
+    doc: &mut Document,
+    sel: Selection,
+    r: usize,
+    n: SuggestionRef,
+    choice: Choice,
+) -> Result<String, String> {
+    let count = session.reviews[r].items.len();
     let i = match n {
-        SuggestionRef::Entry(e) => o.session.reviews[r].items.iter().position(|it| it.entry == e).ok_or(format!(
+        SuggestionRef::Entry(e) => session.reviews[r].items.iter().position(|it| it.entry == e).ok_or(format!(
             "no suggestion e{e} in {} (it isn't in the file, or didn't match a line)",
-            o.session.reviews[r].name
+            session.reviews[r].name
         ))?,
         SuggestionRef::Number(n) => {
-            item_numbered(&o.doc, &o.session.reviews[r].items, n).ok_or(format!("no suggestion {n} (1 to {count})"))?
+            item_numbered(&*doc, &session.reviews[r].items, n).ok_or(format!("no suggestion {n} (1 to {count})"))?
         }
     };
-    let options = o.session.item(r, i).options.len();
-    if matches!(choice, Choice::Rewrite(_)) && o.session.item(r, i).block {
+    let options = session.item(r, i).options.len();
+    if matches!(choice, Choice::Rewrite(_)) && session.item(r, i).block {
         return Err("that suggestion is a block: plain text would collapse it into one line; rewrite it with \
                     --rewrite-block '<TYPE: text lines>' (MCP: `lines`)"
             .into());
@@ -135,33 +159,31 @@ pub fn decide(o: &mut Opened, r: usize, n: SuggestionRef, choice: Choice) -> Res
         Choice::Undecide => Decision::Undecided,
         Choice::Rewrite(text) => Decision::Rewrite(text),
         Choice::RewriteBlock(lines) => {
-            if !o.session.item(r, i).block && lines.len() != 1 {
+            if !session.item(r, i).block && lines.len() != 1 {
                 return Err("that suggestion is for one line: rewrite it with one line (or `rewrite <text>`)".into());
             }
             Decision::RewriteLines(lines)
         }
     };
-    let n = item_numbers(&o.doc, &o.session.reviews[r].items)[i];
-    let hint = rewrite_hint(n, o.session.item(r, i).block);
-    o.session.check(&o.doc, r, i, &d).map_err(|e| format!("#{n}: {}", e.message(&hint)))?;
-    let sel = o.sel();
-    o.session.decide(&mut o.doc, sel, r, i, d).map_err(|e| e.to_string())?;
-    o.save()?;
-    let item = o.session.item(r, i);
-    let status = o.session.status_label(&o.doc, r, i);
+    let n = item_numbers(&*doc, &session.reviews[r].items)[i];
+    let hint = rewrite_hint(n, session.item(r, i).block);
+    session.check(&*doc, r, i, &d).map_err(|e| format!("#{n}: {}", e.message(&hint)))?;
+    session.decide(doc, sel, r, i, d).map_err(|e| e.to_string())?;
+    let item = session.item(r, i);
+    let status = session.status_label(&*doc, r, i);
     if item.block {
         let mut out = format!("#{n} {status}:\n");
-        let lines = o.session.mine(&o.doc, r, i);
+        let lines = session.mine(&*doc, r, i);
         if lines.is_empty() {
             out.push_str("  [cut]\n");
         }
-        for (id, l) in o.session.live_run(&o.doc, r, i).iter().zip(&lines) {
+        for (id, l) in session.live_run(&*doc, r, i).iter().zip(&lines) {
             let kind = l.kind.as_ref().map(|k| k.name().to_uppercase()).unwrap_or_default();
             let _ = writeln!(out, "  ¶{} {kind}: {}", id.0, l.text);
         }
         return Ok(out);
     }
-    Ok(format!("#{n} {status}: {}\n", o.text(item.para)))
+    Ok(format!("#{n} {status}: {}\n", text_of(doc, item.para)))
 }
 
 /// How the CLI tells someone to rewrite suggestion `n` (see
@@ -188,32 +210,50 @@ pub fn check_text(text: &str) -> Result<(), String> {
 /// Replace paragraph `para`'s whole text, and save (with any review files
 /// `o` was opened with).
 pub fn edit(o: &mut Opened, para: u64, text: &str) -> Result<String, String> {
+    let sel = o.sel();
+    let out = edit_in(&mut o.doc, sel, para, text)?;
+    o.save()?;
+    Ok(out)
+}
+
+/// [`edit`] on a document held elsewhere, without saving.
+pub fn edit_in(doc: &mut Document, sel: Selection, para: u64, text: &str) -> Result<String, String> {
     let id = para;
     let para = ParaId(para);
-    if o.doc.paragraph(para).is_none() {
+    if doc.paragraph(para).is_none() {
         return Err(format!("no paragraph {id} (use list_paragraphs to find ids)"));
     }
     check_text(text)?;
-    let sel = o.sel();
-    o.doc.replace_text(sel, para, text, &[]).map_err(|e| e.to_string())?;
-    o.save()?;
-    Ok(format!("¶{id}: {}\n", o.text(para)))
+    doc.replace_text(sel, para, text, &[]).map_err(|e| e.to_string())?;
+    Ok(format!("¶{id}: {}\n", text_of(doc, para)))
 }
 
 /// Undo (or redo) the last change to the script, and save. Lists the
 /// paragraphs it changed, as they are now.
 pub fn undo_redo(o: &mut Opened, redo: bool) -> Result<String, String> {
-    let paras = o.doc.next_undo_paras(redo);
-    let done = if redo { o.doc.redo() } else { o.doc.undo() };
+    let out = undo_redo_in(&mut o.doc, redo)?;
+    o.save()?;
+    Ok(out)
+}
+
+/// [`undo_redo`] on a document held elsewhere, without saving: the
+/// document's last step, whoever made it.
+pub fn undo_redo_in(doc: &mut Document, redo: bool) -> Result<String, String> {
+    let paras = doc.next_undo_paras(redo);
+    let done = if redo { doc.redo() } else { doc.undo() };
     if done.is_none() {
         return Err(if redo { "nothing to redo".into() } else { "nothing to undo".into() });
     }
-    o.save()?;
     let mut out = String::new();
     for p in paras {
-        let _ = writeln!(out, "¶{}: {}", p.0, o.text(p));
+        let _ = writeln!(out, "¶{}: {}", p.0, text_of(doc, p));
     }
     Ok(out)
+}
+
+/// A paragraph's text now ("" if it's gone).
+fn text_of(doc: &Document, para: ParaId) -> String {
+    doc.paragraph(para).map(|p| p.text()).unwrap_or_default()
 }
 
 /// "<name> (scriptorium).fdx" next to the script, as the app writes it.
@@ -284,14 +324,22 @@ pub fn write(o: &mut Opened, script: &str, accept_all: bool, output: Option<&Pat
     }
     let input = Path::new(script);
     let out = output.map(Path::to_path_buf).unwrap_or_else(|| output_path(input));
-    if crate::same_file(&out, input) {
+    Ok(format!("{skipped}{}", write_doc(&o.fdx, &o.doc, input, &out)?))
+}
+
+/// Write `doc` as the `.fdx` `fdx` (the script at `script`) with its changes
+/// spliced in, to `out`, never over the script itself: [`write`]'s last
+/// step, for a document held elsewhere (the app's live view). The same
+/// bytes as the app's Write .fdx of the same document.
+pub fn write_doc(fdx: &FdxFile, doc: &Document, script: &Path, out: &Path) -> Result<String, String> {
+    if crate::same_file(out, script) {
         return Err("refusing to overwrite the original script; give an output with another name".into());
     }
-    let raw = o.fdx.write_script(o.doc.script()).map_err(|e| e.to_string())?;
-    let original = o.fdx.to_script();
-    let changed = changed_paragraphs(&original.paragraphs, o.doc.paragraphs());
-    write_atomic(&out, raw.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
-    Ok(format!("{skipped}wrote {} ({changed} paragraphs changed)\n", out.display()))
+    let raw = fdx.write_script(doc.script()).map_err(|e| e.to_string())?;
+    let original = fdx.to_script();
+    let changed = changed_paragraphs(&original.paragraphs, doc.paragraphs());
+    write_atomic(out, raw.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
+    Ok(format!("wrote {} ({changed} paragraphs changed)\n", out.display()))
 }
 
 /// Where an agent's `write_script` may write (`script` as the agent named
@@ -301,6 +349,18 @@ pub fn write(o: &mut Opened, script: &str, accept_all: bool, output: Option<&Pat
 /// `output`, the version Scriptorium made is refused (the writer saves it in
 /// the app). Pass the result to [`write`].
 pub fn agent_output(o: &Opened, script: &str, output: Option<&str>) -> Result<PathBuf, String> {
+    agent_output_for(script, &o.script_name, o.pair().is_made() || o.pair().maybe_made(), output)
+}
+
+/// [`agent_output`] for a script opened elsewhere (the app's live view):
+/// `script_name` its file name, `maybe_made` whether it is (or may be) the
+/// version Scriptorium made (`PairState::maybe_made`).
+pub fn agent_output_for(
+    script: &str,
+    script_name: &str,
+    maybe_made: bool,
+    output: Option<&str>,
+) -> Result<PathBuf, String> {
     let dir = script_dir(script)?;
     // The default output of the script itself (through a link, the file it
     // points at: its name, in its folder).
@@ -309,11 +369,10 @@ pub fn agent_output(o: &Opened, script: &str, output: Option<&str>) -> Result<Pa
     let output = match output {
         Some(o) => o.to_string(),
         None => {
-            if o.pair().is_made() || o.pair().maybe_made() {
+            if maybe_made {
                 return Err(format!(
-                    "{} is the version Scriptorium made: the writer saves it in the app with Write .fdx. To write a \
-                     copy here, give `output`",
-                    o.script_name
+                    "{script_name} is the version Scriptorium made: the writer saves it in the app with Write .fdx. \
+                     To write a copy here, give `output`"
                 ));
             }
             own.to_string_lossy().into_owned()

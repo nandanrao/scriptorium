@@ -1,7 +1,8 @@
 //! The few things the app remembers between runs, per user: which one-time
 //! notices the writer has already seen (`notices-seen`, one notice name per
 //! line), and whether the agent panel was open (`agent-panel`: `open` or
-//! `closed`). Plain files, so there's nothing to migrate.
+//! `closed`), and which AI agents Connect set up (`agents-connected`, for
+//! the launch check). Plain files, so there's nothing to migrate.
 //!
 //! macOS: `~/Library/Application Support/Scriptorium/`.
 //! Elsewhere: `$XDG_CONFIG_HOME/scriptorium/` (default `~/.config/scriptorium/`).
@@ -44,6 +45,22 @@ pub fn set_agent_panel_open(open: bool) {
     let path = dir.join("agent-panel");
     if scriptorium_fsio::write_atomic(&path, if open { "open\n" } else { "closed\n" }.as_bytes()).is_err() {
         crate::log::warn(&format!("couldn't remember the agent panel in {}", path.display()));
+    }
+}
+
+/// The agents Connect set up (`agents-connected`; the format is
+/// `connect::Remembered`'s), or "" when there is none or it can't be read.
+pub fn agents_connected() -> String {
+    dir().and_then(|d| std::fs::read_to_string(d.join("agents-connected")).ok()).unwrap_or_default()
+}
+
+/// Remember the agents Connect set up. Never fails (logged).
+pub fn set_agents_connected(text: &str) {
+    let Some(dir) = dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("agents-connected");
+    if scriptorium_fsio::write_atomic(&path, text.as_bytes()).is_err() {
+        crate::log::warn(&format!("couldn't remember the connected agents in {}", path.display()));
     }
 }
 

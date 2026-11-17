@@ -46,14 +46,15 @@ fn the_agent_offer_is_the_chat_offer_then_the_agent_only_tools() {
     let mut expected = chat.clone();
     expected.extend(AGENT_ONLY.iter().map(|s| s.to_string()));
     expected.push("guide".into());
+    expected.push("where_is_writer".into());
     assert_eq!(agent, expected);
 }
 
 #[test]
 fn every_agent_tool_takes_script() {
     for spec in catalogue(Offer::Agent) {
-        // `guide` is the one tool without it.
-        if spec.name == "guide" {
+        // `guide` and `where_is_writer` are the tools without it.
+        if spec.name == "guide" || spec.name == "where_is_writer" {
             continue;
         }
         assert!(spec.schema["properties"]["script"].is_object(), "{}", spec.name);
@@ -97,6 +98,7 @@ fn every_agent_tool_has_annotations_and_read_only_is_right() {
         "list_versions",
         "read_rows",
         "guide",
+        "where_is_writer",
     ];
     for spec in catalogue(Offer::Agent) {
         let name = spec.name.as_str();
@@ -152,4 +154,15 @@ fn check_args_holds_each_offer_to_its_own_fields() {
     assert!(check_args(&decide, &extra).unwrap_err().to_string().contains("`review_file`"));
     let bad_line = json!({ "script": "/s/f.fdx", "n": 1, "decision": "rewrite", "lines": [{ "kind": "Action", "text": "x", "x": 1 }] });
     assert!(check_args(&decide, &bad_line).unwrap_err().to_string().contains("`lines[0].x`"));
+}
+
+#[test]
+fn where_is_writer_is_offered_to_agents_read_only_without_arguments() {
+    assert!(offered(Offer::Chat, "where_is_writer").is_err());
+    let spec = offered(Offer::Agent, "where_is_writer").unwrap();
+    assert_eq!(spec.schema["properties"], json!({}));
+    assert!(read_only("where_is_writer") && !writes("where_is_writer"));
+    assert_eq!(mcp_tool(&spec)["annotations"], json!({ "readOnlyHint": true }));
+    assert!(check_args(&spec, &json!({})).is_ok());
+    assert!(check_args(&spec, &json!({ "script": "/a.fdx" })).is_err());
 }

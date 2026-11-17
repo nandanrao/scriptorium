@@ -2,6 +2,7 @@
 //!
 //! Usage: `scriptorium-app [SCRIPT.fdx [REVIEW.txt ...]]`. See docs/PLAN.md.
 
+mod agent_link;
 mod agent_panel;
 mod blocks;
 mod connect;
@@ -185,6 +186,7 @@ fn main() {
             )
             .expect("open window");
         window.update(cx, |_, _, cx| cx.activate(true)).ok();
+        serve_agents(window, cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -192,6 +194,30 @@ fn main() {
         })
         .detach();
     });
+}
+
+/// Serve outside agents (`scriptorium mcp`) from this app while it runs:
+/// the link's socket is removed on a clean quit (a crash leaves its lock
+/// free, and the next app replaces the socket). Another copy of the app
+/// serving already: said once, and this one doesn't serve.
+fn serve_agents(window: gpui::WindowHandle<Workspace>, cx: &mut App) {
+    match agent_link::start() {
+        Ok(link) => {
+            let close = link.closer();
+            cx.on_app_quit(move |_| {
+                close();
+                async {}
+            })
+            .detach();
+            window.update(cx, |w, _, cx| w.serve_agents(link, cx)).ok();
+        }
+        Err(e) => {
+            log::warn(&format!("not serving AI agents: {e}"));
+            if e == scriptorium_fsio::link::BindError::Owned {
+                window.update(cx, |w, _, cx| w.set_notice(e.to_string(), cx)).ok();
+            }
+        }
+    }
 }
 
 #[cfg(test)]

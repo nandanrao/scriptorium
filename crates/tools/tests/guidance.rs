@@ -8,17 +8,9 @@ use scriptorium_tools::{Offer, ToolError, catalogue, mcp_tool, offered, read_onl
 use serde_json::{Value, json};
 
 /// snake_case words the guidance uses that aren't tools or arguments:
-/// result fields and statuses, and `where_is_writer` (step C3).
-const NOT_TOOLS: &[&str] = &[
-    "where_is_writer",
-    "is_version",
-    "next_from_row",
-    "in_sync",
-    "this_changed",
-    "other_changed",
-    "both_changed",
-    "one_sided",
-];
+/// result fields and statuses.
+const NOT_TOOLS: &[&str] =
+    &["is_version", "next_from_row", "in_sync", "this_changed", "other_changed", "both_changed", "one_sided"];
 
 fn unknown(text: &str) -> Vec<String> {
     unknown_tools(text, &catalogue(Offer::Agent)).into_iter().filter(|w| !NOT_TOOLS.contains(&w.as_str())).collect()

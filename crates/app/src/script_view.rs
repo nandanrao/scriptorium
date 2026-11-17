@@ -43,6 +43,8 @@ use crate::theme::*;
 
 // The pair in the sidebar and the toolbar, choosing what is lined up on the
 // left, Mark in sync, making a version (plan step B3).
+mod agent_ops;
+pub(crate) use agent_ops::WRITER_REWRITING;
 mod pair_ui;
 
 actions!(
@@ -1124,8 +1126,8 @@ impl ScriptView {
         self.start_rewrite(window, cx);
     }
 
-    /// Tests: whether a rewrite is in progress.
-    #[cfg(test)]
+    /// Whether a rewrite is in progress (the session can't be saved until
+    /// it ends).
     pub(crate) fn is_rewriting(&self) -> bool {
         self.rewriting.is_some()
     }
@@ -2011,6 +2013,48 @@ impl ScriptView {
         self.build_rows(cx);
         self.refresh(cx);
         self.schedule_autosave(cx);
+        cx.notify();
+    }
+
+    // ---- for the agent link (agent_link.rs, plan C1) ----------------------------
+
+    /// Written in place and about to be replaced by the window
+    /// ([`Reopen`]): an outside agent's call is busy until the new view is
+    /// there.
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired
+    }
+
+    /// Tests: whether an autosave was scheduled since the last look.
+    #[cfg(test)]
+    pub(crate) fn take_autosave_for_test(&mut self) -> bool {
+        self.autosave.take().is_some()
+    }
+
+    /// Tests: as if just written in place, before the window replaces it.
+    #[cfg(test)]
+    pub(crate) fn retire_for_test(&mut self) {
+        self.retired = true;
+    }
+
+    /// Save the session now, without waiting (call it holding the lease an
+    /// agent's call took, so the lock is this view's): an outside agent is
+    /// told a change was made only once it is on disk. False: not saved
+    /// (another program holds the lock; or a rewrite is being typed, which
+    /// holds every save back until it is finished).
+    pub(crate) fn save_for_agent(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.rewriting.is_some() {
+            return false;
+        }
+        let synced = self.save_session_within(Duration::ZERO, cx);
+        synced && self.doc(cx).log().len() <= self.synced
+    }
+
+    /// What an outside agent's call changed, in the status bar: news that
+    /// passes, like a reload's.
+    pub(crate) fn say_agent_news(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.set_notice_line(text.into(), NoticeLife::Passing);
+        self.reload_note = None;
         cx.notify();
     }
 }
@@ -4320,6 +4364,46 @@ mod version_tests {
             assert!(why.starts_with("film.fdx has changes in Scriptorium that aren't in the file"), "{why}");
         })
         .unwrap();
+    }
+
+    /// `where_is_writer` on the version, its review showing (C3): the pair,
+    /// the card, the selection, the scene.
+    #[gpui::test]
+    fn where_is_writer_fills_from_the_view(cx: &mut TestAppContext) {
+        use scriptorium_core::{Pos, Selection};
+        use scriptorium_tools::context::{Card, PairPlace, Showing};
+        let p = Pair::new("where");
+        let (w, view) = open(cx, &p);
+        w.update(cx, |v, _, cx| {
+            v.view = View::Review(0);
+            v.cur[0] = Some(0);
+            let doc = v.doc(cx).clone();
+            let ids: Vec<ParaId> = doc.paragraphs().iter().map(|p| p.id).collect();
+            v.set_selection_for_test(Selection::cursor(Pos::new(ids[1], 0)), cx);
+            let c = v.where_is_writer(cx);
+            assert_eq!(c.script, p.at("film.es.fdx").display().to_string());
+            assert_eq!(
+                c.pair,
+                Some(PairPlace {
+                    this: "Español".into(),
+                    other: "English".into(),
+                    other_file: "film.fdx".into(),
+                    this_is_version: true,
+                    lined_up: v.links.shows_left(),
+                })
+            );
+            assert_eq!(c.view, Showing::Review(v.session.reviews[0].name.clone()));
+            assert_eq!(c.card, Some(Card { number: 1, para: anchor_para(&v.session, &doc, 0, 0) }));
+            let sel = c.selection.clone().unwrap();
+            assert!(sel.collapsed && sel.first == ids[1], "{sel:?}");
+            assert_eq!(c.scene.as_ref().map(|s| (s.number, s.heading.as_str())), Some((1, "EXT. FARM HOUSE - NIGHT")));
+            assert!(!c.unwritten);
+            let text = scriptorium_tools::context::text(&c);
+            assert!(text.contains("this is the version (Español); the original is English (film.fdx)"), "{text}");
+            assert!(text.contains("the card shows suggestion #1"), "{text}");
+        })
+        .unwrap();
+        drop(view);
     }
 
     #[gpui::test]

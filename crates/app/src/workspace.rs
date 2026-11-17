@@ -10,13 +10,14 @@ use std::path::PathBuf;
 
 use gpui::{
     App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, PathPromptOptions, SharedString, Stateful, Subscription, Window, actions, deferred, div, prelude::*,
-    px,
+    MouseButton, PathPromptOptions, SharedString, Stateful, Subscription, Task, Window, actions, deferred, div,
+    prelude::*, px,
 };
 
+use crate::agent_link::{self, Link, OpenScript};
 use crate::agent_panel::accounts::{AccountsSheet, Dismissed};
 use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
-use crate::connect::{self, InstallCli};
+use crate::connect::{self, ConnectAgent, ConnectSheet, InstallCli};
 use crate::menus::{self, Item};
 use crate::new_version::{MarkInSync, MarkNotInSync, NewVersion, NewVersionSheet, SheetEvent, Swap};
 use crate::script_view::{
@@ -47,9 +48,18 @@ pub struct Workspace {
     new_version: Option<(Entity<NewVersionSheet>, Option<FocusHandle>, Subscription)>,
     /// Install command-line tool… is running; a second click is ignored.
     installing_cli: bool,
+    /// Scriptorium › Connect an AI agent…'s sheet while it's open, and what
+    /// had focus before.
+    connect: Option<(Entity<ConnectSheet>, Option<FocusHandle>, Subscription)>,
+    /// A fix the launch check offers (Claude Desktop's setting), shown in a
+    /// bar under the toolbar until taken or dismissed; true while it runs.
+    fix_offer: Option<(connect::Offer, bool)>,
     _observe: Option<Subscription>,
     /// The view's [`Reopen`]: Write .fdx wrote the version in place.
     _reopen: Option<Subscription>,
+    /// Serving outside agents (`agent_link`): the script open, for the
+    /// link's hello, and the task running their calls.
+    link: Option<(OpenScript, Task<()>)>,
 }
 
 impl Workspace {
@@ -63,8 +73,11 @@ impl Workspace {
             accounts: None,
             new_version: None,
             installing_cli: false,
+            connect: None,
+            fix_offer: None,
             _observe: None,
             _reopen: None,
+            link: None,
         };
         // Closing the window saves, like Quit.
         let ws = cx.entity().downgrade();
@@ -76,15 +89,52 @@ impl Workspace {
             Some(p) => this.open_script(p, reviews, window, cx),
             None => window.focus(&this.focus, cx),
         }
+        this.check_agents(cx);
         this
     }
 
-    #[cfg(test)]
+    /// The script view open now (outside agents' calls look it up per call).
     pub(crate) fn script_view(&self) -> Option<Entity<ScriptView>> {
         self.view.clone()
     }
 
-    fn set_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+    /// Run outside agents' calls (from `link`) on the script open here, as
+    /// it is at each call.
+    pub fn serve_agents(&mut self, link: Link, cx: &mut Context<Self>) {
+        let Link { jobs, open, .. } = link;
+        open.set(self.view.as_ref().map(|v| v.read(cx).script_path()));
+        self.link = Some((open, agent_link::spawn_pump(jobs, cx)));
+    }
+
+    /// [`Self::serve_agents`] with no task: the test runs the calls
+    /// ([`agent_link::handle`]), as GPUI's test executor can't be woken from
+    /// the link's threads.
+    #[cfg(test)]
+    pub(crate) fn serve_agents_by_hand(
+        &mut self,
+        link: Link,
+        cx: &mut Context<Self>,
+    ) -> futures::channel::mpsc::UnboundedReceiver<agent_link::Job> {
+        let Link { jobs, open, .. } = link;
+        open.set(self.view.as_ref().map(|v| v.read(cx).script_path()));
+        self.link = Some((open, Task::ready(())));
+        jobs
+    }
+
+    /// Tell the link which script is open (for its hello).
+    fn note_open(&self, cx: &App) {
+        if let Some((open, _)) = &self.link {
+            open.set(self.view.as_ref().map(|v| v.read(cx).script_path()));
+        }
+    }
+
+    /// Write .fdx in place, as the view's [`Reopen`] has it (tests).
+    #[cfg(test)]
+    pub(crate) fn reopen_for_test(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.reopen_written(Reopen { path, notice: String::new() }, window, cx);
+    }
+
+    pub(crate) fn set_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let text = text.into();
         match &self.view {
             Some(v) => v.update(cx, |v, cx| v.set_notice(text, cx)),
@@ -191,6 +241,7 @@ impl Workspace {
             }));
         self.view = Some(view);
         self.notice = "".into();
+        self.note_open(cx);
     }
 
     /// Write .fdx wrote the version in place: drop its view without saving
@@ -208,6 +259,7 @@ impl Workspace {
                 self.view = None;
                 self._observe = None;
                 self._reopen = None;
+                self.note_open(cx);
                 window.set_window_title("Scriptorium");
                 self.set_notice(format!("{}  Reopening it failed: {e}", reopen.notice), cx);
             }
@@ -293,11 +345,111 @@ impl Workspace {
         .detach();
     }
 
+    // ---- Connect an AI agent… and the launch check (plan E3) -------------------
+
+    /// Scriptorium › Connect an AI agent…: the sheet, over the whole
+    /// window (the agents are the user's, not the script's).
+    fn on_connect_agent(&mut self, _: &ConnectAgent, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        if self.connect.is_some() || self.accounts.is_some() || self.new_version.is_some() {
+            return;
+        }
+        let back = window.focused(cx);
+        let sheet = cx.new(ConnectSheet::new);
+        let sub = cx.subscribe_in(&sheet, window, |this, _, _: &connect::Closed, window, cx| {
+            if let Some((_, back, _)) = this.connect.take() {
+                window.focus(&back.unwrap_or_else(|| this.focus.clone()), cx);
+            }
+            cx.notify();
+        });
+        let into = sheet.focus_handle(cx);
+        window.focus(&into, cx);
+        self.connect = Some((sheet, back, sub));
+        cx.notify();
+    }
+
+    /// The launch check: agents connected from here before are looked at
+    /// off the UI thread; what was repaired silently is said in the status
+    /// bar, and a fix that needs Claude quit is offered in a bar.
+    fn check_agents(&mut self, cx: &mut Context<Self>) {
+        let remembered = connect::connected_before();
+        if remembered.is_empty() {
+            return;
+        }
+        let task = connect::launch_check(remembered, cx);
+        cx.spawn(async move |this, cx| {
+            let checked = task.await;
+            this.update(cx, |this, cx| {
+                if let Some(said) = checked.said {
+                    this.set_notice(said, cx);
+                }
+                if let Some(offer) = checked.offer {
+                    this.fix_offer = Some((offer, false));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The offered fix's button: through "Quit and reopen Claude for me"
+    /// (or the `.mcpb` again), off the UI thread.
+    fn take_fix_offer(&mut self, cx: &mut Context<Self>) {
+        let Some((offer, false)) = self.fix_offer else { return };
+        self.fix_offer = Some((offer, true));
+        let task = connect::fix_offer(offer, cx);
+        cx.spawn(async move |this, cx| {
+            let said = task.await;
+            this.update(cx, |this, cx| {
+                this.fix_offer = None;
+                this.set_notice(said, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_fix_offer(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let (offer, running) = self.fix_offer?;
+        Some(
+            div()
+                .flex_none()
+                .px_3()
+                .py_1p5()
+                .flex()
+                .items_center()
+                .gap_2()
+                .bg(WARN_SOFT)
+                .border_b_1()
+                .border_color(RULE)
+                .text_size(px(12.))
+                .child(div().flex_1().text_color(INK).child(offer.text()))
+                .child(if running {
+                    div().text_color(INK_2).child("Fixing\u{2026}").into_any_element()
+                } else {
+                    crate::script_view::button("fix-offer", offer.button(), None, true)
+                        .on_click(cx.listener(|this, _, _, cx| this.take_fix_offer(cx)))
+                        .into_any_element()
+                })
+                .when(!running, |d| {
+                    d.child(crate::script_view::button("fix-offer-later", "Not now", None, false).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.fix_offer = None;
+                            cx.notify();
+                        }),
+                    ))
+                }),
+        )
+    }
+
     // ---- the agent panel and AI accounts ---------------------------------------
 
     fn on_toggle_agent(&mut self, _: &ToggleAgentPanel, window: &mut Window, cx: &mut Context<Self>) {
         // Under the accounts sheet, keys stay with the sheet.
-        if self.accounts.is_some() {
+        if self.accounts.is_some() || self.connect.is_some() {
             return;
         }
         self.close_menu(window, cx);
@@ -312,7 +464,7 @@ impl Workspace {
     /// here over the whole window and opens with no script too.
     fn on_open_accounts(&mut self, _: &OpenAccounts, window: &mut Window, cx: &mut Context<Self>) {
         self.close_menu(window, cx);
-        if self.accounts.is_some() {
+        if self.accounts.is_some() || self.connect.is_some() {
             return;
         }
         let back = window.focused(cx);
@@ -671,6 +823,8 @@ impl Render for Workspace {
         let menu = self.menu.is_some().then(|| self.render_menu(cx));
         let accounts = self.accounts.as_ref().map(|(sheet, _, _)| sheet.clone());
         let new_version = self.new_version.as_ref().map(|(sheet, _, _)| sheet.clone());
+        let connect = self.connect.as_ref().map(|(sheet, _, _)| sheet.clone());
+        let fix_offer = self.render_fix_offer(cx);
         let body = match &self.view {
             Some(v) => div().flex_1().min_h_0().flex().flex_col().child(v.clone()),
             None => div().flex_1().min_h_0().flex().flex_col().child(self.render_empty(cx)).child(self.render_status()),
@@ -692,6 +846,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_about))
             .on_action(cx.listener(Self::on_install_cli))
+            .on_action(cx.listener(Self::on_connect_agent))
             .on_action(cx.listener(Self::on_toggle_agent))
             .on_action(
                 cx.listener(|this, _: &crate::agent_panel::Stop, _, cx| this.with_view(cx, |v, cx| v.stop_agent(cx))),
@@ -732,9 +887,11 @@ impl Render for Workspace {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| this.dropped(paths, window, cx)))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(ACCENT_SOFT))
             .child(self.render_toolbar(cx))
+            .children(fix_offer)
             .child(body)
             .children(accounts)
             .children(new_version)
+            .children(connect)
             .children(menu)
     }
 }

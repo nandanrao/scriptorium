@@ -2,7 +2,8 @@
 //! MCP, the CLI `tool`), beyond the chat catalogue: the shared tools with
 //! the host fields (`script`, `review_file`, `before`), and the tools only
 //! agents get (attach and detach reviews, decide, edit, undo, redo, write
-//! the script), and `guide` ([`crate::guidance`]). Also each tool's MCP
+//! the script), `guide` ([`crate::guidance`]) and `where_is_writer`
+//! ([`crate::context`]). Also each tool's MCP
 //! annotations.
 //!
 //! Paths: `script` is optional (left out, the host uses the script open in
@@ -37,6 +38,7 @@ const READ_ONLY: &[&str] = &[
     "list_versions",
     "read_rows",
     "guide",
+    crate::context::NAME,
 ];
 
 /// The tools only [`Offer::Agent`](crate::Offer::Agent) has, in the order
@@ -96,6 +98,7 @@ pub(crate) fn offer(base: Vec<ToolSpec>) -> Vec<ToolSpec> {
     }
     specs.extend(agent_only());
     specs.push(crate::guidance::guide_spec());
+    specs.push(crate::context::where_spec());
     specs
 }
 
