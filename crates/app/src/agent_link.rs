@@ -922,12 +922,17 @@ mod tests {
         }
         // The agent panel's conversation is never part of it.
         assert!(!text.contains("agent panel") && !text.contains("conversation"), "{text}");
+        // While the writer rewrites a line it still answers (it only reads).
+        ran(served.one(cx, suggest(3, "I am going to town tomorrow.", "notes.review.txt")), &f);
+        start_rewrite(&served, cx, &v);
+        assert!(v.read_with(cx, |v, _| v.is_rewriting()));
+        let text = ran(served.one(cx, call("where_is_writer", json!({}))), &f);
+        assert!(text.contains("Showing: the review notes"), "{text}");
         // Arguments it doesn't take are refused, as for any tool.
         match served.one(cx, call("where_is_writer", json!({"script": "/elsewhere/other.fdx"}))) {
             Ok(Got::Done { done, .. }) => assert!(done.is_error && done.text.contains("`script`"), "{}", done.text),
             other => panic!("{other:?}"),
         }
-        assert!(!f.dir.join("film.scriptorium.json").exists(), "nothing written");
         drop(served);
 
         let g = Folder::new("where-empty");

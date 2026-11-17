@@ -1004,9 +1004,9 @@ fn tool_command(args: &[&str], notes: &mut Vec<String>) -> Result<String, String
         }
         return Ok(tool_list(json));
     }
-    // `guide` needs no script: `tool guide '{"topic": "review"}'`.
+    // `guide` and `where_is_writer` need no script: `tool guide '{"topic": "review"}'`.
     let (script, rest) = match args {
-        ["guide", ..] => (None, args),
+        ["guide" | "where_is_writer", ..] => (None, args),
         [script, rest @ ..] => (Some(*script), rest),
         [] => return Err(format!("wrong arguments for `tool`\n\n{USAGE}")),
     };
@@ -1050,8 +1050,8 @@ fn tool(
     if let Some(f) = review_file {
         map.insert("review_file".into(), Value::String(f.into()));
     }
-    // `guide` takes no script, even when one is given.
-    let Some(script) = script.filter(|_| name != "guide") else {
+    // `guide` and `where_is_writer` take no script, even when one is given.
+    let Some(script) = script.filter(|_| !matches!(name, "guide" | "where_is_writer")) else {
         let call = ToolCall {
             id: "cli".into(),
             name: name.into(),

@@ -31,7 +31,7 @@ use scriptorium_agent::ToolCall;
 use scriptorium_chat::exec::{
     BUSY_FOR, BUSY_RETRY, Caller, FileScript, ReviewError, ReviewStore, Script, expand_home, run_call,
 };
-use scriptorium_tools::{Offer, catalogue, guidance, mcp_tool};
+use scriptorium_tools::{Offer, catalogue, context, guidance, mcp_tool};
 use serde_json::{Value, json};
 
 /// Protocol versions this server speaks, newest first. The client's choice
@@ -67,10 +67,6 @@ pub const NO_ANSWER: &str = "Scriptorium didn't answer, so its open script can't
 /// `where_is_writer` when the app didn't answer.
 pub const NO_ANSWER_WHERE: &str = "Scriptorium didn't answer, so this connection can't tell what is open or where the writer is. Try again, or \
      ask the writer for the script's path.";
-
-/// `where_is_writer` with no app: a plain answer, not an error.
-pub const NOT_OPEN: &str = "Scriptorium isn't open, so nothing is open and there's no writer's position to tell. Ask the writer for the \
-     script's path, or to open it in Scriptorium.";
 
 /// A writing tool whose call the app took and then closed during.
 pub const MAYBE_APPLIED: &str = "Scriptorium closed during this call; it may have been applied. Check with \
@@ -332,11 +328,16 @@ impl Connector {
             // The app answers these itself; it sending one here is its bug.
             return Ended::err(format!("Scriptorium didn't answer {name}; try again."));
         }
-        if name == "where_is_writer" {
+        if name == context::NAME {
+            // Its arguments are checked as the app checks them.
+            let done = run_call(&mut NoScript, Caller::Agent, &call);
+            if done.result.is_error {
+                return Ended::err(done.result.content);
+            }
             return Ended::ok(match why {
                 NoApp::OtherVersion => OTHER_VERSION_WHERE,
                 NoApp::NoAnswer => NO_ANSWER_WHERE,
-                NoApp::Absent | NoApp::Routed => NOT_OPEN,
+                NoApp::Absent | NoApp::Routed => context::ON_FILES,
             });
         }
         if name == "guide" {
@@ -376,10 +377,9 @@ impl Connector {
     }
 }
 
-/// Whether `tools/call` takes tool `name`: the Agent offer, and
-/// `where_is_writer` (the app's; answered plainly without it).
+/// Whether `tools/call` takes tool `name`: the Agent offer.
 fn offered(name: &str) -> bool {
-    name == "where_is_writer" || catalogue(Offer::Agent).iter().any(|s| s.name == name)
+    catalogue(Offer::Agent).iter().any(|s| s.name == name)
 }
 
 /// The arguments as the app gets them: `script` with `~` expanded and made
@@ -474,7 +474,10 @@ mod tests {
         let r = c.call("read_scene", &json!({ "scene": 1 }));
         assert!(r.is_error && r.text == NO_APP, "{}", r.text);
         let r = c.call("where_is_writer", &json!({}));
-        assert!(!r.is_error && r.text == NOT_OPEN, "{}", r.text);
+        assert!(!r.is_error && r.text == context::ON_FILES, "{}", r.text);
+        // Arguments it doesn't take are refused offline too.
+        let r = c.call("where_is_writer", &json!({ "script": "/a.fdx" }));
+        assert!(r.is_error && r.text.contains("`script`"), "{}", r.text);
         // A script that isn't a string: the arguments' check says so.
         let r = c.call("read_scene", &json!({ "script": 3, "scene": 1 }));
         assert!(r.is_error && r.text.contains("script"), "{}", r.text);

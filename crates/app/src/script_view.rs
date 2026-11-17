@@ -4374,7 +4374,7 @@ mod version_tests {
         use scriptorium_tools::context::{Card, PairPlace, Showing};
         let p = Pair::new("where");
         let (w, view) = open(cx, &p);
-        w.update(cx, |v, _, cx| {
+        w.update(cx, |v, window, cx| {
             v.view = View::Review(0);
             v.cur[0] = Some(0);
             let doc = v.doc(cx).clone();
@@ -4389,7 +4389,7 @@ mod version_tests {
                     other: "English".into(),
                     other_file: "film.fdx".into(),
                     this_is_version: true,
-                    lined_up: v.links.shows_left(),
+                    lined_up: true,
                 })
             );
             assert_eq!(c.view, Showing::Review(v.session.reviews[0].name.clone()));
@@ -4401,6 +4401,19 @@ mod version_tests {
             let text = scriptorium_tools::context::text(&c);
             assert!(text.contains("this is the version (Español); the original is English (film.fdx)"), "{text}");
             assert!(text.contains("the card shows suggestion #1"), "{text}");
+
+            // A selection across lines, upwards: in script order.
+            v.set_selection_for_test(Selection { anchor: Pos::new(ids[2], 4), head: Pos::new(ids[0], 4) }, cx);
+            let sel = v.where_is_writer(cx).selection.unwrap();
+            assert_eq!((sel.first, sel.last, sel.collapsed), (ids[0], ids[2], false), "{sel:?}");
+            // The version's dialogue is still blank.
+            assert_eq!(sel.text, " FARM HOUSE - NIGHT\nCESAR\n");
+
+            // The writer takes the suggestion: a change not yet written.
+            v.accept(0, window, cx);
+            let c = v.where_is_writer(cx);
+            assert!(c.unwritten);
+            assert!(scriptorium_tools::context::text(&c).contains("Not yet written"));
         })
         .unwrap();
         drop(view);

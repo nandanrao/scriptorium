@@ -448,6 +448,13 @@ fn tool_list_prints_the_catalogue() {
     let guide = f.ok(&["tool", "guide", r#"{"topic": "review"}"#]);
     assert!(guide.contains("review_file"), "{guide}");
     assert_eq!(f.ok(&["tool", "film.fdx", "guide", r#"{"topic": "review"}"#]), guide);
+    // `where_is_writer` needs no script either: on the files there is no
+    // writer to place.
+    let place = f.ok(&["tool", "where_is_writer"]);
+    assert_eq!(place.trim_end(), scriptorium_tools::context::ON_FILES);
+    assert_eq!(f.ok(&["tool", "film.fdx", "where_is_writer"]), place);
+    let (ok, _) = f.run(&["tool", "where_is_writer", r#"{"scene": 1}"#]);
+    assert!(!ok, "an argument it doesn't take");
     let (ok, _) = f.run(&["tool", "--list", "a", "b"]);
     assert!(!ok);
 }

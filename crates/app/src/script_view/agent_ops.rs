@@ -389,10 +389,11 @@ impl ScriptView {
         let card = self
             .current()
             .map(|(r, i)| Card { number: self.number(doc, r, i), para: anchor_para(&self.session, doc, r, i) });
-        let selection = context::selected(doc, doc.clamp_selection(editor.sel));
+        let sel = doc.clamp_selection(editor.sel);
+        let selection = context::selected(doc, sel);
         // The line the writer looks at: the card's while a review shows,
         // else the cursor's.
-        let at = card.as_ref().map(|c| c.para).unwrap_or(editor.sel.head.para);
+        let at = card.as_ref().map(|c| c.para).unwrap_or(sel.head.para);
         let written = self.applied.as_deref() == Some(doc.script());
         ViewContext {
             script: self.script_path.display().to_string(),

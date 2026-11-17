@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Smoke-test a built `scriptorium` CLI: `--version`, then an MCP
-# `initialize` + `tools/list` round trip over `scriptorium mcp`.
+# Smoke-test a built `scriptorium` CLI: `--version`, an MCP
+# `initialize` + `tools/list` round trip over `scriptorium mcp`, and
+# `tool where_is_writer`.
 #
 #   script/smoke-cli.sh target/bundle/Scriptorium.app/Contents/MacOS/scriptorium
 #
 # Portable to macOS bash 3.2 and BSD tools. Needs no app running and no
-# script: these two calls never touch the files or the app.
+# script: these calls never touch the files or the app.
 set -euo pipefail
 
 BIN=${1:?usage: smoke-cli.sh path/to/scriptorium}
@@ -39,5 +40,9 @@ done
 for want in '"id":2' '"result":{"tools":[' '"name":"suggest_changes"' '"name":"where_is_writer"'; do
   case "$list" in *"$want"*) ;; *) fail "tools/list reply lacks $want: $(printf '%s' "$list" | cut -c1-400)" ;; esac
 done
+
+# `tool where_is_writer` needs no script, and answers without the app.
+place=$("$BIN" tool where_is_writer) || fail "\`scriptorium tool where_is_writer\` failed"
+case "$place" in *"nothing is selected"*) ;; *) fail "unexpected where_is_writer answer: $place" ;; esac
 
 echo "smoke: \`scriptorium mcp\` answered initialize and tools/list"

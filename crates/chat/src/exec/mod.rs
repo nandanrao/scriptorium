@@ -822,6 +822,11 @@ pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) ->
             Err(e) => CallDone::failed(call, &e),
         };
     }
+    if call.name == scriptorium_tools::context::NAME {
+        // The app answers it from its open view; here there is no writer
+        // to place, and no script is needed.
+        return CallDone::new(call, scriptorium_tools::context::ON_FILES, false);
+    }
     if call.name == "guide" {
         // Needs no script.
         return match scriptorium_tools::guidance::guide(&input) {
