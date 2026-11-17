@@ -1785,7 +1785,16 @@ impl Session {
         // Kept: the text is the writer's, so going back to pending (or keeping
         // again) changes only the decision, never hand edits made since.
         let restores = stored.is_some_and(|d| d != Stored::Rejected);
-        let run = self.run(doc, r, i);
+        // Undecided, but placed on other lines than it was made on: a `ROW:`
+        // block placed from a decision only its file records, on lines that
+        // already read it (matching's `decided_in_file`). Decided on those
+        // lines, so restoring the decision only records it.
+        let run = match self.run(doc, r, i) {
+            Run::Ids(ids) if stored.is_none() && !item.paras.is_empty() && item.paras != ids => {
+                Run::Ids(item.paras.clone())
+            }
+            run => run,
+        };
         let before_ids = item.before_ids();
         let value = |decision: Stored, now: Option<Now>| {
             MetaValue { decision, paras: Some(before_ids.clone()), now }.to_value()

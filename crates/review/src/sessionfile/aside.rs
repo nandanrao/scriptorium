@@ -16,6 +16,7 @@ use scriptorium_core::doc::{Op, Transaction, undo_groups};
 use scriptorium_core::{Document, ParaId, spans};
 
 use super::SessionFile;
+use crate::file::{Entry, FileStatus, Line};
 use crate::meta::{MetaValue, Now, Stored};
 use crate::{Item, Session};
 
@@ -54,21 +55,28 @@ impl Kept {
 ///   lines that decision names (a rewrite's typing is merged into its
 ///   decision's undo step, so it counts; a split, join, added or removed
 ///   line counts only inside a block decision's own lines);
-/// - its decisions, per key, equal those `fresh` (the script opened fresh
-///   from its file with the review files' saved progress; `session` is its
-///   reviews) carries, compared by what was decided, never by the paragraph
-///   ids after `@` (they're the old file's);
+/// - its decisions, per key, equal the review files' saved progress
+///   (`STATUS`/`CHOSEN` as written in `session`'s files, whether or not the
+///   entry is placed in `fresh` now: Final Draft may have changed its line),
+///   compared by what was decided, never by the paragraph ids after `@`
+///   (they're the old file's);
 /// - every line the session's edits touched ends as the files say: taking
-///   those edits back, last first, from the line's text in `fresh` must meet
+///   those edits back, last first, from the line's text in `fresh` (the
+///   script opened fresh from its file with that progress) must meet
 ///   each one where it was made and end on the line's text when the session
 ///   began (the suggestion's `BEFORE`, or the option its earlier decision
 ///   accepted). A line rewritten before the session began (its old `MINE` is
 ///   gone) or a block decided in it can't be checked that way and counts as
 ///   not saved.
+///
+/// A session with no events of its own (only the starting point it took
+/// from the review files, as a first open or a write in place leaves it)
+/// holds nothing beyond them.
 pub fn only_decisions(saved: &SessionFile, fresh: &Document, session: &Session) -> Result<(), Kept> {
-    let Some(base) = &saved.base else {
-        return if saved.events.is_empty() { Ok(()) } else { Err(Kept::Old) };
-    };
+    if saved.events.is_empty() {
+        return Ok(());
+    }
+    let Some(base) = &saved.base else { return Err(Kept::Old) };
     let events = undo_groups(&saved.events);
     if !events.iter().all(|group| own_lines_only(group)) {
         return Err(Kept::Typing);
@@ -86,8 +94,8 @@ pub fn only_decisions(saved: &SessionFile, fresh: &Document, session: &Session) 
         }
     }
     let was = decisions(meta.iter().filter_map(|(k, v)| Some((*k, (*v)?))));
-    let now = decisions(fresh.all_meta().iter().map(|(k, v)| (k.as_str(), v.as_str())));
-    if was != now {
+    let files = saved_progress(session);
+    if was.len() != files.len() || !was.iter().all(|(k, v)| v.as_ref().ok() == files.get(*k)) {
         return Err(Kept::Decisions);
     }
     let applied: Vec<&Op> = events.iter().flatten().flat_map(|t| &t.ops).collect();
@@ -108,15 +116,31 @@ pub fn only_decisions(saved: &SessionFile, fresh: &Document, session: &Session) 
     }
     for para in touched {
         let key = lines.get(&para).ok_or(Kept::Decisions)?;
-        let item = item_of(session, key).ok_or(Kept::Decisions)?;
+        let (entry, item) = entry_of(session, key).ok_or(Kept::Decisions)?;
+        // An item placed now reads its texts from the line it's on; one that
+        // isn't (Final Draft changed its line) from its file entry, one line.
+        let one = |lines: Option<&Vec<Line>>| match lines.map(Vec::as_slice) {
+            Some([line]) => Ok(line.text.clone()),
+            _ => Err(Kept::Decisions),
+        };
+        let before = || item.map_or_else(|| one(Some(&entry.before)), |it| Ok(it.before.clone()));
+        let option = |k: usize| match item {
+            Some(it) => it.options.get(k).cloned().ok_or(Kept::Decisions),
+            None => one(entry.options.get(k)),
+        };
         let began = match start.get(key).copied().flatten().map(MetaValue::parse) {
-            None | Some(Some(MetaValue { decision: Stored::Rejected, .. })) => item.before.clone(),
-            Some(Some(MetaValue { decision: Stored::Accepted(k), .. })) => {
-                item.options.get(k).cloned().ok_or(Kept::Decisions)?
-            }
+            None | Some(Some(MetaValue { decision: Stored::Rejected, .. })) => before()?,
+            Some(Some(MetaValue { decision: Stored::Accepted(k), .. })) => option(k)?,
             Some(_) => return Err(Kept::Decisions),
         };
-        let ends = fresh.paragraph(item.para).map(|p| p.text()).ok_or(Kept::Decisions)?;
+        let ends = match item {
+            Some(it) => fresh.paragraph(it.para).map(|p| p.text()).ok_or(Kept::Decisions)?,
+            None => match entry.status {
+                FileStatus::Pending | FileStatus::Rejected => one(Some(&entry.before))?,
+                FileStatus::Accepted => one(entry.options.get(entry.chosen.unwrap_or(0)))?,
+                FileStatus::Rewritten => one(entry.mine.as_ref())?,
+            },
+        };
         if taken_back(ends, para, &applied).as_deref() != Some(began.as_str()) {
             return Err(Kept::Decisions);
         }
@@ -144,13 +168,17 @@ fn line_keys<'a>(events: &[Vec<&'a Transaction>]) -> Option<HashMap<ParaId, &'a 
     Some(out)
 }
 
-/// The item a decision key (`review/<review id>/<entry>`) is for, in the
-/// fresh session; a line item only.
-fn item_of<'s>(session: &'s Session, key: &str) -> Option<&'s Item> {
+/// The file entry a decision key (`review/<review id>/<entry>`) is for, and
+/// its item in the fresh session if it is placed there; `None` for a block.
+fn entry_of<'s>(session: &'s Session, key: &str) -> Option<(&'s Entry, Option<&'s Item>)> {
     let (id, entry) = key.strip_prefix(PREFIX)?.rsplit_once('/')?;
-    let entry: usize = entry.parse().ok()?;
+    let e: usize = entry.parse().ok()?;
     let review = session.reviews.iter().find(|r| r.id == id)?;
-    review.items.iter().find(|it| it.entry == entry && !it.block)
+    let item = review.items.iter().find(|it| it.entry == e);
+    if item.is_some_and(|it| it.block) {
+        return None;
+    }
+    Some((review.file.entries.get(e)?, item))
 }
 
 /// `text` with every edit `applied` made to `para` taken back, last first;
@@ -208,6 +236,35 @@ fn own_lines_only(group: &[&Transaction]) -> bool {
         }
         Op::InsertPara { para, .. } | Op::RemovePara { para, .. } => block && mine(&para.id),
     })
+}
+
+/// The decisions the review files hold, under the keys a session stores them
+/// by: `accepted` with the option (the file's `CHOSEN` mapped to the item's
+/// option index where the entry is placed now; where it isn't, the file's
+/// own number, which is the same unless an option repeats the `BEFORE`
+/// line), `rejected`, `rewritten`. Pending entries have none.
+fn saved_progress(session: &Session) -> BTreeMap<String, Stored> {
+    let mut out = BTreeMap::new();
+    for review in &session.reviews {
+        for (e, entry) in review.file.entries.iter().enumerate() {
+            let decision = match entry.status {
+                FileStatus::Pending => continue,
+                FileStatus::Rejected => Stored::Rejected,
+                FileStatus::Rewritten => Stored::Rewritten,
+                FileStatus::Accepted => {
+                    let chosen = entry.chosen.unwrap_or(0);
+                    let item = review.items.iter().find(|it| it.entry == e);
+                    let k = match item {
+                        Some(it) => it.option_src.iter().position(|&src| src == chosen).unwrap_or(chosen),
+                        None => chosen,
+                    };
+                    Stored::Accepted(k)
+                }
+            };
+            out.insert(format!("{PREFIX}{}/{e}", review.id), decision);
+        }
+    }
+    out
 }
 
 /// What was decided under each decision key: its decision, or the raw value

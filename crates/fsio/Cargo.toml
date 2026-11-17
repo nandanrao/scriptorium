@@ -19,6 +19,11 @@ scriptorium-fdx = { workspace = true, optional = true }
 scriptorium-review = { workspace = true, optional = true }
 scriptorium-versions = { workspace = true, optional = true }
 
+[dev-dependencies]
+# The end-to-end test (`tests/end_to_end.rs`) drives the tools as the hosts do.
+scriptorium-tools.workspace = true
+serde_json.workspace = true
+
 # ENOLCK differs by OS (37 on Linux, 77 on macOS): take it from libc.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -38,6 +43,10 @@ required-features = ["opened"]
 
 [[test]]
 name = "write_in_place"
+required-features = ["opened"]
+
+[[test]]
+name = "end_to_end"
 required-features = ["opened"]
 
 [lints]

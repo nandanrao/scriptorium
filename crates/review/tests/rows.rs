@@ -389,3 +389,56 @@ fn a_decided_block_stays_only_on_the_lines_its_decision_left() {
     assert!(other.items.is_empty());
     assert!(matches!(&other.unmatched[0].why, Some(Unplaced::NoRow(w)) if w.contains("decision left")));
 }
+
+#[test]
+fn a_block_accepted_in_its_file_with_more_lines_is_placed_on_the_lines_it_left() {
+    // One blank line made two, accepted, the version written with them
+    // (no session): the row's cell is the two lines.
+    let block = file(&[
+        "BEFORE:\n  DIALOGUE: \nAFTER:\n  DIALOGUE: Sí.\n  DIALOGUE: Claro.\nWHY:\nROW: lk-1\nROW TEXT: Yes.\nSTATUS: accepted\nCHOSEN: 1",
+    ]);
+    let mut script = version(&[(6, "Sí.")]);
+    script.paragraphs.insert(7, Paragraph::plain(ParaId(9), ElementKind::Dialogue, "Claro."));
+    script.id_floor = 10;
+    let factory: &RowResolverFactory = &|_: &Document| fixed(&[&[6, 9]]);
+    let source = ReviewSource { name: "t.review.txt".into(), path: "t.review.txt".into(), text: block.clone() };
+    let mut o = sessionfile::resume(vec![source], script.clone(), None, CONTENTS, None, &caps, "", Some(factory));
+    assert!(o.session.reviews[0].unmatched.is_empty(), "{:?}", why(&o.session.reviews[0]));
+    assert_eq!(o.session.status(&o.doc, 0, 0), Status::Accepted(0));
+    let texts = |ps: &[Paragraph]| ps.iter().map(|p| (p.id, p.text())).collect::<Vec<_>>();
+    assert_eq!(texts(o.doc.paragraphs()), texts(&script.paragraphs), "restoring the decision changes no text");
+    assert_eq!(o.session.live_run(&o.doc, 0, 0), [ParaId(6), ParaId(9)]);
+    // Undecided: the one blank line back.
+    decide(&mut o, 0, Decision::Undecided);
+    assert_eq!(line(&o.doc, 6), "");
+    assert!(o.doc.paragraph(ParaId(9)).is_none());
+    assert_eq!(o.doc.paragraphs().len(), 9);
+
+    // A cell that doesn't read the chosen lines: not placed.
+    let factory: &RowResolverFactory = &|_: &Document| fixed(&[&[6, 7]]);
+    let source = ReviewSource { name: "t.review.txt".into(), path: "t.review.txt".into(), text: block };
+    let o = sessionfile::resume(vec![source], script, None, CONTENTS, None, &caps, "", Some(factory));
+    assert!(o.session.reviews[0].items.is_empty());
+}
+
+#[test]
+fn a_line_split_since_keeps_a_pending_entry_on_its_head_but_never_a_decided_one() {
+    // "Sí." split by Enter into "S" | "í.": the row's cell is both lines.
+    let mut script = version(&[(6, "S")]);
+    script.paragraphs.insert(7, Paragraph::plain(ParaId(9), ElementKind::Dialogue, "í."));
+    script.id_floor = 10;
+    let factory: &RowResolverFactory = &|_: &Document| fixed(&[&[6, 9]]);
+    let open = |text: &str| {
+        let source = ReviewSource { name: "t.review.txt".into(), path: "t.review.txt".into(), text: text.into() };
+        sessionfile::resume(vec![source], script.clone(), None, CONTENTS, None, &caps, "", Some(factory))
+    };
+    let pending = file(&["BEFORE: Sí.\nPARA: 6\nAFTER: Claro.\nWHY:\nROW: lk-1\nROW TEXT: Yes."]);
+    let o = open(&pending);
+    assert_eq!(placed(&o.session.reviews[0]), [(0, 6, "Sí.")]);
+    // Accepted in its file: restoring would write "Sí." into the head.
+    let decided =
+        file(&["BEFORE: [empty]\nPARA: 6\nAFTER: Sí.\nWHY:\nROW: lk-1\nROW TEXT: Yes.\nSTATUS: accepted\nCHOSEN: 1"]);
+    let o = open(&decided);
+    assert!(o.session.reviews[0].items.is_empty());
+    assert_eq!((line(&o.doc, 6), line(&o.doc, 9)), ("S".to_string(), "í.".to_string()));
+}

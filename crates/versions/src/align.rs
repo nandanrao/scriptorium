@@ -10,11 +10,16 @@
 //!    whose texts are most alike (`core::text::similarity`), so a reworded
 //!    line with a same-kind line inserted next to it keeps its row. Equal
 //!    runs pair by position. Blanks pair here, and so does a fully
-//!    rewritten line between found neighbours.
+//!    rewritten line between found neighbours. A line split in two (or
+//!    more): when the joined halves read more like the old line than any
+//!    half alone, the old line pairs with the first half and the rest are
+//!    its split rest, kept in the same row.
 //! 3. Left over: new paragraphs of the made member stay unlisted (D3); new
 //!    paragraphs of any other member get a row each, empty on the other
 //!    sides, stamped `=` with their text (C4); one that falls inside a
-//!    multi-id cell joins that cell, so rows never cross. Old ids left over
+//!    multi-id cell joins that cell, so rows never cross, and a split rest
+//!    joins its first half's cell. (The made member's split rest is
+//!    unlisted and follows its first half by D3.) Old ids left over
 //!    leave their rows; a row left with no ids at all is dropped.
 //!
 //! Re-find changes only ids (and the member's hash), never existing stamps.
@@ -46,6 +51,11 @@ pub struct Alignment {
     pub new: Vec<ParaId>,
     /// Old ids nothing new paired with, ascending.
     pub gone: Vec<ParaId>,
+    /// (first half, rest): new lines in `new` that are the rest of a line
+    /// split in the file, with the new id of its first half (paired). For
+    /// a member other than the made one, `refind` puts them in the first
+    /// half's cell rather than rows of their own.
+    pub split: Vec<(ParaId, ParaId)>,
 }
 
 impl Alignment {
@@ -103,6 +113,7 @@ pub fn by_text(old: &BTreeMap<ParaId, Para>, new: &Script, is_caps: &dyn Fn(&Ele
         .collect();
 
     let mut pairs = Vec::new();
+    let mut split = Vec::new();
     let mut exact = 0;
     for op in opcodes(&a, &b) {
         match op.tag {
@@ -120,9 +131,12 @@ pub fn by_text(old: &BTreeMap<ParaId, Para>, new: &Script, is_caps: &dyn Fn(&Ele
                     .collect();
                 let news: Vec<(&ElementKind, String)> =
                     new_paras[op.j1..op.j2].iter().map(|p| (&p.kind, p.text())).collect();
-                for (i, j) in pair_stretch(&olds, &news) {
+                let found = pair_stretch(&olds, &news);
+                let (found, rests) = find_splits(&olds, &news, found);
+                for (i, j) in found {
                     pairs.push((old[op.i1 + i].0, new_paras[op.j1 + j].id));
                 }
+                split.extend(rests.into_iter().map(|(h, r)| (new_paras[op.j1 + h].id, new_paras[op.j1 + r].id)));
             }
             Tag::Insert | Tag::Delete => {}
         }
@@ -135,6 +149,7 @@ pub fn by_text(old: &BTreeMap<ParaId, Para>, new: &Script, is_caps: &dyn Fn(&Ele
         new: new_paras.iter().map(|p| p.id).filter(|id| !paired_new.contains(id)).collect(),
         gone: old.iter().map(|(id, _)| *id).filter(|id| !paired_old.contains(id)).collect(),
         pairs,
+        split,
     }
 }
 
@@ -199,6 +214,67 @@ fn pair_stretch(old: &[(&ElementKind, &str)], new: &[(&ElementKind, String)]) ->
     out
 }
 
+/// (old or first-half index, new index) within one stretch.
+type IndexPair = (usize, usize);
+
+/// How far either way a split is looked for around a paired line.
+const SPLIT_REACH: usize = 8;
+
+/// Splits in one stretch, after [`pair_stretch`]: for each pair (i, j),
+/// the unpaired same-kind lines right before and after j may be halves of
+/// old line i split in the file. The range around j whose joined text
+/// (whitespace-joined) is most like old i is taken when it reads more like
+/// it than any one line in it does; then i pairs with the range's first
+/// line and the others are its rest. Returns the pairs and (first, rest)
+/// index pairs. Blank old lines have nothing to compare, so never split.
+fn find_splits(
+    old: &[(&ElementKind, &str)],
+    new: &[(&ElementKind, String)],
+    pairs: Vec<(usize, usize)>,
+) -> (Vec<IndexPair>, Vec<IndexPair>) {
+    let paired: HashSet<usize> = pairs.iter().map(|(_, j)| *j).collect();
+    let free = |j: usize, kind: &ElementKind| !paired.contains(&j) && new[j].0 == kind;
+    let mut out = Vec::with_capacity(pairs.len());
+    let mut rests = Vec::new();
+    for (i, j) in pairs {
+        let (kind, text) = old[i];
+        if text.trim().is_empty() {
+            out.push((i, j));
+            continue;
+        }
+        let mut lo = j;
+        while lo > 0 && j - lo < SPLIT_REACH && free(lo - 1, kind) {
+            lo -= 1;
+        }
+        let mut hi = j;
+        while hi + 1 < new.len() && hi - j < SPLIT_REACH && free(hi + 1, kind) {
+            hi += 1;
+        }
+        let mut best: Option<(f64, usize, usize)> = None;
+        for s in lo..=j {
+            for e in j..=hi {
+                if s == e {
+                    continue;
+                }
+                let joined = new[s..=e].iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" ");
+                let alike = similarity(text, &joined);
+                let single = new[s..=e].iter().map(|(_, t)| similarity(text, t)).fold(0.0, f64::max);
+                if alike > single && best.is_none_or(|(b, _, _)| alike > b) {
+                    best = Some((alike, s, e));
+                }
+            }
+        }
+        match best {
+            Some((_, s, e)) => {
+                out.push((i, s));
+                rests.extend((s + 1..=e).map(|r| (s, r)));
+            }
+            None => out.push((i, j)),
+        }
+    }
+    (out, rests)
+}
+
 /// Re-find member `member` of `links` in `new` (its file as it reads now,
 /// whose bytes hash to `hash`) and return the links file rewritten for it,
 /// with what was found. Ids are mapped; the member's hash becomes `hash`;
@@ -206,8 +282,10 @@ fn pair_stretch(old: &[(&ElementKind, &str)], new: &[(&ElementKind, String)]) ->
 /// made one (`created:`) get a row of their own, stamped `=` with their
 /// text so the next re-find finds them exactly, right after the row of the
 /// nearest listed paragraph above (C4); one that falls between the first
-/// and last id of a cell joins that cell. The made member's new paragraphs
-/// stay unlisted (D3). Rows left with no ids are dropped.
+/// and last id of a cell joins that cell, and the rest of a split line
+/// joins its first half's cell (`Alignment::split`), stamped likewise. The
+/// made member's new paragraphs stay unlisted (D3). Rows left with no ids
+/// are dropped.
 ///
 /// Precondition: as for [`by_text`], `new` is the file as parsed (ids
 /// `0..n` in file order).
@@ -226,22 +304,41 @@ pub fn refind(
     let mut paras: BTreeMap<ParaId, Para> =
         links.paras[member].iter().filter_map(|(id, p)| map.get(id).map(|n| (*n, p.clone()))).collect();
 
-    // Mapped rows; the map is monotone, so cells stay ascending.
+    // The rest of a split line follows its first half into its cell; only
+    // listed for a member other than the made one.
+    let listing = links.made() != Some(member);
+    let mut rest_of: HashMap<ParaId, Vec<ParaId>> = HashMap::new();
+    if listing {
+        for (head, rest) in &alignment.split {
+            rest_of.entry(*head).or_default().push(*rest);
+        }
+    }
+
+    // Mapped rows; the map is monotone and a rest comes right after its
+    // first half, so cells stay ascending.
     let members = links.members.len();
     let mapped = links.rows.iter().map(|row| {
         let mut row = row.clone();
-        row.cells[member] = row.cells[member].iter().filter_map(|id| map.get(id).copied()).collect();
+        row.cells[member] = row.cells[member]
+            .iter()
+            .filter_map(|id| map.get(id).copied())
+            .flat_map(|id| std::iter::once(id).chain(rest_of.get(&id).into_iter().flatten().copied()))
+            .collect();
         row
     });
 
-    // New rows for the original's new paragraphs (C4).
+    // New rows for the original's new paragraphs (C4); split rests are
+    // stamped too but stay in their first half's cell.
+    let rests: HashSet<ParaId> = alignment.split.iter().map(|(_, r)| *r).collect();
     let mut fresh: Vec<ParaId> = Vec::new();
-    if links.made() != Some(member) {
+    if listing {
         for id in &alignment.new {
             if let Some(p) = new.paragraphs.get(id.0 as usize) {
                 let stamp = Stamp::Synced(stamp_text(&p.kind, &p.text(), is_caps));
                 paras.insert(*id, Para { kind: p.kind.clone(), stamp: Some(stamp) });
-                fresh.push(*id);
+                if !rests.contains(id) {
+                    fresh.push(*id);
+                }
             }
         }
     }

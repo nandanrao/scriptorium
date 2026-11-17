@@ -536,6 +536,29 @@ impl<'s, 'a> Ctx<'s, 'a> {
         Ok(BlockMatch { paras: ids.to_vec(), index: pos[0], fuzzy, before, options, option_src, gone: false })
     }
 
+    /// Whether the live lines `ids` read `lines`, one for one.
+    fn reads(&self, ids: &[ParaId], lines: &[Line]) -> bool {
+        ids.len() == lines.len() && ids.iter().zip(lines).all(|(id, l)| self.live(*id).is_some_and(|f| fits(l, f)))
+    }
+
+    /// A `ROW:` block decided only in its file, on `cell`, which already
+    /// reads its chosen text, of another length than its `BEFORE` (an
+    /// accepted option that added lines, after the file was written). It is
+    /// placed on the whole cell; what it was made against is its `BEFORE`
+    /// on the cell's first lines, so restoring the decision only records it
+    /// (the session decides a pending block on the lines it was placed on,
+    /// [`crate::Item::paras`]) and undeciding puts `BEFORE` back. A `BEFORE`
+    /// longer than the cell has no ids to stand on: not placed.
+    fn decided_in_file(&self, e: &Entry, cell: &[ParaId]) -> Result<BlockMatch, Miss> {
+        if e.before.len() > cell.len() {
+            return Err(Miss::Mismatch);
+        }
+        let m = self.placed(e, cell, false)?;
+        let before = self.before_paras(e, &cell[..e.before.len()]);
+        let (options, option_src) = self.options(e, &before);
+        Ok(BlockMatch { before, options, option_src, ..m })
+    }
+
     /// The `PARA:` pass for one block. With `allow_gone` (opening a
     /// session, not appending), a block some of whose lines are gone is
     /// placed too, as it stayed before the session was saved (see
@@ -710,23 +733,29 @@ impl Ctx<'_, '_> {
     /// it can't go there (a sentence, see [`Found::NoRow`]): a line entry
     /// goes on one live editable line; a block decided in the document
     /// (`v`) only on a cell holding the lines its decision left (`now`), a
-    /// pending one on as many lines as its `BEFORE`.
+    /// pending one on as many lines as its `BEFORE`; one decided only in its
+    /// file whose `chosen` text (its option or `MINE`) has another number of
+    /// lines also on a cell that reads that text ([`Self::decided_in_file`]).
     fn on_row(
         &self,
         e: &Entry,
         cell: &[ParaId],
         v: Option<&MetaValue>,
         now: &[ParaId],
+        chosen: Option<&[Line]>,
         used: &HashSet<ParaId>,
     ) -> Result<Found, &'static str> {
         const MOVED: &str = "the row's lines were split, removed or moved apart since this suggestion";
         if e.is_line() {
-            // Several lines: only the line the entry names (`PARA`, or where
-            // its decision is), which the resolver gives this way when that
-            // line was split since; it then reads as split.
+            // Several lines: a pending entry only on the line it names
+            // (`PARA`), which the resolver gives this way when that line was
+            // split since; it then reads as split, and can't be accepted
+            // over the split. Never a decided one: restoring its decision
+            // would write the whole line into the head.
+            let pending = v.is_none() && e.status == FileStatus::Pending;
             let id = match (cell, now) {
                 ([id], _) => id,
-                (_, [p]) if cell.contains(p) => p,
+                (_, [p]) if pending && cell.contains(p) => p,
                 _ => return Err("the row now has several lines here, and this suggestion is for one"),
             };
             let &li = self.live_at.get(id).ok_or(MOVED)?;
@@ -748,6 +777,7 @@ impl Ctx<'_, '_> {
             }
             Some((v, on)) => self.decided(e, on, v, used),
             None if cell.len() == e.before.len() => self.placed(e, cell, false),
+            None if chosen.is_some_and(|c| self.reads(cell, c)) => self.decided_in_file(e, cell),
             None => return Err("the row has a different number of lines than this suggestion"),
         };
         m.map(Found::Block).map_err(|_| MOVED)
@@ -769,7 +799,12 @@ impl Ctx<'_, '_> {
                 taken.get_or_insert(t);
                 continue;
             }
-            match self.on_row(e, cell, v.as_ref(), &prefer, used) {
+            // Decided only in its file (accepted or rewritten): the text it
+            // put there comes first.
+            let chosen = (v.is_none() && matches!(e.status, FileStatus::Accepted | FileStatus::Rewritten))
+                .then(|| texts.first())
+                .flatten();
+            match self.on_row(e, cell, v.as_ref(), &prefer, chosen.map(Vec::as_slice), used) {
                 Ok(found) => return found,
                 Err(why) => {
                     unfit.get_or_insert(why);

@@ -497,3 +497,66 @@ b created: version new
     // Stamps are kept: every row's original side now differs from them.
     assert_eq!(out.paras[0], l.paras[0]);
 }
+
+const FARM: &str = "\
+SCRIPTORIUM LINKS v1
+Id: lk-1
+a: film.fdx
+a hash: aaaa
+b: film.es.fdx
+b hash: bbbb
+b created: version new
+---
+0 | 0
+  a0 heading = EXT. FARM HOUSE - NIGHT
+  b0 heading = EXT. CASA DE CAMPO - NOCHE
+1 | 1
+  a1 action = Laura smiles.
+  b1 action = Laura sonríe.
+2 | 2
+  a2 character = CESAR
+  b2 character = CESAR
+";
+
+/// Final Draft splits the Spanish "Laura sonríe." into "Laura" + "sonríe."
+/// (and the heading was retyped): the old line pairs with the first half,
+/// so by D3 the unlisted "sonríe." follows it into the same row, not the
+/// heading's.
+#[test]
+fn version_line_split_pairs_with_first_half() {
+    let l = links::parse(FARM).unwrap();
+    let n = script(&[(H, "EXT. CASA DE CAMPO - DE NOCHE"), (A, "Laura"), (A, "sonríe."), (C, "CESAR")]);
+    let (out, al) = re(&l, 1, &n, "b2");
+    assert_eq!(al.pairs, pairs(&[(0, 0), (1, 1), (2, 3)]));
+    assert_eq!(al.new, ids(&[2]));
+    assert_eq!(al.split, pairs(&[(1, 2)]));
+    assert_eq!(rows(&out), vec![r(&[0], &[0]), r(&[1], &[1]), r(&[2], &[3])]);
+}
+
+/// The same split in the original: both halves land in the line's cell,
+/// stamped, and the next re-find finds them exactly.
+#[test]
+fn original_line_split_keeps_both_halves_in_its_row() {
+    let l = links::parse(FARM).unwrap();
+    let n = script(&[(H, "EXT. FARM HOUSE - NIGHT"), (A, "Laura"), (A, "smiles."), (C, "CESAR")]);
+    let (out, al) = re(&l, 0, &n, "a2");
+    assert_eq!(al.split, pairs(&[(1, 2)]));
+    assert_eq!(rows(&out), vec![r(&[0], &[0]), r(&[1, 2], &[1]), r(&[3], &[2])]);
+    // The first half keeps the old stamp (so the row reads changed); the
+    // rest is stamped with its own text.
+    assert_eq!(out.paras[0][&ParaId(1)].stamp, Some(Stamp::Synced("Laura smiles.".into())));
+    assert_eq!(out.paras[0][&ParaId(2)].stamp, Some(Stamp::Synced("smiles.".into())));
+    let (again, al) = re(&out, 0, &n, "a2");
+    assert_eq!(again, out);
+    assert_eq!(al.changed(), 1, "only the first half, against its old stamp");
+}
+
+/// A line split in three, the old line most like the middle third.
+#[test]
+fn line_split_in_three() {
+    let o = old(0, &[(C, "=ANA"), (D, "=I said no. I meant it. Go home."), (C, "=BOB")]);
+    let n = script(&[(C, "ANA"), (D, "I said no."), (D, "I meant it."), (D, "Go home."), (C, "BOB")]);
+    let al = align(&o, &n);
+    assert_eq!(al.pairs, pairs(&[(0, 0), (1, 1), (2, 4)]));
+    assert_eq!(al.split, pairs(&[(1, 2), (1, 3)]));
+}

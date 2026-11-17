@@ -475,3 +475,43 @@ fn of_several_links_files_the_made_one_is_used() {
     assert!(o.pair().links_path().unwrap().ends_with("a.links.txt"));
     assert!(notes.iter().any(|n| n.contains("several links files name film.fdx")), "{notes:?}");
 }
+
+/// Final Draft retypes the decided line: the suggestion isn't placed now,
+/// but its decision is in the review file, so the session holds nothing more.
+#[test]
+fn a_decided_line_retyped_in_final_draft_still_opens() {
+    let retype = |f: &Folder| {
+        let s = std::fs::read_to_string(f.script()).unwrap();
+        std::fs::write(f.script(), s.replace("I am go to the town tomorrow.", "We leave now, Laura.")).unwrap();
+    };
+    // Decided in this session (its events), progress written.
+    let f = Folder::new("retyped");
+    accept(&f, true);
+    retype(&f);
+    let mut notes = vec![];
+    let o = Opened::open(&f.script(), &[], &mut notes).unwrap_or_else(|e| panic!("{e}"));
+    assert!(notes.iter().any(|n| n.contains("held only decisions")), "{notes:?}");
+    assert_eq!(o.session.reviews[0].unmatched.len(), 1);
+
+    // A session that only starts from the files (no events of its own).
+    let g = Folder::new("retyped-base");
+    accept(&g, true);
+    std::fs::remove_file(g.session()).unwrap();
+    Opened::open(&g.script(), &[&g.review()], &mut vec![]).unwrap().save().unwrap();
+    retype(&g);
+    open(&g).unwrap_or_else(|e| panic!("{e}"));
+
+    // Typing merged into the accept is still found, line retyped or not.
+    let h = Folder::new("retyped-typing");
+    accept(&h, true);
+    let mut o = open(&h).unwrap();
+    let sel = o.sel();
+    let depth = o.doc.undo_depth();
+    o.session.decide(&mut o.doc, sel, 0, 0, Decision::Undecided).unwrap();
+    o.session.decide(&mut o.doc, sel, 0, 0, Decision::Accept(0)).unwrap();
+    o.doc.insert_text(Selection::cursor(Pos::new(ParaId(3), 0)), "Well, ").unwrap();
+    o.doc.merge_undo_since(depth);
+    o.save().unwrap();
+    retype(&h);
+    assert!(open(&h).is_err());
+}
