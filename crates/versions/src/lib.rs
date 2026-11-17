@@ -11,9 +11,11 @@ pub mod links;
 pub mod placeholder;
 pub mod resolve;
 pub mod rows;
+pub mod written;
 
 pub use align::{Alignment, by_text, refind};
 pub use links::{Links, LinksError, Member, Para, Row, Stamp, language_name, stamp_text};
 pub use placeholder::{BlankCopyError, blank_copy};
 pub use resolve::{NotFound, Resolver, RowQuery};
 pub use rows::{LaidRow, Note, Placed, PlacedState, RowStatus, lay_out};
+pub use written::after_write;

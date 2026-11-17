@@ -301,10 +301,13 @@ new one); a non-editable row never needs.
 `RowStatus` is always from the version's side ("this" = the version,
 "other" = the original). A host showing rows on the original swaps
 `ThisChanged`/`OtherChanged` and shows nothing as `needs`. One `is_caps`
-(the original file's) is used for both members for now. Rows new in the original (C4) need nothing
-in Phase A and carry the note "new in the original: add an empty line of
-this type in Final Draft at this point, then reopen" (Phase C adds lines
-by suggestion).
+(the original file's) is used for both members for now. Rows with
+nothing on the version's side (new in the original, C4, or a version line
+the writer deleted or joined on purpose) need nothing in Phase A and carry
+the note `NothingOnVersionSide`: "nothing on this side: if the line is new
+in the original, add an empty line of this type in Final Draft at this
+point, then reopen; if you removed it on purpose, leave it" (neutral after
+the A7a review; Phase C adds lines by suggestion).
 
 **Why this is enough.** The decision that made a row in sync is review
 metadata in the event log, with the paragraphs it touched
@@ -453,7 +456,11 @@ file under an open window. Any other file keeps `<name> (scriptorium).fdx`
    file is the live paragraph *i*.
 5. **Update the links file:** ids to positions, the new hash, `=` stamps
    with the current texts of every row that reads `InSync`
-   (`versions::written::after_write`).
+   (`versions::written::after_write`), including rows in sync only through
+   a decided suggestion, so they stay in sync if a review file is lost
+   later. Other rows keep their stamps, except that a row which lost a
+   listed version line drops the stamps of its remaining version lines
+   (they described the old cell). Rows left with no ids are dropped.
 6. **Write a fresh session** for the new bytes: what a first open builds
    (`resume` with no saved session, `sessionfile.rs:224-230`). Decisions
    come back from step 3 through `apply_saved`.
@@ -468,7 +475,9 @@ in the review files.
 
 The status bar says once: "Wrote PURPLE LIST.es.fdx. Undo starts again from
 here." Undecide still works after it: the blank comes back and the row
-reads "not yet translated".
+reads "not yet translated". That changes only the row's status label,
+never `needs`: the suggestion, pending again, still reads the original
+(decided by the orchestrator after the A7a review).
 
 ## Opening a version from the CLI after a Final Draft save
 

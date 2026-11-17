@@ -98,7 +98,7 @@ fn one_sided_rows() {
     assert_eq!(statuses(&rows), [RowStatus::InSync, RowStatus::OneSided, RowStatus::OneSided]);
     assert!(rows.iter().all(|r| !r.needs));
     // C4: a row of the original with nothing on the version's side.
-    assert_eq!(rows[1].note, Some(Note::NewInOriginal));
+    assert_eq!(rows[1].note, Some(Note::NothingOnVersionSide));
     assert_eq!(rows[2].note, None);
 }
 

@@ -65,17 +65,18 @@ pub struct Placed {
 pub enum Note {
     /// A kind Scriptorium doesn't edit ("End of Act", "Lyrics"). Never needs.
     NotEditable,
-    /// A row re-find gave a new line of the original (C4): the version has
-    /// nothing for it yet. Phase A can't add one.
-    NewInOriginal,
+    /// The links file lists nothing on the version's side of the row: a
+    /// line new in the original (C4, re-find), or a version line the writer
+    /// deleted or joined on purpose (after a write). Phase A can't add one.
+    NothingOnVersionSide,
 }
 
 impl Note {
     pub fn text(&self) -> &'static str {
         match self {
             Note::NotEditable => "can't be translated here; change it in Final Draft",
-            Note::NewInOriginal => {
-                "new in the original: add an empty line of this type in Final Draft at this point, then reopen"
+            Note::NothingOnVersionSide => {
+                "nothing on this side: if the line is new in the original, add an empty line of this type in Final Draft at this point, then reopen; if you removed it on purpose, leave it"
             }
         }
     }
@@ -217,7 +218,7 @@ pub fn lay_out(
             let note = if !editable {
                 Some(Note::NotEditable)
             } else if listed[v].is_empty() && v_side.lines.is_empty() && !o_side.lines.is_empty() {
-                Some(Note::NewInOriginal)
+                Some(Note::NothingOnVersionSide)
             } else {
                 None
             };
