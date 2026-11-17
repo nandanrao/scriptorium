@@ -139,10 +139,11 @@ impl Columns {
 /// review card or not, and the other script `lined_up` on the left or not.
 /// Narrowing goes in this order, so nothing is ever cut off at or above
 /// [`window_min_size`]: the sidebar becomes a rail; the page's zoom shrinks
-/// (down to `READABLE_ZOOM`, by the editor's fit; both columns share it);
-/// the panel narrows to [`PANEL_MIN`]; the card narrows to [`CARD_MIN`];
-/// then the left column gives way (the script area shows the open script
-/// alone, with a note); then the script gives way to the card, which shows
+/// (by the editor's fit; two columns share it, down to `TWO_COLUMN_ZOOM`,
+/// one column down to `READABLE_ZOOM`); the panel narrows to [`PANEL_MIN`];
+/// the card narrows to [`CARD_MIN`]; then the left column gives way (the
+/// columns are then exactly those of one script, with a note over it);
+/// then the script gives way to the card, which shows
 /// the line under review — unless `keep_script` (the writer is rewriting or
 /// typing in the script): then the card gives way instead, so the keys
 /// never go to a hidden column.
@@ -152,9 +153,6 @@ pub fn columns(width: f32, panel_open: bool, card: bool, keep_script: bool, line
         if over <= 0. {
             return Columns { left: true, ..c };
         }
-        // The left gives way; the sidebar stays a rail (it gave way first).
-        let (c, over) = share_beside(width, true, panel_open, card, script_min());
-        return finish(c, over, width, card, keep_script);
     }
     let (c, over) = share(width, panel_open, card, script_min(), EDITOR_MIN);
     finish(c, over, width, card, keep_script)
@@ -862,11 +860,12 @@ mod tests {
             assert_eq!(c.panel, if open { WIDTH } else { 0. });
         }
         // 1,100 px, chat closed: both columns beside the rail without a
-        // card; with the card the left gives way.
+        // card; with the card the left gives way, and the sidebar comes
+        // back as for one script.
         let c = columns(1100., false, false, false, true);
         assert!(c.left && c.rail, "{c:?}");
         let c = columns(1100., false, true, false, true);
-        assert!(!c.left && c.script && c.card == CARD_WIDTH, "{c:?}");
+        assert!(!c.left && c.script && !c.rail && c.card == CARD_WIDTH, "{c:?}");
         // Chat open: the left gives way, then as with nothing lined up.
         let c = columns(1100., true, true, false, true);
         assert!(!c.left && c.rail, "{c:?}");
@@ -906,12 +905,11 @@ mod tests {
                     let side = if c.rail { RAIL_WIDTH } else { SIDEBAR_WIDTH };
                     let area = w - side - c.card - c.panel;
                     let z = crate::layout::zoom_for(crate::layout::two_columns(area).right_w);
-                    assert!(z >= crate::layout::READABLE_ZOOM - 1e-3, "{w}: zoom {z}");
+                    assert!(z >= crate::layout::TWO_COLUMN_ZOOM - 1e-3, "{w}: zoom {z}");
                 }
-                // Not lined up, nothing changes but the left.
-                let alone = columns(w, open, card, keep, false);
+                // The left hidden: exactly the columns of one script.
                 if !c.left {
-                    assert!(alone.script == c.script && alone.panel == c.panel, "{w}: {c:?} {alone:?}");
+                    assert_eq!(c, columns(w, open, card, keep, false), "{w}");
                 }
             }
             w += 7.;

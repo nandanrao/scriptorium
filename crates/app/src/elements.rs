@@ -709,14 +709,15 @@ pub(crate) struct StatusLook {
 pub(crate) const STATUS_LEGEND: [RowStatus; 5] =
     [RowStatus::InSync, RowStatus::Blank, RowStatus::ThisChanged, RowStatus::OtherChanged, RowStatus::BothChanged];
 
-/// green = in sync, grey outline = not yet translated, amber = the version
+/// quiet grey = in sync (green is only "accepted", on review dots), grey
+/// outline = not yet translated, amber = the version
 /// changed since, red = the original changed since, red and amber = both.
 /// The colours name the members, not the sides, so they read the same on
 /// either script. None for a one-sided row: the hatching says it.
 pub(crate) fn status_look(status: RowStatus) -> Option<StatusLook> {
     let look = |color, label| StatusLook { color, second: None, outline: false, label };
     Some(match status {
-        RowStatus::InSync => look(theme::OK, "in sync"),
+        RowStatus::InSync => look(theme::IN_SYNC, "in sync"),
         RowStatus::Blank => StatusLook { outline: true, ..look(theme::INK_3, "not yet translated") },
         RowStatus::ThisChanged => look(theme::OWN, "version changed"),
         RowStatus::OtherChanged => look(theme::WARN, "original changed"),

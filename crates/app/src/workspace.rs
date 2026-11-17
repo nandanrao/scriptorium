@@ -515,7 +515,8 @@ impl Workspace {
         };
         // The columns in their order, the open file's bold: "English |
         // **Español**", and Swap. It names the open file, so the file's name
-        // isn't shown before it (the status on the right names it).
+        // isn't shown before it (on macOS the title bar names the file).
+        // The left's label is dimmed while that column gave way for width.
         let name = if header.is_some() { None } else { Some(name) };
         let header = header.map(|h| {
             div()
@@ -524,7 +525,7 @@ impl Workspace {
                 .gap_2()
                 .min_w_0()
                 .text_color(INK_2)
-                .child(div().truncate().child(h.left))
+                .child(div().truncate().when(h.left_hidden, |d| d.text_color(INK_3)).child(h.left))
                 .child(div().flex_none().text_color(RULE).child("|"))
                 .child(div().truncate().font_weight(FontWeight::BOLD).text_color(INK).child(h.right))
                 .child(

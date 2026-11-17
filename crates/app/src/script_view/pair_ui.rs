@@ -32,6 +32,8 @@ use crate::theme::*;
 pub(crate) struct PairHeader {
     pub left: String,
     pub right: String,
+    /// The left column gave way for width (shown dimmed).
+    pub left_hidden: bool,
 }
 
 impl ScriptView {
@@ -85,7 +87,7 @@ impl ScriptView {
     pub(crate) fn pair_header(&self) -> Option<PairHeader> {
         let p = self.links.loaded().filter(|_| self.links.shows_left())?;
         let other = p.other_index();
-        Some(PairHeader { left: p.links.label(other), right: p.links.label(p.this) })
+        Some(PairHeader { left: p.links.label(other), right: p.links.label(p.this), left_hidden: self.left_hidden })
     }
 
     /// Why File › New version… can't make a version of this script, said

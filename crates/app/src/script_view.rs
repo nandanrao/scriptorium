@@ -3585,25 +3585,43 @@ impl Focusable for ScriptView {
 impl ScriptView {
     /// The 28 px strip over the script while the left column gave way for
     /// width: which script is hidden, and how to get it back.
-    fn render_left_note(&self, chat_open: bool) -> Div {
+    /// "close the chat" closes it (as Ctrl/Cmd+L from the composer).
+    fn render_left_note(&self, chat_open: bool, cx: &mut Context<Self>) -> Div {
         let left = self.pair_header().map_or_else(|| "The other version".to_string(), |h| h.left);
-        let how = if chat_open {
-            format!("widen the window or close the chat ({})", crate::menus::shortcut("l"))
-        } else {
-            "widen the window".to_string()
-        };
+        let close = chat_open.then(|| {
+            div()
+                .id("left-note-close-chat")
+                .flex_none()
+                .cursor_pointer()
+                .text_color(ACCENT)
+                .font_weight(FontWeight::SEMIBOLD)
+                .hover(|s| s.underline())
+                .child("close the chat")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_agent_open(false, cx);
+                    this.focus_main(window, cx);
+                }))
+        });
         div()
             .flex_none()
             .h(px(LEFT_NOTE_HEIGHT))
             .px_3()
             .flex()
             .items_center()
-            .bg(SIDE)
+            .gap_1()
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .bg(DESK)
             .border_b_1()
-            .border_color(RULE)
+            .border_color(INK_3)
             .text_size(px(12.))
-            .text_color(INK_2)
-            .child(div().truncate().child(format!("{left} hidden: {how}.")))
+            .text_color(INK)
+            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).child(format!("{left} hidden:")))
+            .child(div().flex_none().child(if chat_open { "widen the window or" } else { "widen the window." }))
+            .children(close)
+            .when(chat_open, |d| {
+                d.child(div().flex_none().text_color(INK_2).child(format!("({}).", crate::menus::shortcut("l"))))
+            })
     }
 }
 
@@ -3625,7 +3643,7 @@ impl Render for ScriptView {
             self.left_hidden = left_hidden;
             self.refresh(cx);
         }
-        let left_note = (left_hidden && cols.script).then(|| self.render_left_note(agent.is_some()));
+        let left_note = (left_hidden && cols.script).then(|| self.render_left_note(agent.is_some(), cx));
         // A card that gave way to the script isn't drawn (its focus isn't in it).
         let card_shown = !cols.card_hidden(self.review().is_some());
         let card = self.review().filter(|_| card_shown).map(|_| {

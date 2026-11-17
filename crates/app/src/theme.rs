@@ -13,6 +13,8 @@ pub const INK_3: Rgba = rgb_const(0x8b919b);
 pub const RULE: Rgba = rgb_const(0xd3d7de);
 pub const ACCENT: Rgba = rgb_const(0x5b3fa3);
 pub const ACCENT_SOFT: Rgba = rgba_const(0x5b3fa31a);
+/// A row in sync: quiet, so green only ever means "accepted".
+pub const IN_SYNC: Rgba = rgb_const(0xaab0ba);
 pub const OK: Rgba = rgb_const(0x2c7a4b);
 pub const OK_SOFT: Rgba = rgba_const(0x2c7a4b22);
 pub const OWN: Rgba = rgb_const(0x9a5f0c);

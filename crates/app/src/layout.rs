@@ -141,7 +141,7 @@ pub struct TwoColumns {
 /// share one zoom, fitted to the right column ([`zoom_for`]); the left one
 /// has no review marks, so it is narrower by the mark's room and shows its
 /// text column at that same zoom ([`page_left_unmarked`]). The script area
-/// is sized for two columns at [`READABLE_ZOOM`] by `agent_panel::columns`
+/// is sized for two columns at [`TWO_COLUMN_ZOOM`] by `agent_panel::columns`
 /// (`lined_up`), which also decides when the left gives way.
 pub fn two_columns(width: f32) -> TwoColumns {
     let left_w = ((width - GUTTER - MARK_SPACE) / 2.).max(0.).floor();
@@ -149,11 +149,17 @@ pub fn two_columns(width: f32) -> TwoColumns {
     TwoColumns { left_w, right_x, right_w: (width - right_x).max(0.) }
 }
 
-/// The script area that shows two columns at [`READABLE_ZOOM`] or more:
-/// two readable columns and the gutter (the left column needs less, so
-/// there is a little to spare).
+/// The smallest zoom two columns are shown at (about 8 pt Courier): below
+/// it the left column gives way (`agent_panel::columns`), so the open
+/// script alone doesn't shrink further than it must. Above
+/// [`READABLE_ZOOM`]: side by side, both scripts are read at once.
+pub const TWO_COLUMN_ZOOM: f32 = 0.7;
+
+/// The script area that shows two columns at [`TWO_COLUMN_ZOOM`] or more:
+/// two such columns and the gutter (the left column needs less, so there
+/// is a little to spare).
 pub fn two_columns_min() -> f32 {
-    2. * column_width_at(READABLE_ZOOM) + GUTTER
+    2. * column_width_at(TWO_COLUMN_ZOOM) + GUTTER
 }
 
 /// Blank space above the first paragraph (the page's top margin).
@@ -297,11 +303,11 @@ mod tests {
         // zoom fitted to the right column is readable, and both columns
         // show their text column whole (the right one with its marks).
         let mut w = two_columns_min();
-        assert!(zoom_for(two_columns(w).right_w) >= READABLE_ZOOM - 1e-4);
+        assert!(zoom_for(two_columns(w).right_w) >= TWO_COLUMN_ZOOM - 1e-4);
         while w < 2400.0 {
             let c = two_columns(w);
             let z = zoom_for(c.right_w);
-            assert!(z >= READABLE_ZOOM - 1e-4, "{w}: {z}");
+            assert!(z >= TWO_COLUMN_ZOOM - 1e-4, "{w}: {z}");
             assert!(all_visible(c.right_w, z), "right {w}");
             assert!(left_visible(c.left_w, z), "left {w}");
             w += 5.0;
