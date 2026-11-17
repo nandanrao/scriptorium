@@ -5308,7 +5308,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-agent"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5316,7 +5316,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-app"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "futures",
  "gpui-base",
@@ -5340,7 +5340,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-chat"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "scriptorium-agent",
  "scriptorium-core",
@@ -5356,7 +5356,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ctrlc",
  "scriptorium-agent",
@@ -5375,7 +5375,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-connect"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "nix 0.31.4",
  "scriptorium-fsio",
@@ -5386,7 +5386,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "regex",
  "serde",
@@ -5396,7 +5396,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-fdx"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "regex",
  "scriptorium-core",
@@ -5404,7 +5404,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-fsio"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fs4",
  "libc",
@@ -5420,7 +5420,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-providers"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "keyring",
  "scriptorium-agent",
@@ -5431,7 +5431,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-review"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "regex",
  "scriptorium-core",
@@ -5442,7 +5442,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-tools"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "scriptorium-agent",
  "scriptorium-core",
@@ -5455,7 +5455,7 @@ dependencies = [
 
 [[package]]
 name = "scriptorium-versions"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "scriptorium-core",
  "scriptorium-fdx",
