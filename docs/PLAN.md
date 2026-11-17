@@ -306,7 +306,8 @@ Consequences and risks:
 - **Scope:** this is a platform. Design the module API early, because it shapes
   the core (ids, change events, storage), but build it after the review core.
 
-**Update after v0.6.0 (2026-11-17, with the user):**
+**Update after v0.6.0 (2026-11-17, with the user):** (writer-facing name
+now **Apps**; build plan for v0.7.0: [plans/apps.md](plans/apps.md))
 - **Start in the browser.** First step: the app serves modules on a local
   address (localhost, with a per-session token) and opens them in the
   writer's web browser. No webview work. A panel inside the app window stays
