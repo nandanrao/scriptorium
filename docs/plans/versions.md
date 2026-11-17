@@ -143,25 +143,28 @@ b language: es
 b hash: 0c4d2e8f11aa9b03
 b created: version new
 
-# One row per line: a ids | b ids. Under it, each paragraph's text when
-# the row was last in sync ("=") or when it was made a placeholder ("~").
-# A paragraph with no text line has never been in sync.
+# One row per line: a ids | b ids. Under it, one line per paragraph: its
+# kind, then its text when the row was last in sync ("=") or when it was
+# made a placeholder ("~"). Neither: never in sync.
 ---
 14 | 14
-  a14 = INT. FERRY TERMINAL - NIGHT
-  b14 ~ INT. FERRY TERMINAL - NIGHT
+  a14 heading = INT. FERRY TERMINAL - NIGHT
+  b14 heading ~ INT. FERRY TERMINAL - NIGHT
 15 | 15 16
-  a15 = Rain hammers the glass. LUCÍA (40s) counts coins on a bench.
-  b15 = La lluvia golpea el cristal.
-  b16 = LUCÍA (cuarenta y tantos) cuenta monedas en un banco.
+  a15 action = Rain hammers the glass. LUCÍA (40s) counts coins on a bench.
+  b15 action = La lluvia golpea el cristal.
+  b16 action = LUCÍA (cuarenta y tantos) cuenta monedas en un banco.
 16 | 17
-  a16 = TOMÁS
-  b17 = TOMÁS
+  a16 character = TOMÁS
+  b17 character = TOMÁS
 17 | 18
-  a17 = You're not getting on that boat.
-  b18 ~
+  a17 dialogue = You're not getting on that boat.
+  b18 dialogue ~
 18 |
-  a18 = Watch me.
+  a18 dialogue = Watch me.
+19 | 19
+  a19 "End of Act" = END OF ACT ONE
+  b19 "End of Act"
 ```
 
 Rules:
@@ -169,7 +172,12 @@ Rules:
 - Header lines are `key: value`, keys case-insensitive, before the first
   `---`. `Id:` is a stable token (`[A-Za-z0-9._-]{1,64}`), made as review
   ids are (`new_review_id`, `crates/fsio/src/opened.rs:388`).
-- `a:`/`b:` are file names in the folder. `<m> language:` is optional.
+- `a:`/`b:` are plain `.fdx` file names in the folder (no `/`, `\`, `:`,
+  no leading `.`), different even ignoring case. `<m> language:` is
+  optional. Exactly two members in v1 ("one pair per links file for now").
+  A single letter alone or with a member field (`x:`, `q hash:`) is a
+  reserved member key: an unknown letter is refused, not kept. An empty
+  key is refused.
 - `<m> hash:` is `sessionfile::hash` (`review/src/sessionfile.rs:352`) of
   the bytes the ids refer to. Ids are positions in that file
   (`FdxFile::to_script`, `fdx/src/lib.rs:281`). **The links file only ever
@@ -179,9 +187,17 @@ Rules:
   `needs`, and the only side `row` suggestions go to. Phase E sets it per
   pair.
 - Row lines: ids ascending within a side, rows in order on both sides (no
-  crossing), each id once; a side may be empty. Text lines are
-  `  <member><id> = <text>` or `~ <text>`, one line, normalized (below),
-  possibly empty.
+  crossing), each id once; a side may be empty, not both. Every listed
+  paragraph has exactly one text line under its row:
+  `  <member><id> <kind>`, then optionally `= <text>` or `~ <text>`, one
+  line, normalized (below), possibly empty. No `=`/`~`: never in sync.
+  The kind is stored so re-find can pair same-kind lines after Final Draft
+  has rewritten the file and the old bytes are gone. Kinds are `heading`,
+  `action`, `character`, `parenthetical`, `dialogue`, `transition`, `shot`,
+  `general` (case-insensitive); any other style name (`ElementKind::Other`)
+  is written in double quotes, with `\"` and `\\` escaped.
+- A row whose ids all disappear (re-find, `after_write`) is dropped: an
+  all-empty row is refused on write.
 - `#` and blank lines are comments; unknown header keys are kept on write.
   A parse error is reported with its line; nothing rewrites a file that
   doesn't parse, and the pair shows as broken.
@@ -246,6 +262,10 @@ ROW TEXT: Watch me.
   a typed blank line is `DIALOGUE:` with nothing after it.
 - No header change. Builds up to 0.4 read `ROW` lines as continuations of
   `WHY` and `[empty]` as text, so they show these entries as not found.
+  The writer always puts a `WHY:` line (empty if need be) right before
+  `ROW`, so they are never read into an option. An old build that decides
+  an entry rewrites the file and folds the `ROW` lines into `WHY`, losing
+  the row (accepted risk; no header change).
 
 # How it works
 
@@ -474,8 +494,9 @@ happens after typing in the version.
 - **`crates/versions`** (`scriptorium-versions`): pure (rule 1), compiles
   to wasm. Depends on `scriptorium-core`; `scriptorium-fdx` only as a
   dev-dependency (fixtures). `is_caps` comes in as a closure.
-  - `links`: `Links { id, members, rows, stamps, extra_headers }`,
+  - `links`: `Links { id, members, rows, paras, extra_headers }`,
     `Member { file, language, hash, created }`, `Row { cells }`,
+    `Para { kind, stamp: Option<Stamp> }`,
     `Stamp::{Synced(String), Placeholder(String)}`; `parse`, `write`,
     `validate`; `language_name(code)`.
   - `rows`: `lay_out(links, original: &Script, version: &Script, placed:

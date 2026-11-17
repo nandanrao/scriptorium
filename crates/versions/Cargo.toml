@@ -1,0 +1,13 @@
+[package]
+name = "scriptorium-versions"
+description = "Versions of a script lined up row by row: the links file, status, re-find. Pure: no I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+scriptorium-core.workspace = true
+
+[lints]
+workspace = true
