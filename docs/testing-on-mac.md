@@ -3,6 +3,32 @@
 Thank you for testing this. Scriptorium is an early version, so things may
 be rough. Everything you notice helps, including the small things.
 
+## What's new in 0.6.0
+
+0.6.0 is about connecting Claude (or another AI app) to Scriptorium. See
+section 7.
+
+- **One button to connect Claude.** **Scriptorium › Connect an AI agent…**
+  has a **Connect** button each for Claude Desktop, Claude Code and Codex. It
+  sets up that app for you, keeping its other settings. For Claude Desktop,
+  Claude then has to quit and open again; Scriptorium can do that for you.
+- **Claude sees what you see.** While Scriptorium is open, Claude works on
+  the script you have open: ask it "What am I looking at in Scriptorium?" and
+  it names the script, the scene and the line you're on. Its suggestions
+  appear on the cards as it makes them.
+- **It still works with the app closed.** Claude then works on the files,
+  and Scriptorium shows the changes the next time you open the script.
+- **One download.** There is no plugin zip any more: everything is inside
+  `Scriptorium.app`. If you used the plugin, see "If you used the plugin
+  before" in section 7.
+- **Install command-line tool…** (in the Scriptorium menu) adds the
+  `scriptorium` command to Terminal, if you want it. Claude doesn't need it.
+- **Move the app to Applications before you open it** (section 1). It
+  matters more now, because Claude is pointed at the app where it is.
+
+The checklist for this version is at the end of section 7, "Please try
+(0.6.0)".
+
 ## What's new in 0.5.0
 
 0.5.0 brings two big things: translating with Claude, and the AI chat. (The
@@ -11,8 +37,8 @@ too.)
 
 **Translating.** See section 7, "Translating with Claude".
 
-- **A version of your script in another language.** Claude (through the
-  plugin, or the chat in the app) or **File › New version…** (`Cmd+T`) makes
+- **A version of your script in another language.** Claude (connected as in
+  section 7, or the chat in the app) or **File › New version…** (`Cmd+T`) makes
   a second Final Draft file next to yours, `MY SCRIPT.es.fdx`, lined up line
   by line with the English. Claude fills it with suggestions you decide as
   usual; each card shows the English line.
@@ -71,9 +97,17 @@ section 8 before relying on it.
 
 1. Double-click `Scriptorium-<version>-mac.zip` to unzip it. You'll get
    `Scriptorium.app`.
-2. Drag `Scriptorium.app` into your **Applications** folder.
-3. Open it the first time. macOS will be cautious, because the app isn't
-   registered with Apple yet. It's safe. This only happens once.
+2. **Before you open it,** drag `Scriptorium.app` into your **Applications**
+   folder. Please don't open it from Downloads first: macOS then runs it from
+   a hidden temporary place, and Claude can't be connected to it (the
+   Connect window asks you to move it first, and changes nothing).
+3. Open it from Applications the first time. macOS will be cautious, because
+   the app isn't registered with Apple yet. It's safe. This happens once for
+   each new version you download.
+
+**Updating to a newer version:** quit Scriptorium, drag the new
+`Scriptorium.app` into Applications and choose **Replace**. Keep the same
+name and place: Claude stays connected to it.
 
 **On macOS 13 or 14 (Ventura, Sonoma):** in Applications, right-click
 (or Control-click) Scriptorium and choose **Open**. Then click **Open** again
@@ -91,7 +125,8 @@ password.
 xattr -dr com.apple.quarantine /Applications/Scriptorium.app
 ```
 
-Then open Scriptorium as usual.
+Then open Scriptorium as usual. The same line is the fix if Claude later
+can't start Scriptorium (section 7).
 
 ## 2. Open your script (and reviews)
 
@@ -182,6 +217,8 @@ Please try these, and tell us what worked and what felt wrong:
 - [ ] **Quit and reopen.** Make a few decisions, quit, reopen the same script.
       Is everything where you left it?
 
+For connecting Claude, see "Please try (0.6.0)" at the end of section 7.
+
 Anything else is welcome too: confusing words, things you expected to work,
 moments you got stuck. A screenshot (`Cmd+Shift+4`) helps a lot.
 
@@ -197,48 +234,139 @@ To find it: in Finder, choose **Go › Go to Folder…** (`Cmd+Shift+G`), paste
 `~/Library/Logs/Scriptorium`, and press Return. Attach `scriptorium.log` to
 an email or message, along with what you were doing when it happened.
 
-## 7. Using Scriptorium with Claude Code (plugin)
+## 7. Connecting Claude (or another AI agent)
 
-Optional. The plugin lets Claude propose changes to your script, which you
-then decide on in the app. You need
-[Claude Code](https://docs.claude.com/en/docs/claude-code/setup) installed
-first; follow its install page, then come back.
+Optional. Once connected, Claude (or another AI app) can work on your script:
+a review pass, tighter dialogue, a translation. What it proposes arrives as
+suggestions on a review card, and you decide them in Scriptorium as usual.
+Nothing in your script changes until you accept it. Everything needed is
+inside `Scriptorium.app`; there is nothing else to download.
 
-1. Download `Scriptorium-plugin-<version>-mac.zip` from the same release and
-   double-click it to unzip. You get a folder called `scriptorium-plugin`.
-2. Move that folder somewhere permanent, such as your **Documents** folder.
-   Do this before anything else; if you move it later, the steps below stop
-   working.
-3. macOS blocks the tools inside until you clear it, once. Open **Terminal**
-   and type this, including the space at the end (don't press Return yet):
-   `xattr -dr com.apple.quarantine `
-   Then drag the `scriptorium-plugin` folder from Finder into the Terminal
-   window (it types the folder's path for you) and press Return.
-4. To start Claude with the plugin, in Terminal type this, again with the
-   space at the end: `claude --plugin-dir `
-   Drag the `scriptorium-plugin` folder into the window and press Return.
-   You need to start Claude this way **every time** you launch it.
-   Type `/mcp` and check that `scriptorium` is listed as connected.
-5. Tell Claude which script to work on. Drag the `.fdx` file from Finder into
-   the Claude chat; that pastes its path.
-6. Ask for things in plain words, for example:
-   - "Review scene 12 of this script and suggest tighter dialogue."
-   - "Suggest changes to MARA's lines so she sounds less formal."
-   - "List the suggestions waiting on the script."
+Work on a copy of your script the first time.
 
-Where the suggestions show up: in Scriptorium, in the left sidebar, as a
-review named after the pass (for example "dialogue-pass"). Press `Cmd+1` to
-open it (or click it). You don't need **Add review**. If the script is
-already open in the app, it picks up Claude's changes while you watch;
-otherwise open the script and they're there.
+### Claude Desktop
+
+1. Open Scriptorium (from Applications, see section 1).
+2. In the menu bar, choose **Scriptorium › Connect an AI agent…**. A panel
+   opens on the right with a row each for **Claude Desktop**, **Claude
+   Code** and **Codex**, each saying "Connected" or "Not connected".
+3. Click **Connect** next to Claude Desktop.
+   - **If Claude is closed,** the panel says "Connected Claude Desktop. Open
+     Claude (or reopen it) to use Scriptorium." Open Claude.
+   - **If Claude is open,** the panel says "Claude is open and would undo
+     this. Quit and reopen it for you?" Click **Quit and reopen Claude for
+     me**. Claude closes and opens again by itself. The first time, macOS
+     may ask whether Scriptorium may control Claude: click **OK**. (Or quit
+     Claude yourself with `Cmd+Q` while in Claude, then click **Connect**
+     again and open Claude.)
+   - The row now says **Connected**. Claude's other settings are kept, and
+     Scriptorium keeps a copy of the file it changed, just in case.
+4. In Claude, check that it's there: click the tools button under the
+   message box (a **+** or a sliders icon, depending on your version of
+   Claude) and look for **scriptorium** in the list. It should be switched
+   on.
+5. The first time Claude uses Scriptorium in a chat, it asks your
+   permission. Choose **Allow always** (or **Allow once** if you prefer to
+   be asked each time).
+
+**If macOS blocks it.** When you click Connect, Scriptorium first checks
+that Claude will be able to start it. If macOS is blocking it, the panel
+says "macOS is blocking Scriptorium's helper…" and shows a **Copy the
+Terminal command** button. Click it, open **Terminal** (Applications ›
+Utilities), paste with `Cmd+V`, press Return, and click **Connect** again.
+It's the same `xattr` line as in section 1. If Claude ever says it can't
+start or reach "scriptorium", run that line too, then quit and reopen
+Claude.
+
+### Claude Code
+
+Click **Connect** next to Claude Code. Then start a **new** `claude`
+session in Terminal (sessions already running don't see it) and type `/mcp`:
+`scriptorium` should be listed as connected.
+
+### Codex
+
+Click **Connect** next to Codex. Then start a new Codex session (the
+ChatGPT desktop app and the Codex command share this setting).
+
+### Other AI apps
+
+Any app that can use "MCP servers" can connect too. At the bottom of the
+panel, under **Other agents**, click **Copy setup command**. In the other
+app's settings, add an MCP server of the "stdio" kind and paste the
+command.
+
+**To undo any of this,** open the panel again and click **Disconnect** on
+that row.
+
+**If you move or rename Scriptorium,** open it once from its new place. It
+puts Codex and Claude Code right by itself, and the status bar says, for
+example, "Updated Codex's settings to this copy of Scriptorium." For Claude
+Desktop, if Claude is closed it's fixed the same way; if Claude is open, the
+status bar says "Claude's Scriptorium setting points at a copy of
+Scriptorium that was moved." with a **Fix (quits and reopens Claude)**
+button.
+
+### Asking Claude
+
+Open your script in Scriptorium, then in Claude ask:
+
+> What am I looking at in Scriptorium?
+
+Claude asks Scriptorium and answers with the script that's open, the scene,
+and the line you're on (or the suggestion card you're looking at). This is
+the easiest way to check that everything is connected.
+
+**With Scriptorium open (live).** Ask for things in plain words, for
+example:
+
+- "Do a dialogue pass on this scene."
+- "Suggest changes to MARA's lines so she sounds less formal."
+- "List the suggestions waiting on this script."
+
+The suggestions appear in the sidebar while Claude works, as a review named
+after the pass (for example "dialogue-pass"). Press `Cmd+1` (or click it)
+and decide them as usual. You don't need **Add review**, and you don't need
+to tell Claude where the script is: it works on the one you have open. If
+you ask Claude to undo, it undoes the last change made to the script,
+whoever made it, including your own typing.
+
+**With Scriptorium closed (files).** Claude still works: it changes the
+files next to your script, and the next time you open the script in
+Scriptorium the suggestions are there. Claude needs to know which script.
+It uses the one from earlier in the conversation, or asks you. To give it
+the script's location: in Finder, click the `.fdx` file once, hold
+**Option**, right-click (or Control-click) it and choose **Copy "MY
+SCRIPT.fdx" as Pathname**, then paste that into Claude. (In Claude Code
+you can also drag the file into the window.)
+
+Only the script open in Scriptorium is worked on live. If you ask about
+another script, Claude works on its files, and you see the result when you
+open it.
+
+If Claude says "Scriptorium is open but a different version", you have two
+copies of Scriptorium (for example an old one in Downloads). Quit, delete
+the old copy, open the one in Applications and click **Connect** again.
 
 To share a script with someone, keep the script, its `*.review.txt` files and
 `<script>.scriptorium.json` together in one folder. You both need the same
 Scriptorium version. Don't send the `.scriptorium.set-aside-*.json` or
 `.scriptorium.lock` files.
 
-Claude Desktop and Cowork: when your version supports plugins, add the
-`scriptorium-plugin` folder in its plugin settings.
+### If you used the plugin before
+
+Versions up to 0.5.0 came with a separate Claude Code plugin. It's no longer
+needed, and it shouldn't be used with 0.6.0:
+
+1. Stop starting Claude with `claude --plugin-dir …`. Start it with plain
+   `claude`.
+2. Delete the `scriptorium-plugin` folder (wherever you put it, for example
+   in Documents) and the old `Scriptorium-plugin-…-mac.zip`.
+3. If you added that folder in Claude Desktop's or Cowork's plugin settings,
+   remove it there.
+4. Connect Claude Code (and Claude Desktop, if you use it) as above.
+
+Your scripts, reviews and decisions are unaffected.
 
 ### Translating with Claude (0.5.0)
 
@@ -254,12 +382,8 @@ script the first time.
   folder (in Finder, **Go › Home**), not on the Desktop or in Documents if
   "Desktop & Documents Folders" is turned on in iCloud settings. Not in
   Dropbox either. Work on it on **one computer**.
-- **Update the plugin.** If you had an earlier plugin, delete the old
-  `scriptorium-plugin` folder and put the new one from
-  `Scriptorium-plugin-0.5.0-mac.zip` in the same place. Run the `xattr`
-  step (step 3 above) again on the new folder, start Claude with
-  `claude --plugin-dir ` and the folder (step 4), and check with `/mcp` that
-  `scriptorium` is connected. Install the new app too: both must be 0.5.0.
+- **Connect Claude first** (above), and check it answers "What am I
+  looking at in Scriptorium?".
 
 **Your first day.**
 
@@ -272,8 +396,10 @@ script the first time.
    file named `glossary.md` in the same folder. Claude reads both when they
    are there. Without a brief, Claude makes its own choices and tells you
    what it chose for scene headings.
-2. Drag the English `.fdx` into the Claude chat and ask:
+2. Open the English script in Scriptorium and ask Claude:
    "Make a Spanish version of this script and translate scene 1."
+   (With Scriptorium closed, give Claude the script's location as described
+   under "Asking Claude".)
 3. Claude makes, next to your script:
    - `MY SCRIPT.es.fdx`: the Spanish version. Scene headings and character
      names are copied from the English (Claude still suggests a translation
@@ -288,9 +414,11 @@ script the first time.
    pick another option, keep the empty line, or rewrite it, as with any
    review. Claude gives one option when the line is obvious and two or
    three, with a short note, when there's a real choice.
-5. Ask Claude for more ("Translate scenes 2 to 5"). It skips lines that
-   already have a suggestion, so asking twice doesn't duplicate anything. If
-   Scriptorium is open, the new suggestions appear while you watch.
+5. Keep `MY SCRIPT.es.fdx` open in Scriptorium and ask Claude for more
+   ("Translate scenes 2 to 5"). The new suggestions appear while you watch.
+   It skips lines that already have a suggestion, so asking twice doesn't
+   duplicate anything. With Scriptorium closed, Claude works on the files,
+   and the suggestions are there when you open the Spanish.
 
 **Making the version in Scriptorium instead.** Open the English script and
 choose **File › New version…** (`Cmd+T`). Type the language (`es` for
@@ -298,8 +426,7 @@ Spanish, `fr` for French, `pt-BR` for Brazilian Portuguese…) and the
 original's language (`en`), then press **Create and open**. Scriptorium
 makes `MY SCRIPT.es.fdx` and opens it with the English on the left. Its lines
 are empty (headings and names copied) until someone translates them: ask
-Claude (plugin), or the chat in the
-app (below). A script has one version for now; New version… on a script that
+Claude (connected as above), or the chat in the app (below). A script has one version for now; New version… on a script that
 already has one says so.
 
 **What you see.**
@@ -373,8 +500,8 @@ already has one says so.
 
 **Please try, on a copy** (screenshot what looks wrong):
 
-- [ ] `/mcp` shows `scriptorium` connected. Ask "Make a Spanish version of
-      this script and translate scene 1". `MY SCRIPT.es.fdx` and the review
+- [ ] With the English open in Scriptorium, ask Claude "Make a Spanish
+      version of this script and translate scene 1". `MY SCRIPT.es.fdx` and the review
       appear.
 - [ ] Before deciding anything, open `MY SCRIPT.es.fdx` in **Final Draft**:
       no warning; headings and names in English; every other line empty
@@ -402,13 +529,106 @@ already has one says so.
 `MY SCRIPT.es.scriptorium.lock`, `MY SCRIPT.es.links.lock` and any
 `MY SCRIPT.es.scriptorium.set-aside-*.json`). Your English script is untouched; ask Claude again.
 
-**From Terminal** (optional): the plugin folder's `bin/scriptorium` does the
+**From Terminal** (optional): the `scriptorium` command (see below) does the
 same without Claude. `scriptorium version new "MY SCRIPT.fdx" --lang es
 --from en` makes the version (`--from en` names the original as English, so
 the review and labels say "English"); `scriptorium rows "MY SCRIPT.es.fdx"
 --scene 1` shows each line next to its English and what it needs;
 `scriptorium links "MY SCRIPT.es.fdx" sync 37` marks row 37 in sync (as
 **Edit › Mark in sync** does; `unsync` takes it back).
+
+### The `scriptorium` command (optional)
+
+You don't need this for Claude or any other AI app. It's for people who like
+Terminal.
+
+1. Choose **Scriptorium › Install command-line tool…**.
+2. On most Macs, macOS asks for your Mac's password once (on a Mac with
+   Homebrew it usually doesn't). Type it and click **OK**.
+3. The status bar says "Installed. Open a new Terminal window and type
+   scriptorium --help."
+4. Open a **new** Terminal window and type `scriptorium --help`.
+
+If you cancel the password box, nothing is changed. If you move Scriptorium
+later and `scriptorium` says "no such file", choose the menu item again.
+
+### Please try (0.6.0)
+
+On a copy of a script. Screenshot anything that looks wrong, and note your
+macOS version (Apple menu › About This Mac).
+
+- [ ] **Install.** A fresh download, moved to Applications, then opened
+      (section 1). Nothing about agents or Terminal is asked when it
+      starts. Choose **Scriptorium › Install command-line tool…**: one
+      password box at most. In a new Terminal window, `scriptorium --help`
+      prints the help.
+- [ ] **Claude Desktop.** **Connect an AI agent…** › **Connect** on Claude
+      Desktop, then quit and reopen Claude. "scriptorium" is in Claude's
+      tools list. Open a script in Scriptorium, click a line, and ask
+      Claude "What am I looking at in Scriptorium?": it names the script
+      and that line. Ask for a dialogue pass on that scene: suggestions
+      appear on the card within a second or so.
+- [ ] **App closed.** Quit Scriptorium and ask Claude for another scene. It
+      works on the files (it asks for the script's location, or uses the
+      one from before). Open the script in Scriptorium: the suggestions are
+      there.
+- [ ] **Renamed app.** Quit Scriptorium, rename it to "Scriptorium 2" in
+      Applications, and open it. The status bar says it updated Claude
+      Desktop's settings (or, with Claude open, offers **Fix (quits and
+      reopens Claude)**). Restart Claude: it still connects. Then try it
+      once more from a folder with a space in its name (for example a new
+      folder "My Apps" in your home folder). Rename it back afterwards.
+- [ ] **Claude Code.** **Connect** on Claude Code, then in a new `claude`
+      session type `/mcp`: `scriptorium` is connected. Type `/` and look
+      for Scriptorium's **review_pass** in the list: does it start a review
+      pass?
+- [ ] **Codex.** **Connect** on Codex, then in a new `codex` session ask
+      "what's open in Scriptorium?": it answers with your script. With
+      Scriptorium closed, ask it to review a script in a folder outside the
+      one Codex was started in: the review file appears next to that
+      script.
+- [ ] **Two at once.** Claude Desktop and Codex both making suggestions at
+      the same time (ask them for different passes): both reviews fill up.
+- [ ] **From Downloads.** Put a fresh copy in Downloads and open it from
+      there without moving it. **Connect an AI agent…** says to move it to
+      Applications first, and nothing is changed. (Delete that copy
+      afterwards.)
+- [ ] **"Open Anyway" only.** On a fresh download, use only **Open Anyway**
+      (or right-click › Open), not the `xattr` line. Does Claude Desktop
+      still start Scriptorium? Does Connect say macOS is blocking it? Tell
+      us which macOS version (13, 14 or 15).
+- [ ] **Quit and reopen for me.** With Claude Desktop running and a chat
+      open, click **Connect** (after a **Disconnect**). Use **Quit and reopen
+      Claude for me**. Claude comes back with "scriptorium" listed, and
+      your other connectors and Claude's own settings are as before.
+- [ ] **Quitting in the middle.** Ask Claude for something, quit
+      Scriptorium, then ask Claude for something else. The second request
+      works on the files, with no error saying a change "may have been
+      applied".
+
+**Only if we ask (for whoever is comfortable in Terminal): the Claude
+Desktop extension.** This decides how a later version connects Claude
+Desktop.
+
+1. In **Connect an AI agent…**, click **Disconnect** on Claude Desktop and
+   let it quit and reopen Claude.
+2. In Terminal, run:
+   `/Applications/Scriptorium.app/Contents/MacOS/scriptorium connect claude-desktop --mcpb`
+   Does Claude show an install screen? Click **Install**. Are Scriptorium's
+   tools listed, and does "What am I looking at in Scriptorium?" work?
+3. In Claude's **Settings › Extensions**, is there an on/off switch for
+   Scriptorium?
+4. When we send you a newer build, replace the app in Applications without
+   installing the extension again. Open the new Scriptorium, quit and reopen
+   Claude, and ask "What am I looking at in Scriptorium?". If it answers,
+   the extension runs the new build; if it says "Scriptorium is open but a
+   different version", it doesn't.
+5. Copy the app into a folder with a space in its name (for example
+   "My Apps" in your home folder) and repeat step 2 with that copy's path in
+   quotes, for example
+   `"$HOME/My Apps/Scriptorium.app/Contents/MacOS/scriptorium" connect claude-desktop --mcpb`.
+6. Afterwards, remove the extension in **Settings › Extensions**, delete the
+   copy, and **Connect** Claude Desktop again from the panel.
 
 ## 8. Checking files in Final Draft (please do this before relying on 0.3.0)
 
@@ -461,8 +681,8 @@ Note anything that looks different and send a screenshot.
 
 ---
 
-*Optional, for the curious: the app also comes with a command-line tool for
-AI agents to work on the same script; you can ignore it.*
+*Optional, for the curious: the app also comes with a `scriptorium` command
+for Terminal (section 7, "The `scriptorium` command"); you can ignore it.*
 
 ## 9. Trying the AI chat
 

@@ -57,6 +57,23 @@ Living notes on direction. Update this when a decision is made or reversed.
   `scriptorium links … sync|unsync|join`), and the left column giving way
   for width before the card. What was deferred: the "As released" note at
   the top of the plan.
+- **v0.6.0** (2026-11-17): agent connect, plan in
+  [plans/agent-connect.md](plans/agent-connect.md). Everything is in
+  Scriptorium.app: the plugin (`plugin/`, its zip and skills) and the
+  `scriptorium-mcp` binary are gone; the MCP server is `scriptorium mcp`,
+  the CLI inside the bundle. The running app is the server: each tool call
+  goes over a Unix socket to the app when it is open and has that script
+  open (live, on the open document; `where_is_writer` says what is open and
+  where the writer is), and otherwise runs on the files. MCP and the in-app
+  chat share one tool set and executor; guidance is in the server
+  (instructions, tool descriptions, the `guide` tool, prompts as an extra).
+  Scriptorium › Connect an AI agent… (and `scriptorium connect`) writes
+  Claude Desktop's, Claude Code's and Codex's settings by merging, with a
+  backup; Claude Desktop through its config file with "Quit and reopen
+  Claude for me" until hand test 0 settles the `.mcpb`; a launch check
+  repairs settings after the app moved. Scriptorium › Install command-line
+  tool… links `scriptorium` onto the PATH, only when chosen. Signing,
+  notarization and auto-update stay for later (the plan's Phase H).
 - **Built-in agent** (2026-11-14), plan in
   [plans/built-in-agent.md](plans/built-in-agent.md). Status (2026-11-15):
   step 0 and the agent core (step 1) built; MCP server and app on the shared
@@ -463,7 +480,8 @@ Caveats:
   endpoint) are still to do; CI and the test suite use recorded cassettes only.
 - `scriptorium-mcp` now depends on `scriptorium-cli` with
   `default-features = false`, so the MCP server builds without providers,
-  keyring and HTTP.
+  keyring and HTTP. (Since v0.6.0 there is no `scriptorium-mcp`: the server is
+  `scriptorium mcp`, the CLI itself.)
 - Reviews in a session file may be stored as absolute paths (`Opened::open`
   attaches them as stored). That predates v0.4.0 and is how a person attaches
   a review from elsewhere (File › Add review, `reviews add`), so it stays.

@@ -11,7 +11,7 @@ CLI, so you (or your coding agent) can add what you need. See [AGENTS.md](AGENTS
 agent can do from the command line (suggest changes, accept them, rewrite a
 line, undo), working on the same saved session you see in the app.
 
-**Status:** v0.5.0: reviewing, full editing, multi-line suggestions, AI chat and translation versions (a second script lined up row by row, filled by suggestions) work; see the roadmap.
+**Status:** v0.6.0: reviewing, full editing, multi-line suggestions, AI chat, translation versions (a second script lined up row by row, filled by suggestions), and connecting outside AI agents (Claude Desktop, Claude Code, Codex) to the open script work; see the roadmap.
 
 ## Try it
 
@@ -76,6 +76,38 @@ Sharing a folder with someone needs the same Scriptorium version on both sides.
 Problems are logged to `~/Library/Logs/Scriptorium/scriptorium.log` (macOS) or
 `~/.local/state/scriptorium/scriptorium.log` (Linux).
 
+## Connecting an AI agent
+
+Claude Desktop, Claude Code, Codex and other MCP clients can work on the
+script open in the app. On a Mac, choose **Scriptorium › Connect an AI
+agent…** and click **Connect** next to the agent: it adds Scriptorium's MCP
+server to that agent's settings (keeping everything else, with a backup).
+Claude Desktop reads its settings at start, so quit and reopen Claude (the
+sheet offers "Quit and reopen Claude for me"). For other agents, **Copy setup
+command** gives the command to add as a stdio MCP server.
+
+The server is the `scriptorium` binary inside the app, started as
+`scriptorium mcp`. While the app is open, each tool call runs inside it on
+the live open script: suggestions show on the card at once, and
+`where_is_writer` tells the agent what is open and where the writer is.
+When the app is closed (or the call names another script), the call runs on
+the files under the session lock, and the app shows the changes when the
+script is opened. The guidance for review passes and translation is in the
+server (its instructions, tool descriptions and the `guide` tool), so no
+plugin is needed. The same from a terminal:
+
+```
+scriptorium connect claude-desktop|claude-code|codex [--remove] [--print] [--restart]
+scriptorium connect --status
+scriptorium connect --print       # the setup command for other agents
+scriptorium mcp                   # what agents start
+```
+
+Move the app to Applications before opening it the first time, so agents
+are pointed at a stable path. **Scriptorium › Install command-line tool…**
+links `scriptorium` onto your PATH (agents don't need it). Testing on a Mac:
+[docs/testing-on-mac.md](docs/testing-on-mac.md).
+
 ## AI chat
 
 Press `Ctrl+L` (`Cmd+L` on a Mac) to open a chat column at the right of the
@@ -127,7 +159,7 @@ scriptorium threads "MY SCRIPT.fdx" [show <id> | set-model <id> <account> <model
 
 Being planned; see [docs/PLAN.md](docs/PLAN.md). Direction so far: writing stays
 in Final Draft at first, and Scriptorium starts with **review** and
-**translation**. v0.5.0 is done: translation versions and AI chat, on top of v0.3.0's full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
+**translation**. v0.6.0 is done: outside agents (Claude Desktop, Claude Code, Codex) connected to the open script, on top of v0.5.0's translation versions and AI chat and v0.3.0's full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
 
 Done so far: the document model, Final Draft import/export with byte-identical
 round trips, an event-sourced editing core (undo/redo, stable paragraph ids), a

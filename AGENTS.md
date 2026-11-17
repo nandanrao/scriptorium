@@ -188,8 +188,19 @@ App layout: `main.rs` (arguments, key bindings, log + panic hook), `menus.rs`
 (the one menu definition: macOS menu bar, Linux File dropdown), `workspace.rs`
 (the window shell: toolbar, empty state, notices, pickers, drops),
 `script_view.rs` (one open script: sidebar, editor, review card, autosave),
+`script_view/agent_ops.rs` (the host operations an outside agent runs on the
+open script: decide, edit a line, undo, write, attach reviews),
+`script_view/pair_ui.rs` (the pair of versions in the window: "Lined up on
+the left", Swap, Mark in sync), `links_view.rs` (the pair as loaded and laid
+out in rows), `new_version.rs` (File › New version…),
 `agent_panel/` (the chat column: shell, key bindings, its parts as child entities; the live-store helpers are on ScriptView),
-`editor.rs`, `elements.rs`, `layout.rs`, `theme.rs`, `log.rs`.
+`agent_link.rs` (the app as the agents' server: tool calls from `scriptorium
+mcp` over the socket, run on the live open script), `connect.rs`
+(Scriptorium › Connect an AI agent… and Install command-line tool…, and the
+launch check that repairs agents' settings after the app moved),
+`settings.rs` (what the app remembers between runs), `disk.rs` (noticing
+outside changes to the open script's files), `blocks.rs`, `editor.rs`,
+`elements.rs`, `layout.rs`, `theme.rs`, `log.rs`.
 
 ## Adding a file format
 
