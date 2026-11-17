@@ -178,8 +178,9 @@ More for the headless session:
   never with a `pkill` that could match the user's Sway.
 - The app logs to `$XDG_STATE_HOME/scriptorium/scriptorium.log`; point
   `XDG_STATE_HOME` at the scratch directory.
-- The chat panel's end-to-end scenarios (S1–S14 in `docs/plans/chat-panel.md`)
-  run with one command, all of the above done for you:
+- The end-to-end scenarios (S1–S14 in `docs/plans/chat-panel.md`, the chat
+  panel; S15 in `docs/plans/agent-connect.md`, an outside agent through
+  `scriptorium mcp` and the app) run with one command, all of the above done for you:
   `crates/app/tests/scenarios/run.sh [S5 S11 …]`. It prints PASS/FAIL per
   scenario and the screenshots to look at; run it before a release and after
   changing the panel, the chat crates or the CLI's `chat`.

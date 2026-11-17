@@ -1681,11 +1681,7 @@ impl ScriptView {
             .and_then(|id| self.session.reviews.iter().position(|r| r.id == id))
             .map_or(View::Script, View::Review);
         self.build_rows(cx);
-        if let Some(r) = self.review()
-            && self.cur[r].is_none()
-        {
-            self.cur[r] = self.session.next_pending(self.doc(cx), r, None);
-        }
+        self.card_to_new_suggestions(cx);
         // The highlighted option stays if the card shows the same suggestion.
         let same = self.current().map(|(r, i)| at(&self.session, r, Some(i))) == was_current && was_current.is_some();
         self.hi = match self.current() {
@@ -2011,9 +2007,24 @@ impl ScriptView {
         let doc = self.doc(cx).clone();
         Rc::make_mut(&mut self.session).note_removed_by(&doc);
         self.build_rows(cx);
+        if self.card_to_new_suggestions(cx) {
+            self.hi = 0;
+        }
         self.refresh(cx);
         self.schedule_autosave(cx);
         cx.notify();
+    }
+
+    /// The review shown had nothing left ("Review finished") and now has
+    /// suggestions pending (another program's reload, an agent's call added
+    /// some or attached it): the card goes to the first. True: it moved.
+    fn card_to_new_suggestions(&mut self, cx: &App) -> bool {
+        let Some(r) = self.review() else { return false };
+        if self.cur.get(r).is_none_or(|c| c.is_some()) {
+            return false;
+        }
+        self.cur[r] = self.session.next_pending(self.doc(cx), r, None);
+        self.cur[r].is_some()
     }
 
     // ---- for the agent link (agent_link.rs, plan C1) ----------------------------

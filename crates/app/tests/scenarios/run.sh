@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The chat panel's end-to-end scenarios (docs/plans/chat-panel.md, "Headless-Sway
-# test plan", S1–S14), replayed from cassettes in a private headless Sway.
+# test plan", S1–S14), replayed from cassettes in a private headless Sway, and
+# S15: an outside agent through `scriptorium mcp` with the app opening and
+# quitting (docs/plans/agent-connect.md, G3; crates/cli/tests/mcp_link.rs).
 #
 #   crates/app/tests/scenarios/run.sh              # build, then every scenario
 #   crates/app/tests/scenarios/run.sh S5 S11       # only these
@@ -39,7 +41,7 @@
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-ALL=(S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 S14)
+ALL=(S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 S14 S15)
 
 # ---- S1 toggle ---------------------------------------------------------------------
 
@@ -532,6 +534,30 @@ S14() {
     app_quit 0
 }
 
+# ---- S15 an outside agent and the app ---------------------------------------------
+
+# The connector (`scriptorium mcp`) driven as an agent drives it, while the
+# app opens, quits and opens again: crates/cli/tests/mcp_link.rs, run in this
+# Sway. It starts and stops the app itself, with its own HOME and
+# XDG_RUNTIME_DIR (so the agent socket is private); its checks print as
+# "ok"/"FAIL" lines, kept in $WORK/mcp_link.log.
+S15() {
+    fresh
+    env -u DISPLAY -u WAYLAND_DISPLAY -u SWAYSOCK \
+        SCRIPTORIUM_E2E_WAYLAND="$RUNTIME/$W" SCRIPTORIUM_E2E_APP="$APP" SCRIPTORIUM_E2E_CLI="$CLI" \
+        SCRIPTORIUM_E2E_OUT="$WORK/e2e" SCRIPTORIUM_E2E_SHOTS="$SHOTS/S15-" WAIT_SCALE="$WAIT_SCALE" \
+        "$MCP_LINK" --exact the_connector_follows_the_app_as_it_opens_and_quits --nocapture \
+        > "$WORK/mcp_link.log" 2>&1
+    local code=$? line
+    grep -E '^  (ok|FAIL) ' "$WORK/mcp_link.log" | cut -c1-160 | while IFS= read -r line; do log "${line#  }"; done
+    while IFS= read -r line; do FAILS+=("${line#  FAIL }"); done < <(grep -E '^  FAIL ' "$WORK/mcp_link.log" | cut -c1-200)
+    if [ "$code" != 0 ] && ! grep -q '^  FAIL ' "$WORK/mcp_link.log"; then
+        FAILS+=("mcp_link exited $code (see $WORK/mcp_link.log)")
+    fi
+    visual "01: the review finished, no card; 02: the agent's suggestion #2 on the card, the status bar saying an AI agent added it"
+    visual "03: reopened on the review, the card on #2, three suggestions in the sidebar"
+}
+
 # ---- the run ------------------------------------------------------------------------
 
 # send TEXT N: focus the composer, send TEXT and wait for the N-th run to end.
@@ -568,8 +594,16 @@ main() {
         cp "$TARGET/debug/scriptorium" "$CLI.new" || exit 2
         (cd "$ROOT" && CARGO_TARGET_DIR=$TARGET cargo build -q -p scriptorium-app --bins --example vpointer) || exit 2
         mv "$CLI.new" "$CLI"
+        # S15's driver: the CLI's end-to-end test, built on its own as the
+        # CLI is.
+        local test_exe
+        test_exe=$(cd "$ROOT" && CARGO_TARGET_DIR=$TARGET cargo test -q -p scriptorium-cli --test mcp_link --no-run \
+            --message-format=json | jq -r 'select(.target.name == "mcp_link" and .executable != null) | .executable') || exit 2
+        cp "$test_exe" "$MCP_LINK" || exit 2
     else
         cp "$TARGET/debug/scriptorium" "$CLI" || exit 2
+        # The newest build of the test (its file names end in a hash).
+        cp "$(ls -t "$TARGET"/debug/deps/mcp_link-* | grep -v '\.d$' | head -1)" "$MCP_LINK" || exit 2
     fi
     cp "$TARGET/debug/scriptorium-app" "$APP" && cp "$TARGET/debug/examples/vpointer" "$VPOINTER" || exit 2
     # Before anything starts: whatever happens, the compositor, the app and

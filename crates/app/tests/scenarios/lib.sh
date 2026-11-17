@@ -20,6 +20,7 @@ BIN=$TARGET/scenarios-bin/$(basename "$OUT")
 APP=$BIN/scriptorium-app-scen
 CLI=$BIN/scriptorium-scen
 VPOINTER=$BIN/vpointer-scen
+MCP_LINK=$BIN/mcp-link-scen
 CLOCK=2026-11-15T09:30:00Z
 
 # CI=1: a slower machine (software rendering): every wait is longer.

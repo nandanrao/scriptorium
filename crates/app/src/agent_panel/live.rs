@@ -631,4 +631,29 @@ mod tests {
         })
         .unwrap();
     }
+
+    /// The review shown is finished; an agent adds a suggestion to it: the
+    /// card goes to the new one, as after a reload (the sidebar says "1
+    /// left", the card must not say "Review finished").
+    #[gpui::test]
+    fn a_finished_review_shows_an_agents_new_suggestion(cx: &mut TestAppContext) {
+        let f = Folder::new("finished");
+        let w = open(cx, &f.0.join("film.fdx"));
+        w.update(cx, |v, window, cx| {
+            let suggest = json!({"suggestions": [
+                {"paragraph_id": 1, "options": ["CESAR (V.O.)"]},
+                {"paragraph_id": 2, "options": ["I go to town."]},
+            ], "review_file": "notes.review.txt"});
+            ok(agent(v, cx, "suggest_changes", suggest));
+            let id = v.session().reviews[0].id.clone();
+            v.show_suggestion(&id, 1, window, cx);
+            ok(agent(v, cx, "decide_suggestion", json!({"n": 1, "decision": "keep"})));
+            ok(agent(v, cx, "decide_suggestion", json!({"n": 2, "decision": "keep"})));
+            assert_eq!(v.card_for_test(), None, "finished");
+            let more = json!({"paragraph_id": 0, "options": ["INT. BARN - DAY"], "review_file": "notes.review.txt"});
+            ok(agent(v, cx, "suggest_change", more));
+            assert_eq!(v.card_for_test(), Some((0, 2)));
+        })
+        .unwrap();
+    }
 }
