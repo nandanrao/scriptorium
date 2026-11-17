@@ -22,6 +22,8 @@ scriptorium-fsio = { workspace = true, features = ["opened"] }
 scriptorium-tools.workspace = true
 # Pairs of versions: the links file's rows and labels, for the card.
 scriptorium-versions.workspace = true
+# Scriptorium › Install command-line tool… (the link onto PATH).
+scriptorium-connect.workspace = true
 # GPUI: crates.io snapshot gpui-pre (same as gpui-kit).
 gpui = { package = "gpui-pre", version = "=0.3.12" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["wayland", "x11", "font-kit"] }

@@ -25,6 +25,8 @@ chat = ["dep:ctrlc", "dep:scriptorium-agent", "dep:scriptorium-chat", "dep:scrip
 ctrlc = { workspace = true, optional = true }
 scriptorium-agent = { workspace = true, optional = true }
 scriptorium-chat = { workspace = true, optional = true }
+# `connect`: writing agents' settings (step E2).
+scriptorium-connect.workspace = true
 scriptorium-core.workspace = true
 scriptorium-fdx.workspace = true
 scriptorium-fsio = { workspace = true, features = ["opened"] }

@@ -1,0 +1,29 @@
+[package]
+name = "scriptorium-connect"
+description = "Connect an AI agent: merging Scriptorium's MCP server entry into Claude Desktop, Claude Code and Codex configs, and the command-line tool's link onto PATH. Pure core; the I/O is behind the default feature `shell`."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# The shell: looking at the disk and making the command-line tool's link
+# (cli_install). Without it the crate is pure and builds for wasm32.
+default = ["shell"]
+shell = ["dep:nix", "dep:scriptorium-fsio"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# Codex's config.toml: edits keep the user's comments, order and layout.
+toml_edit = "0.25"
+# The shell writes configs atomically (E2).
+scriptorium-fsio = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# Killing the login-shell probe's process group on timeout; the effective
+# user (configs are never written as root, or into another user's file).
+nix = { version = "0.31", optional = true, default-features = false, features = ["signal", "user"] }
+
+[lints]
+workspace = true

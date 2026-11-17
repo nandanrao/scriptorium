@@ -18,23 +18,23 @@ use std::path::{Path, PathBuf};
 
 use scriptorium_core::outline::annotate;
 use scriptorium_core::text::looks_same;
-use scriptorium_core::{ElementKind, ParaId, Paragraph, Script};
+use scriptorium_core::{ElementKind, ParaId, Script};
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::file::{Case, FORMAT_HEADER, append_block, insert_id, parse_typed_lines};
 use scriptorium_review::matching::{Para, match_entries};
-use scriptorium_review::sessionfile::{self, SessionFile};
-use scriptorium_review::{Decision, Entry, Line, Review, Session, Shape, Status, Unplaced};
-use scriptorium_tools::{
-    Ctx, LinksCtx, Outcome, Spot, Target, block_entry, item_numbered, item_numbers, suggestion_rows, uses_links,
-};
+use scriptorium_review::sessionfile;
+use scriptorium_review::{Entry, Line, Review, Session, Shape, Unplaced};
+use scriptorium_tools::{Ctx, LinksCtx, Outcome, Spot, Target, block_entry, item_numbers, suggestion_rows, uses_links};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::fsio::{LockError, SessionLock, write_atomic};
 use scriptorium_fsio::Folders;
 use scriptorium_fsio::opened::{
-    Opened, agent_may_write, agent_review, file_name, load, new_review_id, no_reviews, review_salt, script_dir,
+    Opened, agent_may_write, agent_review, file_name, load, new_review_id, no_reviews, review_salt,
 };
+use scriptorium_fsio::ops;
+pub use scriptorium_fsio::ops::{Choice, SuggestionRef, output_path};
 
 pub const USAGE: &str = "\
 scriptorium: screenplay tools
@@ -181,6 +181,28 @@ AGENT TOOLS
   scriptorium tool [<script.fdx>] --list [--json]
         the tools with a one-line description each; --json prints their
         full specs (name, description, JSON schema of the arguments)
+
+CONNECTING AI AGENTS (the app's Scriptorium › Connect an AI agent…)
+  scriptorium connect claude-desktop|claude-code|codex
+        add Scriptorium's MCP server (this program, started as `<path> mcp`)
+        to that agent's settings, keeping everything else; the file's last
+        version is kept as <file>.scriptorium-backup (and the first ever as
+        <file>.scriptorium-original). Claude Code goes through
+        its own `claude mcp add --scope user` when `claude` is found. Claude
+        Desktop's file isn't written while Claude runs. Then checks that the
+        agent can start this program.
+        --remove       take it out again
+        --print        print only Scriptorium's part of the settings (for
+                       claude-code, the `claude mcp add` command); writes nothing
+        --restart      (claude-desktop) quit Claude, write, and reopen it
+        --mcpb         (claude-desktop) make a Desktop Extension and open it
+                       with Claude instead of editing its settings file
+  scriptorium connect --status
+        whether each agent is connected, and its settings file
+  scriptorium connect --print
+        the setup command for other agents
+  scriptorium --version
+
 CHAT (the built-in agent; the same threads and accounts as the app's panel)
   As everywhere, the script comes first, then the subcommand.
   scriptorium chat <script.fdx> [--thread <id> | --new] [--account <id>] [--model <model>]
@@ -303,6 +325,7 @@ pub fn run(args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
 pub fn run_command(args: &[&str], notes: &mut Vec<String>) -> Result<String, Failed> {
     match args {
         [cmd, rest @ ..] if CHAT_COMMANDS.contains(cmd) => chat_command(cmd, rest, notes),
+        [cmd, rest @ ..] if crate::connect::COMMANDS.contains(cmd) => crate::connect::command(rest, notes),
         _ => run_other(args, notes).map_err(Failed::from),
     }
 }
@@ -329,6 +352,7 @@ fn run_other(args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
         [cmd, rest @ ..] if crate::structure::COMMANDS.contains(cmd) => crate::structure::command(cmd, rest, notes),
         [cmd, rest @ ..] if REVIEW_COMMANDS.contains(cmd) => review_command(cmd, rest, notes),
         ["-h" | "--help" | "help"] => Ok(USAGE.to_string()),
+        ["--version" | "-V"] => Ok(format!("scriptorium {}\n", env!("CARGO_PKG_VERSION"))),
         _ => Err(format!("unrecognized arguments\n\n{USAGE}")),
     }
 }
@@ -490,48 +514,13 @@ fn list_reviews(script: &str, notes: &mut Vec<String>) -> Result<String, String>
 pub fn add_reviews(script: &str, files: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     let _lock = lock(script)?;
     let mut o = Opened::open(script, files, notes)?;
-    o.save()?;
-    let mut out = String::new();
-    for &r in &o.given {
-        let review = &o.session.reviews[r];
-        let _ = writeln!(out, "attached {} ({} suggestions)", review.path, review.items.len());
-        if !review.unmatched.is_empty() {
-            let _ = writeln!(
-                out,
-                "  {} suggestions didn't match a line (`scriptorium review {script:?}` lists them)",
-                review.unmatched.len()
-            );
-        }
-        for w in &review.warnings {
-            let _ = writeln!(out, "  warning: {w}");
-        }
-    }
-    Ok(out)
+    ops::attach(&mut o, script)
 }
 
 /// Detach review files (as attached, or paths from the current folder).
 pub fn remove_reviews(script: &str, files: &[&str]) -> Result<String, String> {
     let _lock = lock(script)?;
-    let dir = script_dir(script)?;
-    let session_path = dir.join(sessionfile::file_name_for(&file_name(Path::new(script))));
-    let json = std::fs::read_to_string(&session_path).map_err(|_| format!("no review files attached to {script}"))?;
-    let mut file = SessionFile::from_json(&json).map_err(|e| format!("{}: {e}", session_path.display()))?;
-    let mut out = String::new();
-    for f in files {
-        let at = Path::new(f).canonicalize().unwrap_or_else(|_| dir.join(f));
-        let before = file.reviews.len();
-        file.reviews.retain(|a| {
-            let p = sessionfile::resolve_path(&dir, &a.path);
-            a.path != *f && p.canonicalize().unwrap_or(p) != at
-        });
-        if file.reviews.len() == before {
-            return Err(format!("{f} isn't attached to {script} (list_reviews shows what is)"));
-        }
-        let _ = writeln!(out, "removed {f} (the script's text keeps its decisions)");
-    }
-    scriptorium_fsio::write_atomic_no_link(&session_path, file.to_json().as_bytes())
-        .map_err(|e| format!("{}: {e}", session_path.display()))?;
-    Ok(out)
+    ops::detach(script, files)
 }
 
 fn summary(o: &Opened) -> String {
@@ -654,46 +643,6 @@ fn suggestions(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<S
     Ok(out)
 }
 
-/// `e<entry>`: a suggestion by its stable place in the review file.
-fn entry_ref(s: &str) -> Option<usize> {
-    s.strip_prefix('e').and_then(|d| d.parse::<usize>().ok())
-}
-
-/// Which suggestion [`decide`] decides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SuggestionRef {
-    /// Its number `n` (from 1, in script order, as `suggestions` lists them).
-    Number(usize),
-    /// `e<entry>`: its stable place in the review file.
-    Entry(usize),
-}
-
-impl SuggestionRef {
-    /// `3` or `e3`.
-    pub fn parse(s: &str) -> Option<Self> {
-        match entry_ref(s) {
-            Some(e) => Some(Self::Entry(e)),
-            None => s.parse::<usize>().ok().map(Self::Number),
-        }
-    }
-}
-
-/// What [`decide`] does with a suggestion.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Choice {
-    /// Take an option, numbered from 1 (`None`: the first).
-    Accept(Option<usize>),
-    /// Keep the line as it is.
-    Keep,
-    /// Replace the line with this text.
-    Rewrite(String),
-    /// Replace a block's lines with these (`[]` cuts them); untyped lines
-    /// take the kind of the line in their place.
-    RewriteBlock(Vec<Line>),
-    /// Take the decision back.
-    Undecide,
-}
-
 /// `decide <script> [<review>] [--review <r>] <n> <decision...>`.
 fn decide_command(script: &str, args: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     let (pick, rest) = take_review_flag(args)?;
@@ -744,66 +693,7 @@ fn decide_in(
 ) -> Result<String, String> {
     let _lock = lock(script)?;
     let (mut o, r) = Opened::open_one(script, file, pick, from_cwd, notes)?;
-    let count = o.session.reviews[r].items.len();
-    let i = match n {
-        SuggestionRef::Entry(e) => o.session.reviews[r].items.iter().position(|it| it.entry == e).ok_or(format!(
-            "no suggestion e{e} in {} (it isn't in the file, or didn't match a line)",
-            o.session.reviews[r].name
-        ))?,
-        SuggestionRef::Number(n) => {
-            item_numbered(&o.doc, &o.session.reviews[r].items, n).ok_or(format!("no suggestion {n} (1 to {count})"))?
-        }
-    };
-    let options = o.session.item(r, i).options.len();
-    if matches!(choice, Choice::Rewrite(_)) && o.session.item(r, i).block {
-        return Err("that suggestion is a block: plain text would collapse it into one line; rewrite it with \
-                    --rewrite-block '<TYPE: text lines>' (MCP: `lines`)"
-            .into());
-    }
-    let d = match choice {
-        Choice::Accept(None) => Decision::Accept(0),
-        Choice::Accept(Some(k)) if (1..=options).contains(&k) => Decision::Accept(k - 1),
-        Choice::Accept(Some(k)) => return Err(format!("no option {k} (1 to {options})")),
-        Choice::Keep => Decision::KeepMine,
-        Choice::Undecide => Decision::Undecided,
-        Choice::Rewrite(text) => Decision::Rewrite(text),
-        Choice::RewriteBlock(lines) => {
-            if !o.session.item(r, i).block && lines.len() != 1 {
-                return Err("that suggestion is for one line: rewrite it with one line (or `rewrite <text>`)".into());
-            }
-            Decision::RewriteLines(lines)
-        }
-    };
-    let n = item_numbers(&o.doc, &o.session.reviews[r].items)[i];
-    let hint = rewrite_hint(n, o.session.item(r, i).block);
-    o.session.check(&o.doc, r, i, &d).map_err(|e| format!("#{n}: {}", e.message(&hint)))?;
-    let sel = o.sel();
-    o.session.decide(&mut o.doc, sel, r, i, d).map_err(|e| e.to_string())?;
-    o.save()?;
-    let item = o.session.item(r, i);
-    let status = o.session.status_label(&o.doc, r, i);
-    if item.block {
-        let mut out = format!("#{n} {status}:\n");
-        let lines = o.session.mine(&o.doc, r, i);
-        if lines.is_empty() {
-            out.push_str("  [cut]\n");
-        }
-        for (id, l) in o.session.live_run(&o.doc, r, i).iter().zip(&lines) {
-            let kind = l.kind.as_ref().map(|k| k.name().to_uppercase()).unwrap_or_default();
-            let _ = writeln!(out, "  ¶{} {kind}: {}", id.0, l.text);
-        }
-        return Ok(out);
-    }
-    Ok(format!("#{n} {status}: {}\n", o.text(item.para)))
-}
-
-/// How the CLI tells someone to rewrite suggestion `n` (see [`scriptorium_review::Refusal::message`]).
-fn rewrite_hint(n: usize, block: bool) -> String {
-    if block {
-        format!("use decide {n} --rewrite-block '<TYPE: text lines>'")
-    } else {
-        format!("use decide {n} rewrite <text>")
-    }
+    ops::decide(&mut o, r, n, choice)
 }
 
 /// Replace paragraph `para`'s whole text, and save. `reviews` (paths from the
@@ -811,16 +701,7 @@ fn rewrite_hint(n: usize, block: bool) -> String {
 pub fn edit(script: &str, para: u64, text: &str, reviews: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     let _lock = lock(script)?;
     let mut o = Opened::open(script, reviews, notes)?;
-    let id = para;
-    let para = ParaId(para);
-    if o.doc.paragraph(para).is_none() {
-        return Err(format!("no paragraph {id} (use list_paragraphs to find ids)"));
-    }
-    crate::structure::check_text(text)?;
-    let sel = o.sel();
-    o.doc.replace_text(sel, para, text, &[]).map_err(|e| e.to_string())?;
-    o.save()?;
-    Ok(format!("¶{id}: {}\n", o.text(para)))
+    ops::edit(&mut o, para, text)
 }
 
 /// Undo (or redo) the last change to the script, and save. `reviews` (paths
@@ -828,17 +709,7 @@ pub fn edit(script: &str, para: u64, text: &str, reviews: &[&str], notes: &mut V
 pub fn undo_redo(script: &str, redo: bool, reviews: &[&str], notes: &mut Vec<String>) -> Result<String, String> {
     let _lock = lock(script)?;
     let mut o = Opened::open(script, reviews, notes)?;
-    let paras = o.doc.next_undo_paras(redo);
-    let done = if redo { o.doc.redo() } else { o.doc.undo() };
-    if done.is_none() {
-        return Err(if redo { "nothing to redo".into() } else { "nothing to undo".into() });
-    }
-    o.save()?;
-    let mut out = String::new();
-    for p in paras {
-        let _ = writeln!(out, "¶{}: {}", p.0, o.text(p));
-    }
-    Ok(out)
+    ops::undo_redo(&mut o, redo)
 }
 
 /// `--block` text as lines: one `TYPE: text` per line (any case); `''` or
@@ -1065,76 +936,7 @@ pub fn apply(
 ) -> Result<String, String> {
     let _lock = lock(script)?;
     let mut o = Opened::open(script, reviews, notes)?;
-    if output.is_none() && o.pair().is_made() {
-        // The version Scriptorium made is written in place, from the app
-        // only (plan, "Writing a version in place"); elsewhere it needs -o.
-        return Err(format!("{} is written from the app: Write .fdx (or give -o <file>)", o.script_name));
-    }
-    if output.is_none() && o.pair().maybe_made() {
-        // A links file naming it can't be read: it may be the made version.
-        return Err(format!(
-            "{} may be the version Scriptorium made (a links file naming it can't be used), which is written from \
-             the app: Write .fdx (or give -o <file>)",
-            o.script_name
-        ));
-    }
-    // Review files named here are attached, as on every command that takes
-    // them. Saved before accept_all, which only shapes this output.
-    if !o.given.is_empty() {
-        o.save()?;
-    }
-    let mut skipped = String::new();
-    if accept_all {
-        let sel = o.sel();
-        for r in 0..o.session.reviews.len() {
-            let numbers = item_numbers(&o.doc, &o.session.reviews[r].items);
-            let mut order: Vec<usize> = (0..numbers.len()).collect();
-            order.sort_by_key(|&i| numbers[i]);
-            for i in order {
-                // A gone, split or joined line can't take a whole-line option:
-                // left as it is, and said.
-                let pending = matches!(o.session.status(&o.doc, r, i), Status::Pending | Status::Removed);
-                if !pending {
-                    continue;
-                }
-                match o.session.check(&o.doc, r, i, &Decision::Accept(0)) {
-                    Ok(()) => {
-                        o.session.decide(&mut o.doc, sel, r, i, Decision::Accept(0)).map_err(|e| e.to_string())?;
-                    }
-                    Err(e) => {
-                        let n = numbers[i];
-                        let name = &o.session.reviews[r].name;
-                        let _ = writeln!(
-                            skipped,
-                            "skipped {name} #{n}: {}",
-                            e.message(&rewrite_hint(n, o.session.item(r, i).block))
-                        );
-                    }
-                }
-            }
-        }
-    }
-    let input = Path::new(script);
-    let out = output.map(Path::to_path_buf).unwrap_or_else(|| output_path(input));
-    if scriptorium_fsio::same_file(&out, input) {
-        return Err("refusing to overwrite the original script; give an output with another name".into());
-    }
-    let raw = o.fdx.write_script(o.doc.script()).map_err(|e| e.to_string())?;
-    let original = o.fdx.to_script();
-    let changed = changed_paragraphs(&original.paragraphs, o.doc.paragraphs());
-    write_atomic(&out, raw.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
-    Ok(format!("{skipped}wrote {} ({changed} paragraphs changed)\n", out.display()))
-}
-
-/// Paragraphs that differ between the original and the edited script, by id:
-/// inserted, removed, and those whose text or kind changed.
-fn changed_paragraphs(original: &[Paragraph], edited: &[Paragraph]) -> usize {
-    let old: std::collections::HashMap<_, _> = original.iter().map(|p| (p.id, p)).collect();
-    let new: std::collections::HashSet<_> = edited.iter().map(|p| p.id).collect();
-    let removed = original.iter().filter(|p| !new.contains(&p.id)).count();
-    let rest =
-        edited.iter().filter(|p| old.get(&p.id).is_none_or(|o| o.text() != p.text() || o.kind != p.kind)).count();
-    removed + rest
+    ops::write(&mut o, script, accept_all, output)
 }
 
 /// The session lock of `script`, for a command that writes (see the module
@@ -1152,12 +954,6 @@ pub(crate) fn lock(script: &str) -> Result<Option<SessionLock>, String> {
         }
         Err(e) => Err(e.to_string()),
     }
-}
-
-/// "<name> (scriptorium).fdx" next to the script, as the app writes it.
-pub fn output_path(script: &Path) -> PathBuf {
-    let stem = script.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    script.with_file_name(format!("{stem} (scriptorium).fdx"))
 }
 
 /// Where a `review_file` is (or will be): relative to the script's folder
@@ -1214,7 +1010,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
 /// The tool specs `tool` accepts: the agent's catalogue, plus `before` on
 /// `suggest_change` and `review_file` on the suggesting tools.
 pub fn tool_specs() -> Vec<scriptorium_tools::ToolSpec> {
-    let mut specs = scriptorium_tools::catalogue();
+    let mut specs = scriptorium_tools::catalogue(scriptorium_tools::Offer::Chat);
     for spec in &mut specs {
         if spec.name == "suggest_change" {
             scriptorium_tools::add_before(spec);
@@ -1444,20 +1240,4 @@ pub fn tool(
         o.save()?;
     }
     Ok(applied.message + "\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn changed_paragraphs_count_by_id() {
-        let p = |id, k: ElementKind, t: &str| Paragraph::plain(ParaId(id), k, t);
-        let a = ElementKind::Action;
-        let original = [p(0, a.clone(), "x"), p(1, a.clone(), "y"), p(2, a.clone(), "z"), p(3, a.clone(), "w")];
-        // 0 same, 1 removed, 2 retyped, 3 retexted, 9 inserted.
-        let edited = [p(0, a.clone(), "x"), p(9, a.clone(), "n"), p(2, ElementKind::Shot, "z"), p(3, a, "w2")];
-        assert_eq!(changed_paragraphs(&original, &edited), 4);
-        assert_eq!(changed_paragraphs(&original, &original), 0);
-    }
 }

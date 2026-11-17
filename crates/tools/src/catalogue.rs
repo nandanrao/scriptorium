@@ -1,5 +1,6 @@
-//! Names, descriptions and argument schemas. Base schemas: hosts add their own
-//! fields (MCP adds `script`, `review_file` and `before`).
+//! Names, descriptions and argument schemas, per [`Offer`]: the chat's
+//! catalogue, and the agents' (the chat's with `script`, `review_file` and
+//! `before`, plus the agent-only tools in [`crate::agent`]).
 
 pub use scriptorium_agent::ToolSpec;
 use serde_json::{Value, json};
@@ -22,7 +23,37 @@ pub const MAX_BATCH: usize = 200;
 /// Most options in one suggestion.
 pub const MAX_OPTIONS: usize = 3;
 
-pub fn catalogue() -> Vec<ToolSpec> {
+/// Which tools a host offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offer {
+    /// The built-in agent (the in-app chat and `scriptorium chat`), bound to
+    /// its script and its thread's review. Threads store a hash of this
+    /// catalogue (`tools_hash`), so any change to it shows the "older tools"
+    /// notice.
+    Chat,
+    /// Outside agents (MCP, the CLI `tool`): the chat's tools with `script`
+    /// on each, `review_file` on the suggesting tools and `before` on
+    /// `suggest_change`, then the agent-only tools
+    /// ([`AGENT_ONLY`](crate::agent::AGENT_ONLY)).
+    Agent,
+}
+
+/// The tools `offer` gives a model, in the order they are listed.
+pub fn catalogue(offer: Offer) -> Vec<ToolSpec> {
+    match offer {
+        Offer::Chat => chat(),
+        Offer::Agent => crate::agent::offer(chat()),
+    }
+}
+
+/// `name`'s spec as `offer` gives it, or [`ToolError::Unknown`] if that
+/// offer has no such tool (an agent-only tool under [`Offer::Chat`]). With
+/// [`check_args`], what a host checks a call against.
+pub fn offered(offer: Offer, name: &str) -> Result<ToolSpec, ToolError> {
+    catalogue(offer).into_iter().find(|s| s.name == name).ok_or_else(|| ToolError::Unknown(name.to_string()))
+}
+
+fn chat() -> Vec<ToolSpec> {
     let line = json!({
         "type": "object",
         "properties": {
@@ -276,7 +307,7 @@ pub fn add_host_fields(spec: &mut ToolSpec, fields: &[HostField]) {
     }
 }
 
-fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> ToolSpec {
+pub(crate) fn spec(name: &str, description: &str, properties: Value, required: &[&str]) -> ToolSpec {
     ToolSpec {
         name: name.into(),
         description: description.into(),

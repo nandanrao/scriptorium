@@ -37,13 +37,17 @@ use std::path::{Path, PathBuf};
 
 use scriptorium_agent::file::ThreadFile;
 use scriptorium_agent::{ToolCall, ToolResult};
-use scriptorium_core::{Document, ElementKind, ParaId};
+use scriptorium_core::{Document, ElementKind, ParaId, Script as OriginalScript};
+use scriptorium_fsio::opened::{agent_review, new_review_id, not_a_review, review_salt};
+use scriptorium_fsio::ops::{Choice, SuggestionRef};
+use scriptorium_fsio::{Folders, agent_file_in_folder};
 use scriptorium_providers::Price;
-use scriptorium_review::file::{FORMAT_HEADER, insert_id, is_review_text};
+use scriptorium_review::file::{Case, FORMAT_HEADER, insert_id, is_review_text, parse_typed_lines};
 use scriptorium_review::sessionfile::{resolve_path, stored_path};
-use scriptorium_review::{ReviewFile, RowResolver, Session};
+use scriptorium_review::{Line, Review, ReviewFile, RowResolver, Session};
 use scriptorium_tools::{Append, Applied, Ctx, Failed, LinksCtx, Outcome, Target};
 use scriptorium_versions::PairView;
+use serde_json::Value;
 
 use crate::naming;
 
@@ -148,10 +152,12 @@ pub trait ReviewStore {
     /// `new_version`: make a version of the script in `language` beside it
     /// (or find the one made before), the script's own language being
     /// `original_language` (`scriptorium_fsio::versions::version_new`, under
-    /// the session lock this store holds); the tool result. The default
-    /// refuses: only a store over the script's files makes one.
-    fn new_version(&mut self, language: &str, original_language: &str) -> Result<String, ReviewError> {
-        let _ = (language, original_language);
+    /// the session lock this store holds); the tool result
+    /// ([`new_version_result`], `switch` passed on: the caller is an outside
+    /// agent). The default refuses: only a store over the script's files
+    /// makes one.
+    fn new_version(&mut self, language: &str, original_language: &str, switch: bool) -> Result<String, ReviewError> {
+        let _ = (language, original_language, switch);
         Err(ReviewError::Failed(format!(
             "a version can't be made here: the writer makes it with `scriptorium version new {} --lang <code>`",
             self.script_name()
@@ -197,6 +203,91 @@ pub trait ReviewStore {
     /// saves the session file, which also saves an attach; the app marks its
     /// session dirty).
     fn write(&mut self, r: usize, text: String) -> Result<(), ReviewError>;
+
+    /// Add `review`, a new review whose file isn't written yet (an outside
+    /// agent's `review_file` that doesn't exist: written with its first
+    /// suggestions, or taken out of the session again if there are none);
+    /// returns its index. The default adds it to [`Self::session_mut`]'s
+    /// session. The app's `LiveStore` overrides it to also record the path
+    /// in its `attached_since_sync`, so a reload before the session is saved
+    /// doesn't drop the review.
+    fn add_new(&mut self, review: Review) -> Result<usize, ReviewError> {
+        self.session_mut().0.add(review).map_err(ReviewError::Failed)
+    }
+
+    // The host operations: the tools only outside agents are offered
+    // ([`scriptorium_tools::AGENT_ONLY`]), each run by [`run_call`] for
+    // [`Caller::Agent`] on a store opened for writing. Each returns the
+    // tool result, the text `scriptorium_fsio::ops` gives, so every host
+    // answers alike. The defaults refuse ([`not_offered`]).
+
+    /// `attach_reviews`: attach these review files (each already checked:
+    /// an existing review inside [`Self::dir`], canonical) and save; the
+    /// text of `ops::attach`.
+    fn attach_reviews(&mut self, files: &[PathBuf]) -> Result<String, ReviewError> {
+        let _ = files;
+        Err(not_offered("attach_reviews"))
+    }
+    /// `detach_reviews`: detach these files (each as attached, or absolute:
+    /// [`resolve_in`]) and save; `ops::detach`.
+    fn detach(&mut self, files: &[String]) -> Result<String, ReviewError> {
+        let _ = files;
+        Err(not_offered("detach_reviews"))
+    }
+    /// `decide_suggestion`: decide suggestion `n` of `review` (an attached
+    /// review's name or file, or a review file inside [`Self::dir`]; `None`:
+    /// the only attached review) and save; `ops::decide`.
+    fn decide(&mut self, review: Option<&str>, n: SuggestionRef, choice: Choice) -> Result<String, ReviewError> {
+        let _ = (review, n, choice);
+        Err(not_offered("decide_suggestion"))
+    }
+    /// `edit_paragraph`: replace paragraph `para`'s text and save; `ops::edit`.
+    fn edit(&mut self, para: u64, text: &str) -> Result<String, ReviewError> {
+        let _ = (para, text);
+        Err(not_offered("edit_paragraph"))
+    }
+    /// `undo` / `redo`: the document's last step, whoever made it (the
+    /// writer's or an agent's), and save; `ops::undo_redo`.
+    fn undo_redo(&mut self, redo: bool) -> Result<String, ReviewError> {
+        Err(not_offered(if redo { "redo" } else { "undo" }))
+    }
+    /// `write_script`: write the script to `output` as the agent named it
+    /// (`None`: the default output), only where an agent may write
+    /// (`ops::agent_output`); `ops::write`.
+    fn write_script(&mut self, output: Option<&str>) -> Result<String, ReviewError> {
+        let _ = output;
+        Err(not_offered("write_script"))
+    }
+}
+
+/// A host operation's default answer: this store doesn't offer `tool`.
+pub fn not_offered(tool: &str) -> ReviewError {
+    ReviewError::Failed(format!("{tool} isn't offered here"))
+}
+
+/// A file an agent named for `detach_reviews`, relative to the script's
+/// folder `dir`: as given when absolute, else joined to `dir` (never the
+/// process's working folder, which `ops::detach` would use).
+pub fn resolve_in(dir: &Path, file: &str) -> String {
+    if Path::new(file).is_absolute() {
+        return file.to_string();
+    }
+    dir.join(file).to_string_lossy().into_owned()
+}
+
+/// A leading `~` or `~/` in a path an agent names, as `$HOME` (models write
+/// `~/Scripts/x.fdx`, and no shell expands it). Anything else, `~name`
+/// included, as given.
+pub fn expand_home(path: &str) -> String {
+    expand_home_with(path, std::env::var("HOME").ok().as_deref())
+}
+
+fn expand_home_with(path: &str, home: Option<&str>) -> String {
+    match (home, path.strip_prefix('~')) {
+        (Some(h), Some("")) if !h.is_empty() => h.to_string(),
+        (Some(h), Some(rest)) if !h.is_empty() && rest.starts_with('/') => format!("{}{rest}", h.trim_end_matches('/')),
+        _ => path.to_string(),
+    }
 }
 
 /// Opens the script for one tool call.
@@ -209,6 +300,16 @@ pub trait Script {
     /// that can't be read…), each once; the run loop shows them as notices.
     fn take_notes(&mut self) -> Vec<String> {
         vec![]
+    }
+    /// `detach_reviews` ([`ReviewStore::detach`]), `files` as the agent
+    /// named them, relative to the script's folder. The default opens the
+    /// script for writing; the CLI's [`FileScript`] edits the session file
+    /// without opening it, so a session that can't be replayed can still
+    /// lose a review.
+    fn detach(&mut self, files: &[String]) -> Result<String, ReviewError> {
+        let mut store = self.open(true)?;
+        let files: Vec<String> = files.iter().map(|f| resolve_in(store.dir(), f)).collect();
+        store.detach(&files)
     }
 }
 
@@ -270,10 +371,32 @@ pub fn new_review_text(script_name: &str, thread_id: &str) -> String {
 /// How many names [`apply_append`] tries for a new review before giving up.
 const NAME_TRIES: usize = 100;
 
+/// Who a tool call is run for.
+#[derive(Debug)]
+pub enum Caller<'a> {
+    /// A built-in agent thread (the in-app chat, `scriptorium chat`): reads
+    /// default to the thread's own review ([`thread_review`]), and
+    /// suggestions with no review named go into it ([`Target::Own`]),
+    /// created when it has none.
+    Thread(&'a mut ThreadFile),
+    /// An outside agent (MCP, the CLI `tool`), offered
+    /// [`scriptorium_tools::Offer::Agent`]: the default review is the only
+    /// attached one, as the CLI `tool` has it; with several or none, a
+    /// suggestion must name its `review_file` ([`NO_REVIEW`] otherwise).
+    /// Never creates a thread's review.
+    Agent,
+}
+
+/// The tool result when an outside agent ([`Caller::Agent`]) proposes
+/// without a `review_file` while several reviews, or none, are attached.
+pub const NO_REVIEW: &str =
+    "no review to add to (several or none are attached): give review_file, the review file to add to";
+
 /// Adds the suggestions in `append` to the review its target names, for
-/// thread `file`, and writes it: the one apply path.
+/// `caller`, and writes it: the one apply path.
 ///
-/// 1. The review. [`Target::Own`] is the thread's review: attached, it is
+/// 1. The review. [`Target::Own`] is the thread's review (an outside agent
+///    has none: [`NO_REVIEW`]): attached, it is
 ///    used; else the file at [`ThreadFile::review_path`] is re-attached if
 ///    it's still there and still the thread's (its `Id:`); else any
 ///    `*.review.txt` in the folder with `Id: thread-<id>` (made by a run that
@@ -281,24 +404,57 @@ const NAME_TRIES: usize = 100;
 ///    created, under [`ThreadFile::review_path`] when that is planned and
 ///    free, else `<title>.review.txt` (`" 2"`, `" 3"`… only when the name is
 ///    taken by another file), with `Id: thread-<id>`. The thread records the
-///    review's id and stored path. [`Target::Review`] is found by its id; [`Target::File`] by path,
-///    attached or created if it isn't attached.
+///    review's id and stored path. [`Target::Review`] is found by its id;
+///    [`Target::File`] by path ([`file_review`]): attached if it isn't, or
+///    a new review added to the session in memory, its file (and folder)
+///    written only with the suggestions.
 /// 2. A review that was already attached is compared with its file on disk;
 ///    if another program changed the file, the session is read again first
 ///    ([`scriptorium_tools::apply`] re-validates against what's there).
 /// 3. [`scriptorium_tools::apply`], then [`ReviewStore::write`] when it
-///    produced new text, or when the review was attached here (so the attach
-///    is saved even if every suggestion was refused).
+///    produced new text, or when an existing file was attached here (so the
+///    attach is saved even if every suggestion was refused). A new review
+///    with nothing to write is taken out of the session again: never
+///    written empty.
 ///
 /// [`ReviewError::Busy`] is to be retried; any other `Err` is the tool
 /// result (an error).
-pub fn apply_append(
+pub fn apply_append(store: &mut dyn ReviewStore, caller: Caller<'_>, append: Append) -> Result<Applied, ReviewError> {
+    apply_named(store, caller, None, append).map(|(applied, _)| applied)
+}
+
+/// How the review a call adds to came to be in the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Got {
+    /// It was attached before the call.
+    Attached,
+    /// An existing file attached (or created) by this call: written even
+    /// with nothing new, so the attach is saved.
+    AttachedHere,
+    /// An existing file attached by this call for an outside agent: as the
+    /// CLI `tool` does, it stays attached only if suggestions are written
+    /// into it; else it is taken out of the session again (and a file store
+    /// saves nothing).
+    AttachedIfWritten,
+    /// A review added to the session in memory by this call, its file at
+    /// this path not written yet (nor, maybe, its folder).
+    New(PathBuf),
+}
+
+/// [`apply_append`], with the `review_file` as the model gave it (`named`,
+/// for [`Target::File`]; else the target's path); also the review's id.
+fn apply_named(
     store: &mut dyn ReviewStore,
-    file: &mut ThreadFile,
+    caller: Caller<'_>,
+    named: Option<&str>,
     mut append: Append,
-) -> Result<Applied, ReviewError> {
-    let (r, attached_here) = resolve(store, file, &append.target)?;
-    store.may_write(&resolve_path(store.dir(), &store.session().reviews[r].path))?;
+) -> Result<(Applied, String), ReviewError> {
+    let (r, got) = resolve(store, caller, &append.target, named)?;
+    // A new review was checked where it will be ([`file_review`]); its file
+    // isn't there yet to read.
+    if !matches!(got, Got::New(_)) {
+        store.may_write(&resolve_path(store.dir(), &store.session().reviews[r].path))?;
+    }
     let editing = store.editing_paras();
     if !editing.is_empty() {
         refuse_editing(&mut append, &editing);
@@ -308,25 +464,43 @@ pub fn apply_append(
         let (session, doc, caps) = store.session_mut();
         scriptorium_tools::apply(session, doc, r, append, caps, rows.as_deref())
     };
+    let id = store.session().reviews[r].id.clone();
+    let text = match (&result, &got) {
+        (Ok(applied), _) if applied.file_text.is_some() => applied.file_text.clone(),
+        (_, Got::AttachedHere) => Some(store.session().reviews[r].text().to_string()),
+        _ => None,
+    };
+    match (text, &got) {
+        (Some(text), Got::New(at)) => {
+            // Its folder is made only now that there is something to write.
+            if let Some(parent) = at.parent()
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                forget(store, r);
+                return Err(ReviewError::Failed(format!("can't create the folder {}: {e}", parent.display())));
+            }
+            if let Err(e) = store.write(r, text) {
+                forget(store, r);
+                return Err(e);
+            }
+        }
+        (Some(text), _) => store.write(r, text)?,
+        (None, Got::New(_) | Got::AttachedIfWritten) => forget(store, r),
+        (None, _) => {}
+    }
     match result {
-        Ok(applied) => {
-            let text = match &applied.file_text {
-                Some(text) => Some(text.clone()),
-                None if attached_here => Some(store.session().reviews[r].text().to_string()),
-                None => None,
-            };
-            if let Some(text) = text {
-                store.write(r, text)?;
-            }
-            Ok(applied)
-        }
-        Err(e) => {
-            if attached_here {
-                let text = store.session().reviews[r].text().to_string();
-                store.write(r, text)?;
-            }
-            Err(ReviewError::Failed(e.to_string()))
-        }
+        Ok(applied) => Ok((applied, id)),
+        Err(e) => Err(ReviewError::Failed(e.to_string())),
+    }
+}
+
+/// Takes review `r`, added by this call ([`Got::New`],
+/// [`Got::AttachedIfWritten`]) and never written, out of the session again: a store that keeps its session (the
+/// app's) must not list a review with no file.
+fn forget(store: &mut dyn ReviewStore, r: usize) {
+    let (session, _, _) = store.session_mut();
+    if r < session.reviews.len() {
+        session.reviews.remove(r);
     }
 }
 
@@ -343,10 +517,22 @@ fn refuse_editing(append: &mut Append, editing: &[ParaId]) {
     }));
 }
 
-/// The review `target` names, and whether it was attached by this call.
-fn resolve(store: &mut dyn ReviewStore, file: &mut ThreadFile, target: &Target) -> Result<(usize, bool), ReviewError> {
+/// The review `target` names, and how it came to be in the session.
+/// `named`: a [`Target::File`]'s path as the model gave it.
+fn resolve(
+    store: &mut dyn ReviewStore,
+    caller: Caller<'_>,
+    target: &Target,
+    named: Option<&str>,
+) -> Result<(usize, Got), ReviewError> {
     match target {
-        Target::Own => own_review(store, file),
+        Target::Own => match caller {
+            Caller::Thread(file) => {
+                let (r, here) = own_review(store, file)?;
+                Ok((r, if here { Got::AttachedHere } else { Got::Attached }))
+            }
+            Caller::Agent => Err(ReviewError::Failed(NO_REVIEW.into())),
+        },
         Target::Review { index, id } => {
             let session = store.session();
             let r = match session.reviews.get(*index) {
@@ -355,9 +541,12 @@ fn resolve(store: &mut dyn ReviewStore, file: &mut ThreadFile, target: &Target) 
                     ReviewError::Failed(format!("the review with id {id} isn't attached any more: call the tool again"))
                 })?,
             };
-            Ok((recheck(store, r)?, false))
+            Ok((recheck(store, r)?, Got::Attached))
         }
-        Target::File(path) => file_review(store, path),
+        Target::File(path) => {
+            let agent = matches!(caller, Caller::Agent);
+            file_review(store, named.unwrap_or(path), agent)
+        }
     }
 }
 
@@ -443,27 +632,75 @@ fn find_by_id(store: &dyn ReviewStore, id: &str) -> Result<Option<PathBuf>, Revi
     Ok(None)
 }
 
-/// A review file named by path (a [`Target::File`]). The built-in agent is
-/// never offered `review_file` ([`run_call`] refuses it), so this is defence
-/// in depth: the file must be a `*.review.txt` inside the script's folder
-/// once links are resolved ([`scriptorium_fsio::review_in_folder`]), and a
-/// file that's there must already be a review ([`is_review_text`]);
-/// anything else is refused, never attached, created or written.
-fn file_review(store: &mut dyn ReviewStore, path: &str) -> Result<(usize, bool), ReviewError> {
-    let at = scriptorium_fsio::review_in_folder(store.dir(), path).map_err(ReviewError::Failed)?;
-    let stored = stored_path(store.dir(), &at);
+/// A review file named by path (a [`Target::File`]: an outside agent's
+/// `review_file`), `path` as the model gave it, the way the CLI `tool` has
+/// always taken it. The built-in agent is never offered `review_file`
+/// (`check_args` refuses it), so for threads this is defence in depth.
+///
+/// - Attached already (compared in the form the session stores,
+///   [`review_location`]): used, re-checked against its file.
+/// - Else it must be a `*.review.txt` inside the script's folder once links
+///   are resolved, its folders there or creatable inside it
+///   ([`agent_file_in_folder`], [`Folders::MayCreate`], as
+///   `opened::agent_review` checks it, the file read through the store);
+///   anything else is refused, never attached, created or written.
+/// - A file that's there must already be a review ([`is_review_text`]): it
+///   is attached; for an outside agent (`agent`), as the CLI `tool` has it,
+///   only if suggestions are written into it ([`Got::AttachedIfWritten`]).
+/// - Else a new review is added to the session in memory, its `Id:` salted
+///   from the resolved path ([`review_salt`]); [`apply_named`] writes it
+///   (and makes its folder) only when there is something to write.
+fn file_review(store: &mut dyn ReviewStore, path: &str, agent: bool) -> Result<(usize, Got), ReviewError> {
+    let stored = stored_path(store.dir(), &review_location(store.dir(), path));
     if let Some(r) = scriptorium_tools::find_review(store.session(), &stored) {
-        return Ok((recheck(store, r)?, false));
+        return Ok((recheck(store, r)?, Got::Attached));
     }
-    if let Some(text) = store.disk_text(&at) {
-        if !is_review_text(&text) {
-            return Err(ReviewError::Failed(scriptorium_fsio::opened::not_a_review(path)));
+    // `opened::agent_review`'s checks, reading the file through the store.
+    let refuse = |e: String| ReviewError::Failed(format!("review_file {e}"));
+    let at = agent_file_in_folder(store.dir(), path, ".review.txt", Folders::MayCreate).map_err(refuse)?;
+    match store.disk_text(&at) {
+        Some(text) if !is_review_text(&text) => return Err(refuse(not_a_review(path))),
+        Some(_) => {
+            let got = if agent { Got::AttachedIfWritten } else { Got::AttachedHere };
+            return Ok((store.attach(&at)?, got));
         }
-        return Ok((store.attach(&at)?, true));
+        // Something there that can't be read is never written over.
+        None if fs::symlink_metadata(&at).is_ok() => return Err(refuse(format!("{path}: can't be read"))),
+        None => {}
     }
-    let id = scriptorium_fsio::opened::new_review_id(path, &scriptorium_fsio::opened::review_salt(&at));
-    let text = insert_id(&format!("{FORMAT_HEADER}\nScript: {}\n\n", store.script_name()), &id);
-    Ok((store.create(&at, &text)?, true))
+    let header = format!("{FORMAT_HEADER}\nScript: {}\n\n", store.script_name());
+    let text = insert_id(&header, &new_review_id(&header, &review_salt(&at)));
+    let script_name = store.script_name().to_string();
+    let rows = store.row_resolver();
+    // A new review has no suggestions: nothing in it is placed against the
+    // script as it was read, so an empty one stands in for it.
+    let review = Review::open_live(
+        stored.clone(),
+        &text,
+        &OriginalScript::default(),
+        store.doc(),
+        store.is_caps(),
+        &script_name,
+        rows.as_deref(),
+    )
+    .with_path(stored);
+    let r = store.add_new(review)?;
+    Ok((r, Got::New(at)))
+}
+
+/// Where review file `file` (relative to the script's folder `dir`, or
+/// absolute) is, resolved through links as far as it exists: the form
+/// [`stored_path`] makes the session's, so [`scriptorium_tools::find_review`]
+/// sees an attached file as attached however it is spelt.
+fn review_location(dir: &Path, file: &str) -> PathBuf {
+    let p = resolve_path(dir, file);
+    if let Ok(at) = p.canonicalize() {
+        return at;
+    }
+    match (p.parent().map(Path::canonicalize), p.file_name()) {
+        (Some(Ok(folder)), Some(name)) => folder.join(name),
+        _ => p,
+    }
 }
 
 /// Review `r` again if its file changed on disk since it was read: the
@@ -529,42 +766,82 @@ pub const BUSY_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 /// Suggestions a call added.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Added {
-    /// The review's id (the thread's own: `thread-<id>`).
+    /// The review's id (a thread's own: `thread-<id>`).
     pub review_id: String,
     /// Per proposal, its number as `list_suggestions` shows it, or `None`
     /// if it wasn't added ([`Applied::numbers`]).
     pub numbers: Vec<Option<usize>>,
 }
 
-/// Runs one tool call for thread `file`: opens the script (for writing when
-/// the tool may add suggestions), runs the tool with the thread's review as
-/// the default, and carries out what it asks with [`apply_append`]. Failures
-/// are error results for the model, never a stop. The whole-script check is
-/// the caller's, before this ([`whole_script_gate`]).
-pub fn run_call(script: &mut dyn Script, file: &mut ThreadFile, call: &ToolCall) -> CallDone {
-    // Only the arguments the host offered ([`scriptorium_tools::catalogue`],
-    // without MCP's `review_file`): the tools read more than that.
+/// Runs one tool call for `caller`: opens the script (for writing when the
+/// tool may change files), runs the tool with the caller's default review
+/// (a thread's own, [`thread_review`]; for an outside agent the only
+/// attached review), and carries out what it asks with [`apply_append`].
+/// Failures are error results for the model, never a stop. The
+/// whole-script check is a thread host's, before this
+/// ([`whole_script_gate`]).
+///
+/// The call is checked against what the caller is offered
+/// ([`scriptorium_tools::Offer::Chat`] for a thread, `Agent` for an outside
+/// agent). An outside agent's `script` is the host's (it picked the
+/// [`Script`]) and is dropped; its `review_file` is passed to the tools in
+/// the form the session stores, so an attached file is seen as attached.
+pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) -> CallDone {
+    let offer = match caller {
+        Caller::Thread(_) => scriptorium_tools::Offer::Chat,
+        Caller::Agent => scriptorium_tools::Offer::Agent,
+    };
+    // Only the arguments the host offered ([`scriptorium_tools::offered`]):
+    // the tools read more than that (a thread isn't offered `review_file`).
     // A name that wasn't offered is refused here too, so a tool `call`
     // knows but the catalogue doesn't can never run unchecked.
-    let specs = scriptorium_tools::catalogue();
-    let Some(spec) = specs.iter().find(|s| s.name == call.name) else {
-        return CallDone::new(call, scriptorium_tools::ToolError::Unknown(call.name.clone()).to_string(), true);
+    let spec = match scriptorium_tools::offered(offer, &call.name) {
+        Ok(spec) => spec,
+        Err(e) => return CallDone::new(call, e.to_string(), true),
     };
-    if let Err(e) = scriptorium_tools::check_args(spec, &call.input) {
+    if let Err(e) = scriptorium_tools::check_args(&spec, &call.input) {
         return CallDone::new(call, e.to_string(), true);
     }
+    let mut input = call.input.clone();
+    let mut named = None;
+    if let (Caller::Agent, Some(map)) = (&caller, input.as_object_mut()) {
+        map.remove("script");
+        named = map.get("review_file").and_then(Value::as_str).map(expand_home);
+    }
+    if scriptorium_tools::AGENT_ONLY.contains(&call.name.as_str()) {
+        // Only an outside agent is offered these (checked above).
+        return match host_op(script, &call.name, &input) {
+            Ok(text) => CallDone::new(call, text.trim_end(), false),
+            Err(e) => CallDone::failed(call, &e),
+        };
+    }
+    if call.name == "guide" {
+        // Needs no script.
+        return match scriptorium_tools::guidance::guide(&input) {
+            Ok(text) => CallDone::new(call, text, false),
+            Err(e) => CallDone::new(call, e.to_string(), true),
+        };
+    }
     let writes = scriptorium_tools::writes(&call.name);
+    let agent = matches!(caller, Caller::Agent);
     let mut store = match script.open(writes) {
         Ok(s) => s,
         Err(e) => return CallDone::failed(call, &e),
     };
+    if let Some(f) = &named {
+        input["review_file"] = Value::String(stored_path(store.dir(), &review_location(store.dir(), f)));
+    }
     let outcome = {
+        let default_review = match &caller {
+            Caller::Thread(file) => thread_review(&*store, file),
+            Caller::Agent => (store.session().reviews.len() == 1).then_some(0),
+        };
         let ctx = Ctx {
             doc: store.doc(),
             session: store.session(),
             script_name: store.script_name(),
             is_caps: store.is_caps(),
-            default_review: thread_review(&*store, file),
+            default_review,
             links: scriptorium_tools::uses_links(&call.name)
                 .then(|| match store.pair_view()? {
                     // A links file that can't be used stops suggestions
@@ -574,7 +851,7 @@ pub fn run_call(script: &mut dyn Script, file: &mut ThreadFile, call: &ToolCall)
                 })
                 .flatten(),
         };
-        scriptorium_tools::call(&ctx, &call.name, &call.input)
+        scriptorium_tools::call(&ctx, &call.name, &input)
     };
     match outcome {
         Err(e) => CallDone::new(call, e.to_string(), true),
@@ -582,20 +859,150 @@ pub fn run_call(script: &mut dyn Script, file: &mut ThreadFile, call: &ToolCall)
         Ok(Outcome::Append(_) | Outcome::NewVersion(_)) if !writes => {
             CallDone::new(call, format!("{} can't change anything", call.name), true)
         }
-        Ok(Outcome::NewVersion(v)) => match store.new_version(&v.language, &v.original_language) {
+        Ok(Outcome::NewVersion(v)) => match store.new_version(&v.language, &v.original_language, agent) {
             Ok(text) => CallDone::new(call, text, false),
             Err(e) => CallDone::failed(call, &e),
         },
-        Ok(Outcome::Append(append)) => match apply_append(&mut *store, file, append) {
-            Ok(applied) => {
-                let added = applied.numbers.iter().any(Option::is_some).then(|| Added {
-                    review_id: file.review_id.clone().unwrap_or_default(),
-                    numbers: applied.numbers.clone(),
-                });
+        Ok(Outcome::Append(append)) => match apply_named(&mut *store, caller, named.as_deref(), append) {
+            Ok((applied, review_id)) => {
+                let added = applied
+                    .numbers
+                    .iter()
+                    .any(Option::is_some)
+                    .then(|| Added { review_id, numbers: applied.numbers.clone() });
                 CallDone { added, ..CallDone::new(call, applied.message, false) }
             }
             Err(e) => CallDone::failed(call, &e),
         },
+    }
+}
+
+/// A host operation (an [`scriptorium_tools::AGENT_ONLY`] tool) for an
+/// outside agent: its arguments read (errors phrased for the model; paths
+/// with `~` expanded) before anything is opened, then run on `script`
+/// opened for writing. `attach_reviews` files are checked here, for every
+/// store: existing reviews inside the script's folder
+/// ([`agent_review`]).
+fn host_op(script: &mut dyn Script, name: &str, input: &Value) -> Result<String, ReviewError> {
+    let a = Args(input.as_object().cloned().unwrap_or_default());
+    let failed = ReviewError::Failed;
+    match name {
+        "attach_reviews" | "detach_reviews" => {
+            let files: Vec<String> = a.strs("files").map_err(failed)?.iter().map(|f| expand_home(f)).collect();
+            if files.is_empty() {
+                return Err(failed("give at least one file".into()));
+            }
+            if name == "detach_reviews" {
+                return script.detach(&files);
+            }
+            let mut store = script.open(true)?;
+            let mut checked = vec![];
+            for f in &files {
+                match agent_review(store.dir(), f, Folders::MustExist).map_err(failed)? {
+                    (at, true) => checked.push(at),
+                    (_, false) => return Err(failed(format!("{f}: no such file"))),
+                }
+            }
+            store.attach_reviews(&checked)
+        }
+        "decide_suggestion" => {
+            let review = a.opt_str("review").map(|r| expand_home(&r));
+            let n = a.suggestion_ref("n").map_err(failed)?;
+            let choice = match a.str("decision").map_err(failed)?.as_str() {
+                "accept" => Choice::Accept(a.opt_positive("option").map_err(failed)?),
+                "keep" => Choice::Keep,
+                "rewrite" => match a.0.get("lines").filter(|v| !v.is_null()) {
+                    Some(lines) => Choice::RewriteBlock(block_lines(lines).map_err(failed)?),
+                    None => Choice::Rewrite(a.str("text").map_err(failed)?),
+                },
+                "undecide" => Choice::Undecide,
+                d => return Err(failed(format!("unknown decision {d:?}: accept, keep, rewrite or undecide"))),
+            };
+            script.open(true)?.decide(review.as_deref(), n, choice)
+        }
+        "edit_paragraph" => {
+            let id =
+                a.0.get("paragraph_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| failed("missing `paragraph_id` (a paragraph id)".into()))?;
+            let text = a.str("text").map_err(failed)?;
+            script.open(true)?.edit(id, &text)
+        }
+        "undo" | "redo" => script.open(true)?.undo_redo(name == "redo"),
+        "write_script" => {
+            let output = a.opt_str("output").map(|o| expand_home(&o));
+            script.open(true)?.write_script(output.as_deref())
+        }
+        _ => Err(failed(format!("unknown tool {name}"))),
+    }
+}
+
+/// `lines` (`[{kind, text}]`, as `decide_suggestion` takes them) as lines;
+/// `[]` is a cut.
+fn block_lines(lines: &Value) -> Result<Vec<Line>, String> {
+    let list = lines.as_array().ok_or("`lines` must be a list of {kind, text}")?;
+    if list.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut typed = String::new();
+    for l in list {
+        let (Some(kind), Some(text)) = (l.get("kind").and_then(Value::as_str), l.get("text").and_then(Value::as_str))
+        else {
+            return Err("each line is {\"kind\": <element type>, \"text\": <text>}".into());
+        };
+        if [kind, text].iter().any(|s| s.contains(['\n', '\r', '\u{2028}', '\u{2029}'])) {
+            return Err("a line can't contain a newline: give each paragraph as its own line".into());
+        }
+        if kind.contains(':') {
+            return Err(format!("unknown element type {kind:?}"));
+        }
+        typed.push_str(&format!("{kind}: {text}\n"));
+    }
+    let lines = parse_typed_lines(&typed, Case::Any)?;
+    Ok(lines.into_iter().map(|(k, t)| Line::typed(k, t)).collect())
+}
+
+/// A tool call's arguments, with errors phrased for the model.
+struct Args(serde_json::Map<String, Value>);
+
+impl Args {
+    fn opt_str(&self, k: &str) -> Option<String> {
+        self.0.get(k).and_then(Value::as_str).map(str::to_string)
+    }
+    fn str(&self, k: &str) -> Result<String, String> {
+        self.opt_str(k).ok_or(format!("missing `{k}` (a string)"))
+    }
+    /// A whole number from 1, if given.
+    fn opt_positive(&self, k: &str) -> Result<Option<usize>, String> {
+        match self.0.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .filter(|n| *n > 0)
+                .and_then(|n| usize::try_from(n).ok())
+                .map(Some)
+                .ok_or(format!("`{k}` must be a whole number from 1")),
+        }
+    }
+    /// A suggestion number (from 1), or `e<entry>` for its stable place in
+    /// the file. Nothing else: not `-1`, `2.5`, `"3"` or `"x"`.
+    fn suggestion_ref(&self, k: &str) -> Result<SuggestionRef, String> {
+        let bad = || format!("`{k}` must be a suggestion number from 1, or \"e<entry>\" (e.g. \"e3\")");
+        match self.0.get(k) {
+            Some(Value::Number(n)) => match n.as_u64().filter(|n| *n > 0).and_then(|n| usize::try_from(n).ok()) {
+                Some(n) => Ok(SuggestionRef::Number(n)),
+                None => Err(bad()),
+            },
+            Some(Value::String(s)) => match SuggestionRef::parse(s) {
+                Some(r @ SuggestionRef::Entry(_)) => Ok(r),
+                _ => Err(bad()),
+            },
+            _ => Err(bad()),
+        }
+    }
+    fn strs(&self, k: &str) -> Result<Vec<String>, String> {
+        let list = self.0.get(k).and_then(Value::as_array).ok_or(format!("missing `{k}` (a list of strings)"))?;
+        list.iter().map(|v| v.as_str().map(str::to_string).ok_or(format!("`{k}` must be strings"))).collect()
     }
 }
 
@@ -615,7 +1022,7 @@ impl<S: Script> crate::host::Tools for Direct<S> {
         whole_script_gate(&mut self.0, file, &call.name, allow, price)
     }
     fn call(&mut self, file: &mut ThreadFile, call: &ToolCall) -> CallDone {
-        run_call(&mut self.0, file, call)
+        run_call(&mut self.0, Caller::Thread(file), call)
     }
     fn take_notes(&mut self) -> Vec<String> {
         self.0.take_notes()

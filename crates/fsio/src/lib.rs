@@ -2,10 +2,16 @@
 //! half of one, and a crash mid-write leaves the old file in place; and
 //! [`SessionLock`], which keeps two programs from writing a script's session
 //! at once. With the `opened` feature, [`opened`]: a script opened with its
-//! saved session, the way the CLI and the chat host open it.
+//! saved session, the way the CLI and the chat host open it, and [`ops`]: the
+//! file commands over it (attach, detach, decide, edit, undo, write). With the `link`
+//! feature, [`link`]: the socket between the agent connector and the app.
 
+#[cfg(feature = "link")]
+pub mod link;
 #[cfg(feature = "opened")]
 pub mod opened;
+#[cfg(feature = "opened")]
+pub mod ops;
 #[cfg(feature = "opened")]
 pub mod versions;
 

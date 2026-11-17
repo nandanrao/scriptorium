@@ -19,6 +19,7 @@ scriptorium-fsio = { path = "crates/fsio" }
 scriptorium-providers = { path = "crates/providers" }
 scriptorium-chat = { path = "crates/chat" }
 scriptorium-versions = { path = "crates/versions" }
+scriptorium-connect = { path = "crates/connect" }
 ctrlc = "3.5"
 fs4 = "1"
 keyring = { version = "3.6", default-features = false }

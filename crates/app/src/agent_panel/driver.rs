@@ -732,7 +732,8 @@ impl Chat {
         }
         let file = self.store().read(id).map_err(|e| e.to_string())?;
         let busy = matches!(self.own.probe(&self.store(), id), Err(StoreError::Busy));
-        let changed = check_tools(&file, &scriptorium_tools::catalogue()) == ToolsCheck::Changed;
+        let changed =
+            check_tools(&file, &scriptorium_tools::catalogue(scriptorium_tools::Offer::Chat)) == ToolsCheck::Changed;
         self.reset(Some(Arc::new(file)), cx);
         if busy {
             self.read_only = true;
@@ -1218,7 +1219,7 @@ fn run_tool(msg: ToUi, chat: &WeakEntity<Chat>, script: &WeakEntity<ScriptView>,
                 let ran = script.update(cx, |view, cx| {
                     let mut file = *file;
                     let mut live = LiveScript::new(view, cx);
-                    let done = exec::run_call(&mut live, &mut file, &call);
+                    let done = exec::run_call(&mut live, exec::Caller::Thread(&mut file), &call);
                     let notes = exec::Script::take_notes(&mut live);
                     (Some((file.review_id, file.review_path)), done, notes)
                 });

@@ -102,6 +102,7 @@ cat >"$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSAppleEventsUsageDescription</key><string>Scriptorium quits and reopens Claude so it picks up its new settings.</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

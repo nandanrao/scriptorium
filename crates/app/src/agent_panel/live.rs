@@ -140,7 +140,7 @@ impl ReviewStore for LiveStore<'_, '_> {
     /// Made under the session lock this store holds (the script is the
     /// original); the view then loads its pair again on its next look at
     /// the files.
-    fn new_version(&mut self, language: &str, original_language: &str) -> Result<String, ReviewError> {
+    fn new_version(&mut self, language: &str, original_language: &str, switch: bool) -> Result<String, ReviewError> {
         self.writable()?;
         if let Some(why) = self.view.unwritten_changes(self.cx) {
             return Err(ReviewError::Failed(why));
@@ -154,7 +154,7 @@ impl ReviewStore for LiveStore<'_, '_> {
             &mut notes,
         );
         self.view.after_new_version(notes, self.cx);
-        Ok(new_version_result(&made.map_err(ReviewError::Failed)?))
+        Ok(new_version_result(&made.map_err(ReviewError::Failed)?, switch))
     }
 
     fn reload(&mut self) -> Result<(), ReviewError> {
@@ -192,7 +192,7 @@ mod tests {
     use gpui::{TestAppContext, WindowHandle};
     use scriptorium_agent::ToolCall;
     use scriptorium_agent::file::ThreadFile;
-    use scriptorium_chat::exec::run_call;
+    use scriptorium_chat::exec::{Caller, run_call};
     use serde_json::json;
 
     use super::*;
@@ -277,7 +277,7 @@ mod tests {
                 }
                 run_call(
                     &mut script,
-                    &mut thread(),
+                    Caller::Thread(&mut thread()),
                     &call("new_version", json!({"language": "es", "original_language": "en"})),
                 )
             })
@@ -310,7 +310,7 @@ mod tests {
                     assert_eq!(view.this, 1);
                     assert!(store.may_be_version());
                 }
-                run_call(&mut script, &mut thread(), &call("read_rows", json!({"needs": true})))
+                run_call(&mut script, Caller::Thread(&mut thread()), &call("read_rows", json!({"needs": true})))
             })
             .unwrap();
         assert!(!rows.result.is_error, "{}", rows.result.content);

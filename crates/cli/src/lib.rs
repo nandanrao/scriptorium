@@ -16,6 +16,7 @@
 #[cfg(feature = "chat")]
 pub mod chat;
 pub mod commands;
+mod connect;
 /// Moved to the `scriptorium-fsio` crate; re-exported so `scriptorium_cli::fsio`
 /// paths keep working. New code depends on `scriptorium-fsio` directly.
 pub use scriptorium_fsio as fsio;

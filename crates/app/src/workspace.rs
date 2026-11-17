@@ -9,12 +9,14 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton,
-    PathPromptOptions, SharedString, Stateful, Subscription, Window, actions, deferred, div, prelude::*, px,
+    App, ClipboardItem, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    MouseButton, PathPromptOptions, SharedString, Stateful, Subscription, Window, actions, deferred, div, prelude::*,
+    px,
 };
 
 use crate::agent_panel::accounts::{AccountsSheet, Dismissed};
 use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
+use crate::connect::{self, InstallCli};
 use crate::menus::{self, Item};
 use crate::new_version::{MarkInSync, MarkNotInSync, NewVersion, NewVersionSheet, SheetEvent, Swap};
 use crate::script_view::{
@@ -43,6 +45,8 @@ pub struct Workspace {
     accounts: Option<(Entity<AccountsSheet>, Option<FocusHandle>, Subscription)>,
     /// File › New version…'s sheet while it's open, and what had focus before.
     new_version: Option<(Entity<NewVersionSheet>, Option<FocusHandle>, Subscription)>,
+    /// Install command-line tool… is running; a second click is ignored.
+    installing_cli: bool,
     _observe: Option<Subscription>,
     /// The view's [`Reopen`]: Write .fdx wrote the version in place.
     _reopen: Option<Subscription>,
@@ -58,6 +62,7 @@ impl Workspace {
             notice: "".into(),
             accounts: None,
             new_version: None,
+            installing_cli: false,
             _observe: None,
             _reopen: None,
         };
@@ -262,6 +267,30 @@ impl Workspace {
         self.close_menu(window, cx);
         let log = crate::log::path().map_or("none".into(), |p| p.display().to_string());
         self.set_notice(format!("Scriptorium {} · log file: {log}", env!("CARGO_PKG_VERSION")), cx);
+    }
+
+    /// Scriptorium › Install command-line tool…: the result goes in the
+    /// status bar.
+    fn on_install_cli(&mut self, _: &InstallCli, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        if self.installing_cli {
+            return;
+        }
+        self.installing_cli = true;
+        self.set_notice("Installing the command-line tool…", cx);
+        let task = connect::install_cli(cx);
+        cx.spawn(async move |this, cx| {
+            let (said, copy) = task.await;
+            this.update(cx, |this, cx| {
+                this.installing_cli = false;
+                if let Some(command) = copy {
+                    cx.write_to_clipboard(ClipboardItem::new_string(command));
+                }
+                this.set_notice(said, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ---- the agent panel and AI accounts ---------------------------------------
@@ -662,6 +691,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_apply))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_about))
+            .on_action(cx.listener(Self::on_install_cli))
             .on_action(cx.listener(Self::on_toggle_agent))
             .on_action(
                 cx.listener(|this, _: &crate::agent_panel::Stop, _, cx| this.with_view(cx, |v, cx| v.stop_agent(cx))),

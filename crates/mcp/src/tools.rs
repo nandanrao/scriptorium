@@ -75,7 +75,7 @@ const READ_ONLY: &[&str] = &[
 /// The shared catalogue with MCP's fields: `script` on every tool,
 /// `review_file` on the suggesting tools, `before` on `suggest_change`.
 fn shared() -> Vec<ToolSpec> {
-    let mut specs = scriptorium_tools::catalogue();
+    let mut specs = scriptorium_tools::catalogue(scriptorium_tools::Offer::Chat);
     for spec in &mut specs {
         if spec.name == "suggest_change" {
             scriptorium_tools::add_before(spec);
@@ -304,7 +304,7 @@ pub fn call(name: &str, args: &Value) -> Result<String, Failure> {
             }
             commands::apply(&script, &[], false, Some(&out), &mut notes)
         }
-        _ if scriptorium_tools::catalogue().iter().any(|s| s.name == name) => {
+        _ if scriptorium_tools::catalogue(scriptorium_tools::Offer::Chat).iter().any(|s| s.name == name) => {
             let mut rest = a.0.clone();
             rest.remove("script");
             if let Some(f) = rest.get("review_file").and_then(Value::as_str) {

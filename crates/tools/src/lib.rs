@@ -13,9 +13,11 @@
 //! Every read uses `ctx.doc`, the document as it is now (with decisions and
 //! edits), never the file as it was opened.
 
+pub mod agent;
 mod args;
 mod block;
 mod catalogue;
+pub mod guidance;
 pub mod prompt;
 mod read;
 mod reviews;
@@ -28,10 +30,11 @@ use scriptorium_core::{Document, ElementKind};
 use scriptorium_review::{Entry, Session};
 use serde_json::Value;
 
+pub use agent::{AGENT_ONLY, annotations, mcp_tool, read_only};
 pub use block::{MAX_LINES, Spot, block_entry};
 pub use catalogue::{
-    HostField, KINDS, MAX_BATCH, MAX_OPTIONS, MAX_PAGE, PAGE, ToolSpec, add_before, add_host_fields, catalogue,
-    check_args,
+    HostField, KINDS, MAX_BATCH, MAX_OPTIONS, MAX_PAGE, Offer, PAGE, ToolSpec, add_before, add_host_fields, catalogue,
+    check_args, offered,
 };
 pub use read::{MIN_READ_BUDGET, NOT_EDITABLE, READ_BUDGET, script_size};
 pub use reviews::{SuggestionRow, find_review, item_numbered, item_numbers, suggestion_rows};
@@ -219,10 +222,12 @@ pub fn may_append(name: &str) -> bool {
 }
 
 /// Whether tool `name` may change files: the suggesting tools
-/// ([`may_append`]) and `new_version` ([`Outcome::NewVersion`]). Hosts take
-/// the script's session lock only for these; every other tool only reads.
+/// ([`may_append`]), `new_version` ([`Outcome::NewVersion`]) and the
+/// agent-only tools ([`AGENT_ONLY`]: attach, detach, decide, edit, undo,
+/// redo, write the script). Hosts take the script's session lock only for
+/// these; every other tool only reads ([`read_only`]).
 pub fn writes(name: &str) -> bool {
-    may_append(name) || name == "new_version"
+    may_append(name) || name == "new_version" || AGENT_ONLY.contains(&name)
 }
 
 /// Whether tool `name` reads [`Ctx::links`]: hosts lay the pair's rows out
@@ -253,6 +258,7 @@ pub fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<Outcome, ToolError> {
         "suggest_change" => suggest::suggest_change(ctx, &a),
         "suggest_changes" => suggest::suggest_changes(ctx, &a),
         "new_version" => rows::new_version(ctx, &a),
+        "guide" => guidance::guide(args).map(Outcome::Text),
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }

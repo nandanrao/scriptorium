@@ -230,7 +230,7 @@ fn suggest(id: &str, para: u64, option: &str) -> ToolCall {
 }
 
 fn call(script: &mut OneStore, file: &mut ThreadFile, c: ToolCall) -> CallDone {
-    run_call(script, file, &c)
+    run_call(script, Caller::Thread(file), &c)
 }
 
 #[test]
@@ -395,7 +395,7 @@ fn an_argument_not_offered_is_refused() {
     ] {
         let name = if input.get("suggestions").is_some() { "suggest_changes" } else { "suggest_change" };
         let call = ToolCall { name: name.into(), input, ..suggest("a", 1, "x") };
-        let done = run_call(&mut s, &mut file, &call);
+        let done = run_call(&mut s, Caller::Thread(&mut file), &call);
         assert!(done.result.is_error && done.result.content.contains("review_file"), "{path}: {}", done.result.content);
         assert!(s.0.files.is_empty() && s.0.session.reviews.is_empty(), "{path}");
     }
@@ -405,10 +405,10 @@ fn an_argument_not_offered_is_refused() {
         input: json!({"suggestions": [{"paragraph_id": 1, "options": ["x"]}], "review_file": "/tmp/x.review.txt"}),
         ..suggest("c", 1, "x")
     };
-    let done = run_call(&mut s, &mut file, &call);
+    let done = run_call(&mut s, Caller::Thread(&mut file), &call);
     assert!(done.result.is_error && done.result.content.contains("review_file"), "{}", done.result.content);
     let call = ToolCall { name: "write_file".into(), input: json!({"path": "/tmp/x"}), ..suggest("d", 1, "x") };
-    let done = run_call(&mut s, &mut file, &call);
+    let done = run_call(&mut s, Caller::Thread(&mut file), &call);
     assert!(done.result.is_error && done.result.content.contains("unknown tool"), "{}", done.result.content);
     assert!(s.0.files.is_empty() && s.0.session.reviews.is_empty());
     // A read tool too.
@@ -417,7 +417,7 @@ fn an_argument_not_offered_is_refused() {
         input: json!({"review": "x", "path": "/etc"}),
         ..suggest("b", 1, "x")
     };
-    let done = run_call(&mut s, &mut file, &call);
+    let done = run_call(&mut s, Caller::Thread(&mut file), &call);
     assert!(done.result.is_error && done.result.content.contains("`path`"), "{}", done.result.content);
     assert_eq!(file.review_path, None);
 }
@@ -440,7 +440,7 @@ fn to_file(m: &mut Mem, file: &mut ThreadFile, path: &str) -> Result<Applied, Re
             other => panic!("{other:?}"),
         }
     };
-    apply_append(m, file, append)
+    apply_append(m, Caller::Thread(file), append)
 }
 
 #[test]
@@ -468,7 +468,6 @@ fn a_file_target_must_be_a_review_in_the_scripts_folder() {
         "config.review.txt".into(),
         "notes.txt".into(),
         "/home/u/.profile".into(),
-        "missing/x.review.txt".into(),
     ];
     if cfg!(unix) {
         refused.push("link.review.txt".into());
@@ -484,6 +483,12 @@ fn a_file_target_must_be_a_review_in_the_scripts_folder() {
     assert!(m.file("pass.review.txt").starts_with(FORMAT_HEADER) && m.file("pass.review.txt").contains("Laura grins."));
     assert_eq!(m.session.reviews.len(), 1);
     assert_eq!(file.review_path, None);
+    // A missing folder inside the script's folder is made with the file.
+    to_file(&mut m, &mut file, "missing/x.review.txt").unwrap();
+    assert!(m.dir.join("missing").is_dir());
+    assert!(m.file("missing/x.review.txt").contains("Laura grins."));
+    assert_eq!(m.session.reviews.len(), 2);
+    assert_eq!(m.session.reviews[1].path, "missing/x.review.txt");
     std::fs::remove_dir_all(&base).unwrap();
 }
 
@@ -571,7 +576,7 @@ impl Script for Busy {
 #[test]
 fn busy_is_a_flag_not_just_text() {
     let mut file = thread("t");
-    let done = run_call(&mut Busy, &mut file, &suggest("a", 1, "Laura grins."));
+    let done = run_call(&mut Busy, Caller::Thread(&mut file), &suggest("a", 1, "Laura grins."));
     assert!(done.busy && done.result.is_error);
     assert_eq!(done.result.content, BUSY);
     assert_eq!(whole_script_gate(&mut Busy, &file, "read_script", false, None), Err(ReviewError::Busy));
@@ -630,4 +635,56 @@ fn a_proposal_on_the_line_being_rewritten_is_refused() {
     assert_eq!(done.added.unwrap().numbers, [Some(1)]);
     let text = s.0.file("Dialogue pass.review.txt");
     assert!(text.contains("Laura grins.") && !text.contains("going to town"), "{text}");
+}
+
+#[test]
+fn a_new_file_review_with_nothing_written_leaves_the_session_as_it_was() {
+    // The app's store keeps its session: a review added in memory for a
+    // `review_file` must not stay listed when every suggestion was refused.
+    let base = std::env::temp_dir().join(format!("scriptorium-file-forget-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let mut m = Mem::new();
+    m.dir = base.canonicalize().unwrap();
+    m.editing = vec![ParaId(1)];
+    let mut file = thread("Dialogue pass");
+    let e = to_file(&mut m, &mut file, "sub/new.review.txt").unwrap_err();
+    assert_eq!(e, ReviewError::Failed(EDITING_LINE.into()));
+    assert!(m.session.reviews.is_empty());
+    assert!(m.files.is_empty());
+    assert!(!m.dir.join("sub").exists());
+    std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn host_operations_a_store_doesnt_offer_are_refused() {
+    let mut s = OneStore(Mem::new());
+    let mut file = thread("Ops");
+    for (name, input) in [
+        ("edit_paragraph", json!({ "paragraph_id": 1, "text": "Laura grins." })),
+        ("undo", json!({})),
+        ("redo", json!({})),
+        ("decide_suggestion", json!({ "n": 1, "decision": "keep" })),
+        ("write_script", json!({})),
+        ("detach_reviews", json!({ "files": ["a.review.txt"] })),
+    ] {
+        let c = ToolCall { name: name.into(), input: input.clone(), ..suggest("a", 1, "x") };
+        let done = run_call(&mut s, Caller::Agent, &c);
+        assert!(done.result.is_error && done.result.content == format!("{name} isn't offered here"), "{name}");
+        // A thread isn't offered them at all.
+        let done = call(&mut s, &mut file, c);
+        assert!(done.result.is_error && done.result.content.contains("unknown tool"), "{}", done.result.content);
+    }
+    assert_eq!(s.0.doc.paragraphs()[1].text(), "Laura smiles.");
+}
+
+#[test]
+fn a_leading_tilde_is_the_home_folder() {
+    assert_eq!(expand_home_with("~/Scripts/a.fdx", Some("/Users/w")), "/Users/w/Scripts/a.fdx");
+    assert_eq!(expand_home_with("~", Some("/Users/w/")), "/Users/w/");
+    assert_eq!(expand_home_with("~bob/a.fdx", Some("/Users/w")), "~bob/a.fdx");
+    assert_eq!(expand_home_with("a/~/b", Some("/Users/w")), "a/~/b");
+    assert_eq!(expand_home_with("~/a", None), "~/a");
+    assert_eq!(resolve_in(Path::new("/s"), "r.review.txt"), "/s/r.review.txt");
+    assert_eq!(resolve_in(Path::new("/s"), "/x/r.review.txt"), "/x/r.review.txt");
 }

@@ -287,10 +287,18 @@ request at a time.
 → {"hello": {"proto": 1, "version": "0.6.0", "exe": "/Applications/Scriptorium.app/Contents/MacOS/scriptorium"}}
 ← {"hello": {"proto": 1, "version": "0.6.0", "script": "/Users/a/Film/PURPLE LIST.fdx"}}
 → {"id": 7, "call": {"name": "suggest_changes", "arguments": {…}}}
-← {"id": 7, "taken": true}           // the app's UI task picked the call up and is about to run it
+← {"id": 7, "taken": true, "script": "/Users/a/Film/PURPLE LIST.fdx"}   // the app's UI task picked the call up and is about to run it, on this script
 ← {"id": 7, "done": {"text": "…", "is_error": false}}
 ← {"id": 7, "route": "files"}        // instead of taken: not the open script, or nothing open
 ```
+
+- The hello's `script` is informational only (it may change before any
+  call); the script a call runs on comes back in its `taken` (optional).
+- The client accepts a repeated `taken`, and a `done` with no `taken`
+  before it.
+- `taken` is written by the UI task through a `Replier` (a clone of the
+  connection's writer, `Conn::replier()`); lines from it and the
+  connection thread never interleave.
 
 **Not delivered vs maybe applied.** The connector keeps one connection, so
 the app may have quit between two calls.
@@ -298,7 +306,10 @@ the app may have quit between two calls.
   for hang-up or readable EOF.
 - A hang-up, an `EPIPE` on send, or EOF before `taken` means **not
   delivered**. It reconnects once, and otherwise runs the call on the files.
-- Only EOF after `taken` and before `done` means "maybe applied".
+- Only a clean hang-up (EOF, reset, `EPIPE`) before any reply, or a
+  well-formed `route: files`, means the call didn't run. EOF after `taken`
+  and before `done` means "maybe applied", and so does any protocol break
+  (a garbled or cut-off line, a wrong id), taken the safe way.
 - The UI task sends `taken` from the same update that runs the call, just
   before `run_call`.
 
@@ -311,7 +322,8 @@ the app may have quit between two calls.
 - **Peer check.** The app accepts only the same user (`getpeereid`, which
   Linux also has).
 - **Timeouts.**
-  - Connect and hello: 1 s, then the files.
+  - Connect and hello: 1 s each, then the files (the connect runs on a
+    short-lived thread: std has no connect timeout for Unix sockets).
   - A call has no client timeout below the agent's own. A busy app (session
     lock held, writer rewriting a line) is retried inside the app, off the
     UI thread, for `chat::exec`'s `BUSY_FOR`, then answers `BUSY`.
@@ -329,7 +341,8 @@ the app may have quit between two calls.
 ## The socket
 
 - The folder is `~/Library/Application Support/Scriptorium/`, mode 0700.
-  The socket is 0600, set with `umask` before `bind`.
+  The socket is 0600, set right after `bind` (not with `umask`: it is
+  process-wide; the 0700 folder covers the moment between).
 - **Who owns it.** At launch the app takes `agent.lock` with an exclusive
   `flock`, without waiting.
   - With the lock: it removes any stale `agent.sock` and binds.
@@ -337,6 +350,8 @@ the app may have quit between two calls.
     Scriptorium is connected to your AI agents."
   - `flock` is released when a process dies, so a crash leaves nothing
     stuck.
+- On a clean quit the app calls `Server::close` (removes the socket if it
+  is still its own); the accept thread keeps the server from being dropped.
 - **Path length.** macOS socket paths are limited to 104 bytes. When
   `$HOME/Library/Application Support/Scriptorium/agent.sock` is too long (a
   home folder over about 45 characters), both sides use
@@ -551,6 +566,11 @@ there.
   - Over the link the app uses its open script.
   - On the files, a missing `script` is an error: "Scriptorium isn't open.
     Ask the writer for the script's path, or to open it in Scriptorium."
+  - In the Agent offer (`tools/src/agent.rs`): drop `script` from
+    `required`, and reword `SCRIPT` to "Leave out to use the script open
+    in Scriptorium; otherwise its absolute path". Update
+    `tests/offer.rs` `every_agent_tool_takes_script` to match. (D1's
+    guidance already tells agents to leave `script` out.)
 - Remove `crates/mcp` from the workspace.
 - Tests:
   - A JSON-RPC transcript with no app.
@@ -662,6 +682,8 @@ same tools behave two ways.
   script's path."
 - Tests: the formatter's cases; the live fill from a view with a
   selection, a review open and a pair.
+  - Remove `where_is_writer` from `NOT_TOOLS` in
+    `tools/tests/guidance.rs` (D1 names the tool before it exists).
 - Edge cases:
   - A selection across paragraphs.
   - A collapsed selection: the cursor's line.
@@ -704,6 +726,9 @@ same tools behave two ways.
 
 - Delete `plugin/` (decision 8): no skills, no generated SKILL.md.
   `docs/` explains `/scriptorium:review_pass` in Claude Code.
+- Release note: D2 and any release must not ship before B2 and C3. D1's
+  guidance tells agents to call `where_is_writer` and to leave out
+  `script`, which only work once those land.
 
 # Phase E — Connect an AI agent…
 
@@ -713,10 +738,11 @@ same tools behave two ways.
   `scriptorium`.
 - For each of `claude_desktop` (JSON), `claude_code` (`~/.claude.json`,
   user scope), `codex` (TOML, with `toml_edit` so comments and order stay):
-  - `state(text) -> State::{Missing, Ours { command }, Theirs, Broken(why)}`
-  - `merge(text, &Entry) -> Result<String, Broken>`
-  - `remove(text) -> …`
-- "Ours" means the name is `scriptorium` and the command ends in
+  - `state(text, this) -> State::{Missing, Ours { command }, Theirs, Broken(why)}`
+    (`this`: the running connector's path)
+  - `merge(text, &Entry) -> Result<String, Refused>`
+  - `remove(text, this) -> Result<String, Refused>`
+- "Ours" means the name is `scriptorium` and the command is `this` or ends in
   `/Contents/MacOS/scriptorium`. The old plugin was loaded with
   `--plugin-dir` and never written to a config, so there is nothing of it
   to repair.
@@ -725,6 +751,10 @@ same tools behave two ways.
   - Keep `preferences` and every other server.
   - Refuse to touch a file that doesn't parse.
   - An empty or missing file becomes a fresh one.
+  - Agent configs are re-serialized (JSON: key order, line endings and
+    final newline kept; a duplicate key is refused), an exemption from
+    AGENTS.md rule 2, which is for the writer's files. E2 keeps a backup
+    first.
 - Codex gets `args = ["mcp"]` and `tool_timeout_sec = 300` (long
   translation batches; the default is 60).
 - The setup command, as text: `<path> mcp`, quoted for the shell.

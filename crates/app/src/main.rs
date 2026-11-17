@@ -4,6 +4,7 @@
 
 mod agent_panel;
 mod blocks;
+mod connect;
 mod disk;
 mod editor;
 mod elements;

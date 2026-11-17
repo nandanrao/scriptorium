@@ -325,7 +325,7 @@ pub fn new_thread(id: &str, message: &str, script_name: &str, resolved: &Resolve
         review_path: None,
         whole_script: None,
         system: scriptorium_tools::prompt::system(script_name),
-        tools_hash: tools_hash(&scriptorium_tools::catalogue()),
+        tools_hash: tools_hash(&scriptorium_tools::catalogue(scriptorium_tools::Offer::Chat)),
         thread: Thread::default(),
         extra: Default::default(),
     }
@@ -338,7 +338,7 @@ pub fn new_thread(id: &str, message: &str, script_name: &str, resolved: &Resolve
 pub fn prepare(file: &mut ThreadFile, resolved: &Resolved) -> Option<&'static str> {
     file.account = resolved.account.clone();
     file.model = resolved.model.clone();
-    let tools = scriptorium_tools::catalogue();
+    let tools = scriptorium_tools::catalogue(scriptorium_tools::Offer::Chat);
     (check_tools(file, &tools) == ToolsCheck::Changed).then(|| {
         file.tools_hash = tools_hash(&tools);
         TOOLS_CHANGED
@@ -536,7 +536,7 @@ fn run_inner(
         cancel,
         save: &save,
     };
-    let specs = scriptorium_tools::catalogue();
+    let specs = scriptorium_tools::catalogue(scriptorium_tools::Offer::Chat);
     let time = TimeScale::new(clock.scale(Duration::from_secs(1)).as_secs_f64());
     let mut run = Run::new(req.limits, resolved.protocol, resolved.origin());
     let mut action = run.start(&mut file.thread);

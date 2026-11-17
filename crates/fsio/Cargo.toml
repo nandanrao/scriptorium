@@ -9,15 +9,21 @@ rust-version.workspace = true
 [features]
 # `opened`: a script opened with its saved session and review files, as the
 # CLI and the chat host open it. Pulls in the document, review and versions
-# crates.
-opened = ["dep:scriptorium-core", "dep:scriptorium-fdx", "dep:scriptorium-review", "dep:scriptorium-versions"]
+# crates, and the tools crate for suggestion numbering (`ops`).
+opened = ["dep:scriptorium-core", "dep:scriptorium-fdx", "dep:scriptorium-review", "dep:scriptorium-tools", "dep:scriptorium-versions"]
+# `link`: the socket between the agent connector (`scriptorium mcp`) and the
+# running app, and its line protocol (`link::proto`, pure).
+link = ["dep:serde", "dep:serde_json", "dep:nix"]
 
 [dependencies]
 fs4.workspace = true
 scriptorium-core = { workspace = true, optional = true }
 scriptorium-fdx = { workspace = true, optional = true }
 scriptorium-review = { workspace = true, optional = true }
+scriptorium-tools = { workspace = true, optional = true }
 scriptorium-versions = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The end-to-end test (`tests/end_to_end.rs`) drives the tools as the hosts do.
@@ -27,6 +33,9 @@ serde_json.workspace = true
 # ENOLCK differs by OS (37 on Linux, 77 on macOS): take it from libc.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# The link's peer check (getpeereid / SO_PEERCRED) and hang-up check
+# without unsafe code (the workspace forbids it).
+nix = { version = "0.31", optional = true, default-features = false, features = ["socket", "user"] }
 
 # Opening a script with its session: only with `opened`.
 [[test]]
@@ -48,6 +57,14 @@ required-features = ["opened"]
 [[test]]
 name = "end_to_end"
 required-features = ["opened"]
+
+[[test]]
+name = "ops"
+required-features = ["opened"]
+
+[[test]]
+name = "link"
+required-features = ["link"]
 
 [lints]
 workspace = true

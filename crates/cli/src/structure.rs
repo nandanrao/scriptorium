@@ -187,16 +187,8 @@ pub fn guess_block(text: &str) -> Vec<(ElementKind, String)> {
     paste::classify(text).into_iter().map(|p| (p.kind, scriptorium_core::spans::text(&p.spans))).collect()
 }
 
-/// Refuse text that can't be one paragraph: a line break (`\r` counts like
-/// `\n`) or a character Final Draft's XML can't hold (control characters
-/// other than tab, U+FFFE, U+FFFF).
-pub fn check_text(text: &str) -> Result<(), String> {
-    match text.chars().find(|&c| scriptorium_fdx::is_unwritable(c)) {
-        None => Ok(()),
-        Some('\n' | '\r') => Err("one paragraph at a time: the text can't contain newlines".into()),
-        Some(c) => Err(format!("the text can't contain the control character U+{:04X}", c as u32)),
-    }
-}
+/// Refuse text that can't be one paragraph (moved to fsio, which `edit_paragraph` shares).
+pub use scriptorium_fsio::ops::check_text;
 
 /// Remove the paragraphs from `first` to `last` inclusive, in script order
 /// (not by number). `last` before `first` is refused.

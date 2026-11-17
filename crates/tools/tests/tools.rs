@@ -6,7 +6,7 @@ use scriptorium_fdx::FdxFile;
 use scriptorium_review::{Decision, Line, Review, Session};
 use scriptorium_tools::prompt::{SYSTEM, system, unknown_tools};
 use scriptorium_tools::{
-    Append, Applied, Ctx, Failed, HostField, MAX_BATCH, Outcome, Proposal, Target, ToolError, add_before,
+    Append, Applied, Ctx, Failed, HostField, MAX_BATCH, Offer, Outcome, Proposal, Target, ToolError, add_before,
     add_host_fields, apply, call, catalogue, check_args, find_review, item_numbered, item_numbers, may_append,
     script_size, writes,
 };
@@ -170,7 +170,7 @@ impl Fixture {
 
 #[test]
 fn catalogue_lists_every_tool_with_base_schemas() {
-    let specs = catalogue();
+    let specs = catalogue(Offer::Chat);
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
@@ -656,7 +656,7 @@ fn apply_refuses_empty_proposals() {
 
 #[test]
 fn add_before_relaxes_the_suggest_change_schema() {
-    let mut spec = catalogue().into_iter().find(|s| s.name == "suggest_change").unwrap();
+    let mut spec = catalogue(Offer::Chat).into_iter().find(|s| s.name == "suggest_change").unwrap();
     assert_eq!(spec.schema["required"], json!(["options"]), "the tool checks there is exactly one target");
     add_before(&mut spec);
     assert_eq!(spec.schema["required"], json!(["options"]));
@@ -1029,7 +1029,7 @@ fn find_review_compares_stored_paths_not_file_names() {
 
 #[test]
 fn add_host_fields_adds_script_everywhere_and_review_file_to_suggest_tools() {
-    let mut specs = catalogue();
+    let mut specs = catalogue(Offer::Chat);
     for spec in &mut specs {
         add_host_fields(spec, &[HostField::Script, HostField::ReviewFile]);
         add_host_fields(spec, &[HostField::Script]);
@@ -1050,7 +1050,7 @@ fn add_host_fields_adds_script_everywhere_and_review_file_to_suggest_tools() {
 
 #[test]
 fn the_system_prompt_names_only_tools_in_the_catalogue() {
-    assert_eq!(unknown_tools(SYSTEM, &catalogue()), Vec::<String>::new());
+    assert_eq!(unknown_tools(SYSTEM, &catalogue(Offer::Chat)), Vec::<String>::new());
     for tool in ["read_scene", "read_script", "list_paragraphs", "suggest_change", "suggest_changes"] {
         assert!(SYSTEM.contains(tool), "{tool}");
     }
@@ -1059,7 +1059,7 @@ fn the_system_prompt_names_only_tools_in_the_catalogue() {
     // Sent with every request: keep it tight (about four characters a token).
     assert!(SYSTEM.len() < 4500, "the system prompt grew to {} bytes", SYSTEM.len());
     // It does notice a tool that isn't there.
-    let tools: Vec<_> = catalogue().into_iter().filter(|t| t.name == "suggest_change").collect();
+    let tools: Vec<_> = catalogue(Offer::Chat).into_iter().filter(|t| t.name == "suggest_change").collect();
     let prompt = "Use read_scene, then suggest_change. Not_a_tool or snake_ alone don't count.";
     assert_eq!(unknown_tools(prompt, &tools), ["read_scene"]);
     assert_eq!(unknown_tools(prompt, &[]), ["read_scene", "suggest_change"]);
@@ -1083,7 +1083,7 @@ const READS: &[&str] = &[
 #[test]
 fn every_tool_that_can_append_is_in_may_append() {
     let f = Fixture::new();
-    for spec in catalogue() {
+    for spec in catalogue(Offer::Chat) {
         let name = spec.name.as_str();
         assert!(READS.contains(&name) != writes(name), "{name}: sort it into READS or writes");
         assert!(!may_append(name) || writes(name), "{name}");
@@ -1110,7 +1110,7 @@ fn every_tool_that_can_append_is_in_may_append() {
 
 #[test]
 fn check_args_refuses_arguments_not_offered() {
-    let specs = catalogue();
+    let specs = catalogue(Offer::Chat);
     let get = |name: &str| specs.iter().find(|s| s.name == name).unwrap();
     let ok = |name: &str, args: serde_json::Value| check_args(get(name), &args);
     assert_eq!(ok("suggest_change", json!({ "paragraph_id": 1, "options": ["x"], "why": "y" })), Ok(()));

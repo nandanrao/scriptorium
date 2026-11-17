@@ -6,12 +6,13 @@ use std::time::Duration;
 
 use scriptorium_core::{Document, ElementKind};
 use scriptorium_fsio::opened::{Opened, file_name};
+use scriptorium_fsio::ops::{self, Choice, SuggestionRef};
 use scriptorium_fsio::versions::{Made, NewVersion};
 use scriptorium_fsio::{LockError, SessionLock};
 use scriptorium_review::{RowResolver, Session};
 use scriptorium_versions::PairView;
 
-use super::{ReviewError, ReviewStore, Script, create_new};
+use super::{ReviewError, ReviewStore, Script, create_new, resolve_in};
 
 /// Opens a script from its files for each tool call.
 #[derive(Debug)]
@@ -51,19 +52,7 @@ impl Script for FileScript {
     }
 
     fn open(&mut self, writes: bool) -> Result<Box<dyn ReviewStore + '_>, ReviewError> {
-        let lock = if writes {
-            match SessionLock::acquire(&SessionLock::path_for(&self.canonical), self.lock_wait) {
-                Ok(l) => Some(l),
-                Err(LockError::Busy) => return Err(ReviewError::Busy),
-                Err(e @ LockError::NoLocks) => {
-                    note(&mut self.notes, e.to_string());
-                    None
-                }
-                Err(e) => return Err(ReviewError::Failed(e.to_string())),
-            }
-        } else {
-            None
-        };
+        let lock = if writes { self.lock()? } else { None };
         let mut more = vec![];
         let o = if writes {
             Opened::open(&self.script, &[], &mut more)
@@ -75,11 +64,41 @@ impl Script for FileScript {
         let caps = caps(&o);
         Ok(Box::new(FileStore { o, caps, writes, script: &self.script, notes: &mut self.notes, _lock: lock }))
     }
+
+    /// Straight on the session file, under the lock, without opening the
+    /// script ([`ops::detach`]): a session that can't be replayed can still
+    /// lose a review, as with `reviews remove`.
+    fn detach(&mut self, files: &[String]) -> Result<String, ReviewError> {
+        let _lock = self.lock()?;
+        let dir = self.canonical.parent().unwrap_or(Path::new("")).to_path_buf();
+        let files: Vec<String> = files.iter().map(|f| resolve_in(&dir, f)).collect();
+        let files: Vec<&str> = files.iter().map(String::as_str).collect();
+        ops::detach(&self.script, &files).map_err(ReviewError::Failed)
+    }
+}
+
+impl FileScript {
+    /// The session lock, waited for up to the lock wait; `None` (and a
+    /// note) where the disk has no file locks.
+    fn lock(&mut self) -> Result<Option<SessionLock>, ReviewError> {
+        match SessionLock::acquire(&SessionLock::path_for(&self.canonical), self.lock_wait) {
+            Ok(l) => Ok(Some(l)),
+            Err(LockError::Busy) => Err(ReviewError::Busy),
+            Err(e @ LockError::NoLocks) => {
+                note(&mut self.notes, e.to_string());
+                Ok(None)
+            }
+            Err(e) => Err(ReviewError::Failed(e.to_string())),
+        }
+    }
 }
 
 /// The `new_version` tool result for what `version_new` made or found: the
-/// same text from every store (the CLI's and the app's).
-pub fn new_version_result(made: &NewVersion) -> String {
+/// same text from every store (the CLI's and the app's). `switch`: the
+/// caller is an outside agent, which names the script in each call and goes
+/// on with the version's path
+/// ([`scriptorium_tools::new_version_message`]).
+pub fn new_version_result(made: &NewVersion, switch: bool) -> String {
     // No counts for a version made before: its links file's stamps don't
     // give them as they are now.
     let (version, links) = (file_name(&made.version), file_name(&made.links));
@@ -88,7 +107,7 @@ pub fn new_version_result(made: &NewVersion) -> String {
         Made::Refound(msgs) => scriptorium_tools::already_made(&version, &links, msgs),
         Made::New | Made::Adopted => made.summary().lines().next().unwrap_or_default().to_string(),
     };
-    scriptorium_tools::new_version_message(&first, &made.version.display().to_string(), false)
+    scriptorium_tools::new_version_message(&first, &made.version.display().to_string(), switch)
 }
 
 fn note(notes: &mut Vec<String>, n: String) {
@@ -115,10 +134,12 @@ pub struct FileStore<'a> {
 }
 
 impl FileStore<'_> {
+    fn writable(&self) -> Result<(), ReviewError> {
+        if self.writes { Ok(()) } else { Err(ReviewError::Failed("opened for reading only".into())) }
+    }
+
     fn reopen(&mut self, extra: &[&str]) -> Result<(), ReviewError> {
-        if !self.writes {
-            return Err(ReviewError::Failed("opened for reading only".into()));
-        }
+        self.writable()?;
         let mut more = vec![];
         self.o = Opened::open(self.script, extra, &mut more).map_err(ReviewError::Failed)?;
         more.into_iter().for_each(|n| note(self.notes, n));
@@ -159,7 +180,7 @@ impl ReviewStore for FileStore<'_> {
         self.reopen(&[])
     }
 
-    fn new_version(&mut self, language: &str, original_language: &str) -> Result<String, ReviewError> {
+    fn new_version(&mut self, language: &str, original_language: &str, switch: bool) -> Result<String, ReviewError> {
         if !self.writes {
             return Err(ReviewError::Failed("opened for reading only".into()));
         }
@@ -172,7 +193,7 @@ impl ReviewStore for FileStore<'_> {
             &mut more,
         );
         more.into_iter().for_each(|n| note(self.notes, n));
-        Ok(new_version_result(&made.map_err(ReviewError::Failed)?))
+        Ok(new_version_result(&made.map_err(ReviewError::Failed)?, switch))
     }
 
     fn may_be_version(&self) -> bool {
@@ -200,5 +221,51 @@ impl ReviewStore for FileStore<'_> {
         let path = self.o.review_path(r);
         self.o.write_review(&path, &text).map_err(ReviewError::Failed)?;
         self.o.save().map_err(ReviewError::Failed)
+    }
+
+    fn attach_reviews(&mut self, files: &[PathBuf]) -> Result<String, ReviewError> {
+        let files: Vec<&str> = files
+            .iter()
+            .map(|p| p.to_str().ok_or_else(|| ReviewError::Failed(format!("{}: not a UTF-8 path", p.display()))))
+            .collect::<Result<_, _>>()?;
+        self.reopen(&files)?;
+        ops::attach(&mut self.o, self.script).map_err(ReviewError::Failed)
+    }
+
+    fn detach(&mut self, files: &[String]) -> Result<String, ReviewError> {
+        self.writable()?;
+        let files: Vec<&str> = files.iter().map(String::as_str).collect();
+        ops::detach(self.script, &files).map_err(ReviewError::Failed)
+    }
+
+    /// The review picked as the CLI's `decide` picks it for an agent
+    /// ([`Opened::open_one`], never from the current folder), the script
+    /// opened again with it.
+    fn decide(&mut self, review: Option<&str>, n: SuggestionRef, choice: Choice) -> Result<String, ReviewError> {
+        self.writable()?;
+        let mut more = vec![];
+        let (o, r) = Opened::open_one(self.script, None, review, false, &mut more).map_err(ReviewError::Failed)?;
+        more.into_iter().for_each(|n| note(self.notes, n));
+        self.o = o;
+        self.caps = caps(&self.o);
+        ops::decide(&mut self.o, r, n, choice).map_err(ReviewError::Failed)
+    }
+
+    fn edit(&mut self, para: u64, text: &str) -> Result<String, ReviewError> {
+        self.writable()?;
+        ops::edit(&mut self.o, para, text).map_err(ReviewError::Failed)
+    }
+
+    fn undo_redo(&mut self, redo: bool) -> Result<String, ReviewError> {
+        self.writable()?;
+        ops::undo_redo(&mut self.o, redo).map_err(ReviewError::Failed)
+    }
+
+    /// Only where an agent may write ([`ops::agent_output`]), then
+    /// [`ops::write`].
+    fn write_script(&mut self, output: Option<&str>) -> Result<String, ReviewError> {
+        self.writable()?;
+        let out = ops::agent_output(&self.o, self.script, output).map_err(ReviewError::Failed)?;
+        ops::write(&mut self.o, self.script, false, Some(&out)).map_err(ReviewError::Failed)
     }
 }
