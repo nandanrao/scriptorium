@@ -28,6 +28,7 @@ use scriptorium_core::doc::Event;
 use scriptorium_core::outline::{ParaContext, annotate};
 use scriptorium_core::{Document, ElementKind, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
+use scriptorium_fsio::versions::{self, PairState};
 use scriptorium_review::sessionfile::{self, Change, Disk, Resumed, Seen, SessionFile};
 use scriptorium_review::{Decision, LineChange, Refusal, Review, Session, Status};
 use scriptorium_tools::item_numbers;
@@ -79,6 +80,9 @@ pub struct Opened {
     raw: String,
     fdx: FdxFile,
     opened: sessionfile::ResumedSession,
+    /// The script's pair of versions, loaded (re-found first) before the
+    /// session was resumed.
+    pair: PairState,
     session_path: PathBuf,
     /// The script's folder, canonical: review paths are stored relative to it.
     dir: PathBuf,
@@ -104,8 +108,8 @@ impl Opened {
             .map_err(|e| format!("{}: {}", file_name(&script_path), capitalize(&e.to_string())))?;
         let dir = script_path.parent().map(Path::to_path_buf).unwrap_or_default();
         let session_path = dir.join(sessionfile::file_name_for(&file_name(&script_path)));
-        let (mut opened, mut seen, mut notices) =
-            resume_from_disk(&script_path, &raw, &fdx, &session_path, review_paths);
+        let (mut opened, pair, mut seen, mut notices) =
+            resume_from_disk(&script_path, &fdx, &session_path, review_paths);
         let listed: Vec<String> = match &opened.how {
             Resumed::Resumed { .. } => std::fs::read_to_string(&session_path)
                 .ok()
@@ -138,22 +142,25 @@ impl Opened {
             }
         }
         notices.append(&mut opened.notes);
-        Ok(Self { script_path, raw, fdx, opened, session_path, dir, seen, unsynced, notices })
+        Ok(Self { script_path, raw, fdx, opened, pair, session_path, dir, seen, unsynced, notices })
     }
 }
 
 /// Resume the session saved next to the script with the review files it
 /// attaches plus `review_paths` (as opening does, and again when another
-/// program changed the files). Writes nothing. Returns the resumed session
-/// (its `notes` not yet shown), the session file as read, and notices about
-/// review files.
+/// program changed the files), through the one open path every host uses
+/// (`scriptorium_fsio::versions::resume`): the script's pair is loaded
+/// first, re-found if a member changed (the links file is the only thing
+/// written, under the links lock, released before this returns), and `ROW:`
+/// suggestions are placed through its resolver. Returns the resumed session
+/// (its `notes` not yet shown), the pair, the session file as read, and
+/// notices about review files and the pair.
 fn resume_from_disk(
     script_path: &Path,
-    raw: &str,
     fdx: &FdxFile,
     session_path: &Path,
     review_paths: &[PathBuf],
-) -> (sessionfile::ResumedSession, Seen, Vec<String>) {
+) -> (sessionfile::ResumedSession, PairState, Seen, Vec<String>) {
     let dir = script_path.parent().map(Path::to_path_buf).unwrap_or_default();
     let script_name = file_name(script_path);
     // The time first: a write between the two shows as a newer time later.
@@ -186,16 +193,11 @@ fn resume_from_disk(
             Err(e) => notices.push(format!("{e}. It was taken off this script's reviews.")),
         }
     }
-    let caps = |k: &scriptorium_core::ElementKind| fdx.is_caps(k.name());
-    // Always checked: reader 1 also misnumbered files without DualDialogue
-    // (nested paragraphs in scene summaries and arc beats), and it's cheap.
-    let reader_1 = Some(fdx.legacy_script());
-    let opened =
-        sessionfile::resume(sources, fdx.to_script(), reader_1.as_ref(), raw, saved.as_deref(), &caps, &script_name);
+    let (opened, pair) = versions::resume(fdx, &dir, &script_name, sources, saved.as_deref(), &mut notices);
     for r in 0..opened.session.reviews.len() {
         notices.append(&mut review_notes(&opened.session, r));
     }
-    (opened, seen, notices)
+    (opened, pair, seen, notices)
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -337,6 +339,9 @@ pub struct ScriptView {
     dir: PathBuf,
     raw: Rc<str>,
     fdx: Rc<FdxFile>,
+    /// The script's pair of versions as last loaded: its resolver places
+    /// `ROW:` suggestions whenever a review is opened here.
+    pair: Rc<PairState>,
     session_path: PathBuf,
     originals: Rc<HashMap<ParaId, Paragraph>>,
     /// Scene and speaker per paragraph position, for the live document as of
@@ -446,7 +451,7 @@ const WATCH_EVERY: Duration = Duration::from_millis(1000);
 
 impl ScriptView {
     pub fn new(opened: Opened, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Opened { script_path, raw, fdx, opened, session_path, dir, seen, unsynced, notices } = opened;
+        let Opened { script_path, raw, fdx, opened, pair, session_path, dir, seen, unsynced, notices } = opened;
         let sessionfile::ResumedSession { session, doc, base, .. } = opened;
         let synced = doc.log().len();
         let originals: HashMap<ParaId, Paragraph> = fdx.to_script().paragraphs.into_iter().map(|p| (p.id, p)).collect();
@@ -470,6 +475,7 @@ impl ScriptView {
             dir,
             raw: raw.into(),
             fdx: Rc::new(fdx),
+            pair: Rc::new(pair),
             session_path,
             originals: Rc::new(originals),
             ctx: Rc::default(),
@@ -701,6 +707,7 @@ impl ScriptView {
     ) -> Result<usize, String> {
         let source = read_review(p, &self.dir)?;
         let fdx = &self.fdx;
+        let rows = self.pair.resolver(fdx, self.doc(cx));
         let review = Review::open_live(
             source.name,
             &source.text,
@@ -708,6 +715,7 @@ impl ScriptView {
             self.doc(cx),
             |k| fdx.is_caps(k.name()),
             &file_name(&self.script_path),
+            rows.as_deref(),
         )
         .with_path(source.path);
         let restored = review.restored();
@@ -1324,7 +1332,7 @@ impl ScriptView {
     /// written aside. Call it holding the session lock (it writes the merge).
     fn reload(&mut self, cx: &mut Context<Self>) {
         let old_doc = self.doc(cx).clone();
-        let (opened, seen, notes) = resume_from_disk(&self.script_path, &self.raw, &self.fdx, &self.session_path, &[]);
+        let (opened, pair, seen, notes) = resume_from_disk(&self.script_path, &self.fdx, &self.session_path, &[]);
         if let Resumed::Discarded(why) = &opened.how {
             if self.stuck.is_none() {
                 crate::log::warn(&format!(
@@ -1379,6 +1387,10 @@ impl ScriptView {
         // other review the session file no longer lists was detached there.
         let script = self.fdx.to_script();
         let script_name = file_name(&self.script_path);
+        // The pair as loaded with this session: reviews reopened here place
+        // `ROW:` suggestions (an agent may just have appended some) too.
+        self.pair = Rc::new(pair);
+        let rows = self.pair.resolver(&self.fdx, &replayed.doc);
         let mut still = vec![];
         for p in std::mem::take(&mut self.attached_since_sync) {
             match read_review(&p, &self.dir) {
@@ -1391,6 +1403,7 @@ impl ScriptView {
                         &replayed.doc,
                         |k| fdx.is_caps(k.name()),
                         &script_name,
+                        rows.as_deref(),
                     )
                     .with_path(src.path);
                     // Already attached by the other program: nothing to keep.
@@ -1710,6 +1723,13 @@ impl ScriptView {
     /// The script as it is now (the editor's document).
     pub(crate) fn live_doc<'a>(&self, cx: &'a App) -> &'a Document {
         self.doc(cx)
+    }
+
+    /// The resolver placing `ROW:` suggestions on the live document, from
+    /// the pair loaded with the session (`None` without one, or on the
+    /// original).
+    pub(crate) fn row_resolver(&self, cx: &App) -> Option<Box<scriptorium_review::RowResolver<'static>>> {
+        self.pair.resolver(&self.fdx, self.doc(cx))
     }
 
     pub(crate) fn session(&self) -> &Session {
@@ -3421,5 +3441,69 @@ mod tests {
         let session = Session::new(vec![a, b]);
         let notes = review_notes(&session, 1);
         assert_eq!(notes, ["b.review: a suggestion's lines cut by a.review."], "{notes:?}");
+    }
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+
+    const SCRIPT: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<FinalDraft DocumentType="Script" Template="No" Version="5">
+  <Content>
+    <Paragraph Type="Scene Heading">
+      <Text>EXT. FARM HOUSE - NIGHT</Text>
+    </Paragraph>
+    <Paragraph Type="Character">
+      <Text>CESAR</Text>
+    </Paragraph>
+    <Paragraph Type="Dialogue">
+      <Text>I am going to town tomorrow.</Text>
+    </Paragraph>
+  </Content>
+</FinalDraft>
+"#;
+
+    /// Opening and every reload go through `resume_from_disk`: a `ROW:`
+    /// suggestion an agent appended to an attached review is placed on its
+    /// row when the session is read again.
+    #[test]
+    fn a_review_reloaded_after_an_agent_append_places_row_suggestions() {
+        let dir = std::env::temp_dir().join(format!("scriptorium-app-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        std::fs::write(dir.join("film.fdx"), SCRIPT).unwrap();
+        scriptorium_fsio::versions::version_new(&dir.join("film.fdx"), "es", Some("en"), None, &mut vec![]).unwrap();
+        let links = std::fs::read_to_string(dir.join("film.es.links.txt")).unwrap();
+        let id = links.lines().find_map(|l| l.strip_prefix("Id: ")).unwrap().to_string();
+
+        let es = dir.join("film.es.fdx");
+        let fdx = FdxFile::parse(std::fs::read_to_string(&es).unwrap()).unwrap();
+        let session_path = dir.join(sessionfile::file_name_for("film.es.fdx"));
+        let review = dir.join("tr.review.txt");
+        std::fs::write(&review, "SCRIPT REVIEW v1\nScript: film.es.fdx\nId: tr-1\n").unwrap();
+        // Opened with the (empty) review attached, and saved.
+        let (opened, pair, _, _) = resume_from_disk(&es, &fdx, &session_path, std::slice::from_ref(&review));
+        assert!(pair.is_made(), "{pair:?}");
+        let json = SessionFile::new(fdx.raw(), opened.session.attached(), &opened.base, opened.doc.log()).to_json();
+        std::fs::write(&session_path, json).unwrap();
+
+        // An agent appends a suggestion for the blank dialogue's row.
+        let mut text = std::fs::read_to_string(&review).unwrap();
+        text.push_str(&format!(
+            "\n---\nBEFORE: [empty]\nAFTER: Mañana voy al pueblo.\nWHY:\nROW: {id}\nROW TEXT: I am going to town \
+             tomorrow.\n"
+        ));
+        std::fs::write(&review, text).unwrap();
+
+        // Read again, as the watch tick's reload does.
+        let (opened, _, _, notices) = resume_from_disk(&es, &fdx, &session_path, &[]);
+        let r = &opened.session.reviews[0];
+        assert!(r.unmatched.is_empty(), "{:?} {notices:?}", r.unmatched);
+        assert_eq!(r.items.len(), 1);
+        let dialogue = opened.doc.paragraphs().iter().find(|p| p.kind == ElementKind::Dialogue).unwrap().id;
+        assert_eq!(r.items[0].para, dialogue);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

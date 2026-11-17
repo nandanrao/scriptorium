@@ -11,8 +11,8 @@
 //! **Rows.** An entry with `ROW:` (a suggestion for a row of a pair of
 //! versions) is never matched by `PARA:` or `BEFORE`: only a [`RowResolver`]
 //! the host gives places it, through
-//! [`crate::Review::open_live_with_rows`] and
-//! [`crate::Session::append_entries_with_rows`]. [`match_live`] and
+//! [`crate::Review::open_live`] and
+//! [`crate::Session::append_entries`]. [`match_live`] and
 //! [`match_para`] leave such entries unmatched.
 
 use std::collections::{HashMap, HashSet};

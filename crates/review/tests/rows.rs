@@ -111,12 +111,12 @@ fn file(blocks: &[&str]) -> String {
 
 fn open(text: &str, doc: &Document) -> Review {
     let r = fake(doc);
-    Review::open_live_with_rows("t.review.txt", text, &version(&[]), doc, caps, "", Some(&*r))
+    Review::open_live("t.review.txt", text, &version(&[]), doc, caps, "", Some(&*r))
 }
 
 fn resume(script: Script, text: &str, saved: Option<&str>) -> ResumedSession {
     let factory: &RowResolverFactory = &|doc: &Document| fake(doc);
-    sessionfile::resume_with_rows(
+    sessionfile::resume(
         vec![ReviewSource { name: "t.review.txt".into(), path: "t.review.txt".into(), text: text.into() }],
         script,
         None,
@@ -184,7 +184,7 @@ fn not_found_says_why() {
     assert_eq!(session.unplaced_label(&Unplaced::NoRow(CHANGED.into())), CHANGED);
 
     // Without a resolver (existing callers), ROW entries aren't placed at all.
-    let r = Review::open_live("t.review.txt", &text, &version(&[]), &doc, caps, "");
+    let r = Review::open_live("t.review.txt", &text, &version(&[]), &doc, caps, "", None);
     assert!(r.items.is_empty());
     assert!(r.unmatched.iter().all(|u| u.why == Some(Unplaced::NoRow(NO_LINKS.into()))));
 }
@@ -301,10 +301,10 @@ fn appending_places_by_row_and_allows_a_blank_before() {
         row_entry("Not a line of the original.", &["Algo."]),
     ];
     // Without a resolver, a blank BEFORE is refused as before.
-    assert!(session.clone().append_entries(&doc, 0, entries.clone(), true, caps).is_err());
+    assert!(session.clone().append_entries(&doc, 0, entries.clone(), true, caps, None).is_err());
 
     let rows = fake(&doc);
-    let done = session.append_entries_with_rows(&doc, 0, entries, true, caps, Some(&*rows)).unwrap();
+    let done = session.append_entries(&doc, 0, entries, true, caps, Some(&*rows)).unwrap();
     assert_eq!(done.results[0].item, Some(0));
     assert!(matches!(done.results[1].unplaced, Some(Unplaced::Taken { entry: 0, .. })));
     assert_eq!(done.results[2].unplaced, Some(Unplaced::NoRow(CHANGED.into())));
@@ -344,7 +344,7 @@ fn fixed(cells: &[&[u64]]) -> Box<RowResolver<'static>> {
 }
 
 fn open_with(text: &str, doc: &Document, rows: &RowResolver) -> Review {
-    Review::open_live_with_rows("t.review.txt", text, &version(&[]), doc, caps, "", Some(rows))
+    Review::open_live("t.review.txt", text, &version(&[]), doc, caps, "", Some(rows))
 }
 
 #[test]

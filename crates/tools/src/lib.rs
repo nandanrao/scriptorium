@@ -18,6 +18,7 @@ mod catalogue;
 pub mod prompt;
 mod read;
 mod reviews;
+mod rows;
 mod suggest;
 
 use std::fmt;
@@ -33,6 +34,7 @@ pub use catalogue::{
 };
 pub use read::{MIN_READ_BUDGET, NOT_EDITABLE, READ_BUDGET, script_size};
 pub use reviews::{SuggestionRow, find_review, item_numbered, item_numbers, suggestion_rows};
+pub use rows::{LinksCtx, ParaView, RowView, SuggestionView};
 pub use suggest::apply;
 
 /// What a tool call can see.

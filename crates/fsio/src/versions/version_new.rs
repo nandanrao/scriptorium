@@ -25,14 +25,14 @@ use std::path::{Path, PathBuf};
 use scriptorium_core::ElementKind;
 use scriptorium_fdx::FdxFile;
 use scriptorium_review::sessionfile;
+use scriptorium_versions::blank_copy;
 use scriptorium_versions::links::{self, Links, Member};
-use scriptorium_versions::{blank_copy, refind};
 
-use super::pair::{missing, thousands};
-use super::{names, refind_message};
+use super::names;
+use super::pair::{PairState, lock_links, missing, refind_locked, thousands};
 
 use crate::opened::Opened;
-use crate::{LOCK_WAIT, LockError, SessionLock, write_atomic_no_link};
+use crate::write_atomic_no_link;
 
 /// What [`version_new`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,23 +108,6 @@ pub fn links_name(version_name: &str) -> String {
     format!("{stem}.links.txt")
 }
 
-/// The links file's lock, `<links stem>.lock` (`PURPLE LIST.es.links.lock`
-/// for `PURPLE LIST.es.links.txt`): held from reading the links file to
-/// writing it, after any script lock (plan, "Locking"). On a file system
-/// without locks: `None`, with a note.
-pub fn lock_links(links: &Path, notes: &mut Vec<String>) -> Result<Option<SessionLock>, String> {
-    let name = crate::opened::file_name(links);
-    let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
-    match SessionLock::acquire(&links.with_file_name(format!("{stem}.lock")), LOCK_WAIT) {
-        Ok(l) => Ok(Some(l)),
-        Err(e @ LockError::NoLocks) => {
-            notes.push(e.to_string());
-            Ok(None)
-        }
-        Err(e) => Err(e.to_string()),
-    }
-}
-
 /// Check `version new`'s arguments before anything is written (a host
 /// calls it before taking the script's lock): the codes, the version's name
 /// (default [`default_version_name`]) and the script's own file name, which
@@ -188,7 +171,18 @@ pub fn version_new(
     broken_links(&dir, &[&script_name, &version_name])?;
 
     // The original as its file reads (C8), refused with unsaved changes.
-    let o = Opened::open(&script_str, &[], notes)?;
+    // Opening loads its pair, re-finding it under the links lock (taken and
+    // released there; the lock is taken again below, never twice at once).
+    // What that said about this pair is told once, in the result.
+    let mut open_notes = vec![];
+    let o = Opened::open(&script_str, &[], &mut open_notes)?;
+    let ours = o.pair().links_path().is_some_and(|at| crate::same_file(at, &links_path));
+    let at_open: Vec<String> = match o.pair() {
+        PairState::Loaded(p) if ours => p.refound.clone(),
+        PairState::Unusable { reason, .. } if ours => vec![reason.clone()],
+        _ => vec![],
+    };
+    notes.extend(open_notes.into_iter().filter(|n| !at_open.contains(n)));
     let as_file = o.fdx.write_script(o.doc.script()).map_err(|e| format!("{script_name}: {e}"))?;
     if as_file != o.raw {
         return Err(format!(
@@ -200,18 +194,20 @@ pub fn version_new(
 
     // ...and so does another links file lining either up.
     let version_pair = crate::versions::find_pair(&dir, &version_name).pair;
-    for (file, pair) in [(&script_name, o.pair()), (&version_name, version_pair.as_ref())] {
-        if let Some(pair) = pair
-            && !crate::same_file(&pair.links, &links_path)
+    let lined_up =
+        [(&script_name, o.pair().links_path()), (&version_name, version_pair.as_ref().map(|p| p.links.as_path()))];
+    for (file, at) in lined_up {
+        if let Some(at) = at
+            && !crate::same_file(at, &links_path)
         {
             return Err(format!(
                 "{file} is already lined up in {} (one version per script for now)",
-                crate::opened::file_name(&pair.links)
+                crate::opened::file_name(at)
             ));
         }
     }
 
-    let _links_lock = lock_links(&links_path, notes)?;
+    let guard = lock_links(&links_path, notes)?;
     let links_there = links_path.exists();
     let version_there = version_path.exists();
 
@@ -228,14 +224,12 @@ pub fn version_new(
                 crate::opened::file_name(&links_path)
             ));
         }
-        let (pair, msgs) = refind_members(pair, &dir, &o.fdx, &is_caps)?;
-        let made = if msgs.is_empty() {
-            Made::Already
-        } else {
-            write_links(&links_path, &pair)?;
-            Made::Refound(msgs)
-        };
-        return Ok(result(version_path, links_path, made, &pair));
+        // Usually found again when the original was opened above; whatever
+        // changed since is found here, through the one re-find.
+        let found = refind_locked(&guard, &dir, pair, &text, 0, &script, &o.fdx)?;
+        let msgs: Vec<String> = at_open.into_iter().chain(found.msgs).collect();
+        let made = if msgs.is_empty() { Made::Already } else { Made::Refound(msgs) };
+        return Ok(result(version_path, links_path, made, &found.links));
     }
 
     let (bytes, pair) = make(&o.fdx, &script_name, &version_name, lang, from, &links_path, &is_caps)?;
@@ -363,41 +357,6 @@ fn parse_ours(text: &str, at: &Path, script_name: &str, version_name: &str) -> R
         ));
     }
     Ok(pair)
-}
-
-/// Re-find each member whose file isn't the bytes `pair` describes. The
-/// original's file is `original` (read once, under its session lock); the
-/// version is read here, and read again just before the caller writes, so a
-/// save in between starts it over (a few times, then gives up).
-fn refind_members(
-    mut pair: Links,
-    dir: &Path,
-    original: &FdxFile,
-    is_caps: &dyn Fn(&ElementKind) -> bool,
-) -> Result<(Links, Vec<String>), String> {
-    let mut msgs = vec![];
-    let hash = sessionfile::hash(original.raw());
-    if pair.members[0].hash != hash {
-        let (refound, found) = refind(&pair, 0, &original.to_script(), &hash, is_caps);
-        msgs.push(refind_message(&pair.members[0].file, &found));
-        pair = refound;
-    }
-    let at = dir.join(&pair.members[1].file);
-    for _ in 0..5 {
-        let raw = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        let hash = sessionfile::hash(&raw);
-        if pair.members[1].hash == hash {
-            return Ok((pair, msgs));
-        }
-        let fdx = FdxFile::parse(raw).map_err(|e| format!("{}: {e}", at.display()))?;
-        let (refound, found) = refind(&pair, 1, &fdx.to_script(), &hash, &|k: &ElementKind| fdx.is_caps(k.name()));
-        let again = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        if sessionfile::hash(&again) == hash {
-            msgs.push(refind_message(&pair.members[1].file, &found));
-            return Ok((refound, msgs));
-        }
-    }
-    Err(format!("{} keeps changing; try again when it's saved", at.display()))
 }
 
 fn write_links(at: &Path, pair: &Links) -> Result<(), String> {

@@ -127,7 +127,7 @@ impl Fixture {
 
     fn try_apply(&mut self, r: usize, a: Append) -> Result<Applied, ToolError> {
         let fdx = &self.fdx;
-        apply(&mut self.session, &self.doc, r, a, &|k: &ElementKind| fdx.is_caps(k.name()))
+        apply(&mut self.session, &self.doc, r, a, &|k: &ElementKind| fdx.is_caps(k.name()), None)
     }
 
     fn apply(&mut self, r: usize, a: Append) -> Applied {
@@ -146,6 +146,7 @@ impl Fixture {
             &self.doc,
             |k| fdx.is_caps(k.name()),
             "film.fdx",
+            None,
         )
         .with_path("thread.review.txt");
         self.session.add(review).unwrap()
@@ -955,7 +956,7 @@ fn an_invisible_entry_that_was_written_is_reported_ok_so_the_host_saves_it() {
         asked.set(asked.get() + 1);
         asked.get() > 1 && *k == ElementKind::Character
     };
-    let applied = apply(&mut f.session, &f.doc, r, a, &is_caps).unwrap();
+    let applied = apply(&mut f.session, &f.doc, r, a, &is_caps, None).unwrap();
     assert_eq!(
         applied.message,
         "written to thread.review.txt as e0, but it changes nothing visible on ¶3, so it isn't shown"

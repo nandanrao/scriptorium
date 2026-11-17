@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use gpui::Context;
 use scriptorium_chat::exec::{ReviewError, ReviewStore, Script, create_new};
 use scriptorium_core::{Document, ElementKind, ParaId};
-use scriptorium_review::Session;
+use scriptorium_review::{RowResolver, Session};
 
 use crate::script_view::{LiveError, ScriptView, SessionLease};
 
@@ -125,6 +125,9 @@ impl ReviewStore for LiveStore<'_, '_> {
     }
     fn editing_paras(&self) -> Vec<ParaId> {
         self.view.editing_paras(self.cx)
+    }
+    fn row_resolver(&self) -> Option<Box<RowResolver<'static>>> {
+        self.view.row_resolver(self.cx)
     }
 
     fn reload(&mut self) -> Result<(), ReviewError> {

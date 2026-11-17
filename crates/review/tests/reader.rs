@@ -40,6 +40,7 @@ fn resume(f: &FdxFile, saved: Option<&str>) -> sessionfile::ResumedSession {
         saved,
         &|k| f.is_caps(k.name()),
         "s.fdx",
+        None,
     )
 }
 

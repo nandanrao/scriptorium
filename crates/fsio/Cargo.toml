@@ -32,5 +32,9 @@ required-features = ["opened"]
 name = "version_new"
 required-features = ["opened"]
 
+[[test]]
+name = "rows_open"
+required-features = ["opened"]
+
 [lints]
 workspace = true

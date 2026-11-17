@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use scriptorium_core::doc::Event;
 use scriptorium_core::{Document, ElementKind, ParaId, Selection};
 use scriptorium_fdx::FdxFile;
-use scriptorium_review::Session;
 use scriptorium_review::sessionfile::{self, Resumed, SessionFile, aside};
+use scriptorium_review::{RowResolver, Session};
 
-use crate::versions::Pair;
+use crate::versions::PairState;
 use crate::{Folders, write_atomic, write_atomic_no_link};
 
 /// A script, its review files and the saved session: the review files
@@ -42,14 +42,13 @@ pub struct Opened {
     /// script and held only decisions the review files have: opened fresh,
     /// and moved to a set-aside file by the first [`Self::save`].
     aside: Option<String>,
-    /// The script's pair, if a links file beside it names it. When this is
-    /// the version Scriptorium made, every [`Self::save`] writes progress
-    /// into the review files ([`crate::versions::write_progress`]), so the
+    /// The script's pair, loaded (re-found first) before the session was
+    /// resumed, so `ROW:` suggestions are placed on the file's ids. When this
+    /// is, or may be, the version Scriptorium made
+    /// ([`PairState::maybe_made`]), every [`Self::save`] writes progress into
+    /// the review files ([`crate::versions::write_progress`]), so the
     /// decisions outlive a Final Draft save of the script (plan C2).
-    pair: Option<Pair>,
-    /// Write progress on save: this is the made version, or may be (a links
-    /// file naming it doesn't parse), see [`crate::versions::Found`].
-    progress: bool,
+    pair: PairState,
 }
 
 impl Opened {
@@ -74,7 +73,6 @@ impl Opened {
         let raw = fdx.raw().to_string();
         let script_name = file_name(Path::new(script));
         let dir = script_dir(script)?;
-        let s = fdx.to_script();
         let session_path = dir.join(sessionfile::file_name_for(&script_name));
         let saved = std::fs::read_to_string(&session_path).ok();
         let attached: Vec<String> = saved
@@ -132,11 +130,9 @@ impl Opened {
             }
             sources.push(sessionfile::ReviewSource { name: stored.clone(), path: stored, text });
         }
-        let caps = |k: &ElementKind| fdx.is_caps(k.name());
-        // Always checked: reader 1 also misnumbered files without DualDialogue
-        // (nested paragraphs in scene summaries and arc beats), and it's cheap.
-        let reader_1 = Some(fdx.legacy_script());
-        let opened = sessionfile::resume(sources, s, reader_1.as_ref(), &raw, saved.as_deref(), &caps, &script_name);
+        // The pair first (re-found if a member changed), then the session,
+        // its `ROW:` suggestions placed through the pair's resolver.
+        let (opened, pair) = crate::versions::resume(&fdx, &dir, &script_name, sources, saved.as_deref(), notes);
         let mut aside = None;
         if let Resumed::Discarded(_) = &opened.how
             && !read_only
@@ -197,12 +193,7 @@ impl Opened {
                 pin.push((at, text));
             }
         }
-        let found = crate::versions::find_pair(&dir, &script_name);
-        if !read_only {
-            notes.extend(found.notes);
-        }
-        let (pair, progress) = (found.pair, found.maybe_made);
-        Ok(Self { fdx, raw, session, doc, base, session_path, dir, script_name, given, pin, aside, pair, progress })
+        Ok(Self { fdx, raw, session, doc, base, session_path, dir, script_name, given, pin, aside, pair })
     }
 
     /// Open, and pick the one review a command works on: the file given
@@ -318,9 +309,15 @@ impl Opened {
         Ok(())
     }
 
-    /// The script's pair, if a links file beside it names it.
-    pub fn pair(&self) -> Option<&Pair> {
-        self.pair.as_ref()
+    /// The script's pair, as opening found it.
+    pub fn pair(&self) -> &PairState {
+        &self.pair
+    }
+
+    /// The resolver for `ROW:` suggestions on the live document, for
+    /// [`Session::append_entries`]: `None` without a pair or on the original.
+    pub fn row_resolver(&self) -> Option<Box<RowResolver<'static>>> {
+        self.pair.resolver(&self.fdx, &self.doc)
     }
 
     /// Save the session (and pin new reviews' ids into their files first).
@@ -360,7 +357,7 @@ impl Opened {
             write_atomic(at, text.as_bytes()).map_err(|e| format!("{}: {e}", at.display()))?;
             self.pin.remove(0);
         }
-        if self.progress {
+        if self.pair.maybe_made() {
             // Notes (files agents can't write) have nowhere to go from here;
             // their decisions stay in the session, and opening after a Final
             // Draft save refuses rather than lose them.

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use scriptorium_core::text::{looks_same, normalize, similarity};
 use scriptorium_core::{Document, ElementKind, ParaId};
 use scriptorium_review::matching::FUZZY_THRESHOLD;
-use scriptorium_review::{Entry, Item, Line, Session, Shape, Unplaced};
+use scriptorium_review::{Entry, Item, Line, RowResolver, Session, Shape, Unplaced};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -339,12 +339,17 @@ fn in_batch(id: u64, k: usize) -> String {
 /// something was written (`file_text` is `Some`), the result is `Ok`, so the
 /// host saves it: a suggestion that turned out to change nothing visible is
 /// written to the file but not shown, and the message says so.
+///
+/// `rows` places `ROW:` suggestions (for rows of a pair of versions): the
+/// host's resolver for `doc` (`Opened::row_resolver` in fsio), `None` when
+/// the script has no pair.
 pub fn apply(
     session: &mut Session,
     doc: &Document,
     r: usize,
     append: Append,
     is_caps: &dyn Fn(&ElementKind) -> bool,
+    rows: Option<&RowResolver>,
 ) -> Result<Applied, ToolError> {
     if r >= session.reviews.len() {
         return Err(ToolError::Invalid(format!("no review {r}")));
@@ -418,7 +423,7 @@ pub fn apply(
     let mut matched = None;
     let mut file_text = None;
     if !entries.is_empty() {
-        let done = session.append_entries(doc, r, entries, true, is_caps).map_err(ToolError::Invalid)?;
+        let done = session.append_entries(doc, r, entries, true, is_caps, rows).map_err(ToolError::Invalid)?;
         // By script position, as `list_suggestions` and `decide` number them.
         let by_position = item_numbers(doc, &session.reviews[r].items);
         for (k, s) in slot.iter().enumerate() {

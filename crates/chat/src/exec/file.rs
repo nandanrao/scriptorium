@@ -7,7 +7,7 @@ use std::time::Duration;
 use scriptorium_core::{Document, ElementKind};
 use scriptorium_fsio::opened::Opened;
 use scriptorium_fsio::{LockError, SessionLock};
-use scriptorium_review::Session;
+use scriptorium_review::{RowResolver, Session};
 
 use super::{ReviewError, ReviewStore, Script, create_new};
 
@@ -129,6 +129,10 @@ impl ReviewStore for FileStore<'_> {
     }
     fn session_mut(&mut self) -> (&mut Session, &Document, &dyn Fn(&ElementKind) -> bool) {
         (&mut self.o.session, &self.o.doc, &*self.caps)
+    }
+
+    fn row_resolver(&self) -> Option<Box<RowResolver<'static>>> {
+        self.o.row_resolver()
     }
 
     fn reload(&mut self) -> Result<(), ReviewError> {

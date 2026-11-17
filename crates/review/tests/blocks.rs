@@ -54,6 +54,7 @@ fn resume_many(texts: &[&str], saved: Option<&str>) -> Opened {
         saved,
         &|k| f.is_caps(k.name()),
         "sample.fdx",
+        None,
     )
 }
 
@@ -269,7 +270,7 @@ fn keep_mine_restores_the_lines_the_suggestion_was_made_on() {
     o.doc.replace_text(s, ParaId(6), "Thank you so much.", &[]).unwrap();
     let text = "Id: c\n---\nPARA: 5, 6\nBEFORE:\n  CHARACTER: LAURA\n  DIALOGUE: Thank you so much.\n\
                 AFTER: [cut]\n";
-    let review = Review::open_live("c", text, &fdx().to_script(), &o.doc, |_| false, "");
+    let review = Review::open_live("c", text, &fdx().to_script(), &o.doc, |_| false, "", None);
     let r = o.session.add(review).unwrap();
     assert_eq!(o.session.reviews[r].items.len(), 1);
     decide(&mut o, r, 0, Decision::Accept(0)).unwrap();
@@ -374,13 +375,13 @@ fn accepted_lines_block_another_entry() {
     decide(&mut o, 0, 0, Decision::Accept(0)).unwrap();
     let new = o.doc.paragraphs()[7].id; // "She waves." (a fresh id)
     let entry = Entry { para: vec![new], ..Entry::single("She waves.", ["She waves slowly."]) };
-    let many = o.session.append_entries(&o.doc, 0, vec![entry.clone()], true, |_| false).unwrap();
+    let many = o.session.append_entries(&o.doc, 0, vec![entry.clone()], true, |_| false, None).unwrap();
     assert!(matches!(many.results[0].unplaced, Some(Unplaced::Taken { entry: 0, .. })), "{:?}", many.results);
     // Reopened, the accepted block reserves its lines before other entries match.
     let back = reopen(&o);
     let mut back = back;
     let doc = back.doc.clone();
-    let many = back.session.append_entries(&doc, 0, vec![entry], true, |_| false).unwrap();
+    let many = back.session.append_entries(&doc, 0, vec![entry], true, |_| false, None).unwrap();
     assert!(matches!(many.results[0].unplaced, Some(Unplaced::Taken { entry: 0, .. })));
 }
 
@@ -401,7 +402,7 @@ fn append_block_entries() {
     };
     let bad = Entry { options: vec![vec![Line::untyped("a"), Line::untyped("b")]], ..entry.clone() };
     let doc = o.doc.clone();
-    let many = o.session.append_entries(&doc, 0, vec![entry.clone(), bad, entry], true, |_| false).unwrap();
+    let many = o.session.append_entries(&doc, 0, vec![entry.clone(), bad, entry], true, |_| false, None).unwrap();
     assert_eq!(many.results[0].entry, Some(0));
     assert!(
         matches!(&many.results[1].unplaced, Some(Unplaced::Invalid(why)) if !why.is_empty()),
@@ -742,6 +743,7 @@ fn resume_fdx(fx: &str, texts: &[&str], saved: Option<&str>) -> Opened {
         saved,
         &|k| f.is_caps(k.name()),
         "x.fdx",
+        None,
     )
 }
 

@@ -290,3 +290,27 @@ fn the_real_script() {
     assert_eq!(f.make().unwrap().made, Made::Already);
     assert_eq!(f.read(&f.script()), raw);
 }
+
+#[test]
+fn a_rerun_finds_again_once_and_says_it_once() {
+    let f = Folder::new("rerun-once");
+    f.make().unwrap();
+    let saved = f.read(&f.version()).replacen(
+        "<Paragraph Type=\"Dialogue\">\n      <Text></Text>",
+        "<Paragraph Type=\"Dialogue\">\n      <Text>Mañana voy al pueblo.</Text>",
+        1,
+    );
+    std::fs::write(f.version(), &saved).unwrap();
+    // Opening the original re-finds (taking and releasing the links lock),
+    // then `version new` takes the lock again: no deadlock, one message,
+    // in the result and not also in the notes.
+    let mut notes = vec![];
+    let v = version_new(&f.script(), "es", Some("en"), None, &mut notes).unwrap();
+    let Made::Refound(msgs) = &v.made else { panic!("{:?}", v.made) };
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(msgs[0].starts_with("film.es.fdx changed outside Scriptorium"), "{msgs:?}");
+    assert!(notes.is_empty(), "{notes:?}");
+    // And nothing still holds the links lock.
+    let lock = f.at("film.es.links.lock");
+    assert!(scriptorium_fsio::SessionLock::acquire(&lock, std::time::Duration::ZERO).is_ok());
+}

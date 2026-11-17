@@ -72,7 +72,7 @@ fn edited() -> Document {
 fn numbers_and_line_changes_are_fast_on_a_long_edited_script() {
     let original = script();
     let doc = edited();
-    let review = Review::open_live("perf.review.txt", &review_text(), &original, &doc, |_| false, "");
+    let review = Review::open_live("perf.review.txt", &review_text(), &original, &doc, |_| false, "", None);
     assert_eq!(review.items.len() as u64, ITEMS);
     let session = Session::new(vec![review]);
     let items = &session.reviews[0].items;

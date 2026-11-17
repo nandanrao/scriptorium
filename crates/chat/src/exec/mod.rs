@@ -41,7 +41,7 @@ use scriptorium_core::{Document, ElementKind, ParaId};
 use scriptorium_providers::Price;
 use scriptorium_review::file::{FORMAT_HEADER, insert_id, is_review_text};
 use scriptorium_review::sessionfile::{resolve_path, stored_path};
-use scriptorium_review::{ReviewFile, Session};
+use scriptorium_review::{ReviewFile, RowResolver, Session};
 use scriptorium_tools::{Append, Applied, Ctx, Failed, Outcome, Target};
 
 use crate::naming;
@@ -117,6 +117,14 @@ pub trait ReviewStore {
     /// call, so all three can be borrowed together).
     #[allow(clippy::type_complexity)]
     fn session_mut(&mut self) -> (&mut Session, &Document, &dyn Fn(&ElementKind) -> bool);
+
+    /// The resolver placing `ROW:` suggestions (rows of a pair of versions)
+    /// on the document as it is now, built from the pair the store opened
+    /// with (`Opened::row_resolver` in fsio). `None`: no pair, or this is
+    /// the original; `ROW:` suggestions are then not placed.
+    fn row_resolver(&self) -> Option<Box<RowResolver<'static>>> {
+        None
+    }
 
     /// The lines the writer is rewriting right now (the app's; every line
     /// of a block being rewritten): a proposal touching any of them is
@@ -264,8 +272,9 @@ pub fn apply_append(
         refuse_editing(&mut append, &editing);
     }
     let result = {
+        let rows = store.row_resolver();
         let (session, doc, caps) = store.session_mut();
-        scriptorium_tools::apply(session, doc, r, append, caps)
+        scriptorium_tools::apply(session, doc, r, append, caps, rows.as_deref())
     };
     match result {
         Ok(applied) => {

@@ -17,7 +17,7 @@ scriptorium-fdx.workspace = true
 scriptorium-review.workspace = true
 # The shared shell: atomic writes and the session lock, the same as the CLI
 # and MCP server.
-scriptorium-fsio.workspace = true
+scriptorium-fsio = { workspace = true, features = ["opened"] }
 # Suggestion numbers by script position, as the CLI and tools show them.
 scriptorium-tools.workspace = true
 # GPUI: crates.io snapshot gpui-pre (same as gpui-kit).

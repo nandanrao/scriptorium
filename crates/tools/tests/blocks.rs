@@ -79,7 +79,7 @@ impl F {
 
     fn apply(&mut self, a: Append) -> Applied {
         let fdx = &self.fdx;
-        apply(&mut self.session, &self.doc, 0, a, &|k: &ElementKind| fdx.is_caps(k.name())).unwrap()
+        apply(&mut self.session, &self.doc, 0, a, &|k: &ElementKind| fdx.is_caps(k.name()), None).unwrap()
     }
 
     fn list(&self) -> Value {
@@ -288,7 +288,7 @@ fn apply_rechecks_that_the_run_still_reads_as_before() {
     let sel = Selection::cursor(f.doc.start());
     f.doc.replace_text(sel, ParaId(9), "Thanks a lot.", &[]).unwrap();
     let fdx = &f.fdx;
-    let err = apply(&mut f.session, &f.doc, 0, a, &|k: &ElementKind| fdx.is_caps(k.name())).unwrap_err();
+    let err = apply(&mut f.session, &f.doc, 0, a, &|k: &ElementKind| fdx.is_caps(k.name()), None).unwrap_err();
     assert_eq!(
         err.to_string(),
         "¶8–¶9 changed since the suggestion was made: read them again and suggest on their current text"

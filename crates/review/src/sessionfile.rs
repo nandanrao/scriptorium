@@ -172,6 +172,12 @@ pub struct ReviewSource {
     pub text: String,
 }
 
+/// Builds the [`RowResolver`] for the document reviews are opened against
+/// (see [`resume`]). The host's factory reads the links file and
+/// the other script; `doc` is the version's live document (its text, after
+/// any replayed edits, is what rows are read from).
+pub type RowResolverFactory<'a> = dyn for<'d> Fn(&'d Document) -> Box<RowResolver<'a>> + 'a;
+
 /// Open the document for `script` (`script_contents` is its file's text)
 /// with the review files in `sources` attached. `saved` is the session file's
 /// contents, if any; `script_name` is the script's file name (to check each
@@ -200,30 +206,14 @@ pub struct ReviewSource {
 /// same line under both readers ([`same_ids`], given the ids its saved
 /// events touch); otherwise its ids mean other lines now and it's discarded
 /// with a note (the caller sets the old file aside).
-pub fn resume(
-    sources: Vec<ReviewSource>,
-    script: Script,
-    reader_1: Option<&Script>,
-    script_contents: &str,
-    saved: Option<&str>,
-    is_caps: &dyn Fn(&ElementKind) -> bool,
-    script_name: &str,
-) -> ResumedSession {
-    resume_with_rows(sources, script, reader_1, script_contents, saved, is_caps, script_name, None)
-}
-
-/// Builds the [`RowResolver`] for the document reviews are opened against
-/// (see [`resume_with_rows`]). The host's factory reads the links file and
-/// the other script; `doc` is the version's live document (its text, after
-/// any replayed edits, is what rows are read from).
-pub type RowResolverFactory<'a> = dyn for<'d> Fn(&'d Document) -> Box<RowResolver<'a>> + 'a;
-
-/// [`resume`], placing `ROW:` entries through a resolver `rows` builds for
-/// the document the reviews are opened against: the replayed document, or
-/// (fresh, version 1, discarded) the unedited script. See
-/// [`Review::open_live_with_rows`]. `None`: as [`resume`].
+///
+/// `ROW:` entries (suggestions for rows of a pair of versions) are placed
+/// through a resolver `rows` builds for the document the reviews are opened
+/// against: the replayed document, or (fresh, version 1, discarded) the
+/// unedited script. See [`Review::open_live`]. `None`: they are not found
+/// ([`crate::NO_LINKS`]).
 #[allow(clippy::too_many_arguments)]
-pub fn resume_with_rows(
+pub fn resume(
     sources: Vec<ReviewSource>,
     script: Script,
     reader_1: Option<&Script>,
@@ -246,15 +236,9 @@ pub fn resume_with_rows(
         let resolver = rows.zip(live).map(|(make, doc)| make(doc));
         for s in &sources {
             let review = match live {
-                Some(doc) => Review::open_live_with_rows(
-                    s.name.clone(),
-                    &s.text,
-                    &script,
-                    doc,
-                    is_caps,
-                    script_name,
-                    resolver.as_deref(),
-                ),
+                Some(doc) => {
+                    Review::open_live(s.name.clone(), &s.text, &script, doc, is_caps, script_name, resolver.as_deref())
+                }
                 None => Review::open(s.name.clone(), &s.text, &script, is_caps, script_name),
             };
             if let Err(e) = session.add(review.with_path(s.path.clone())) {

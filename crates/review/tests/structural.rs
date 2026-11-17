@@ -36,6 +36,7 @@ fn resume(text: &str, saved: Option<&str>) -> Opened {
         saved,
         &|k| f.is_caps(k.name()),
         "sample.fdx",
+        None,
     )
 }
 

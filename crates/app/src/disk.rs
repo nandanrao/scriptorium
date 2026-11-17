@@ -242,7 +242,7 @@ mod tests {
 
     fn session(text: &str, doc: &Document) -> Session {
         let caps = |_: &ElementKind| false;
-        Session::new(vec![Review::open_live("dialogue-pass", text, &script(), doc, caps, "film.fdx")])
+        Session::new(vec![Review::open_live("dialogue-pass", text, &script(), doc, caps, "film.fdx", None)])
     }
 
     #[test]

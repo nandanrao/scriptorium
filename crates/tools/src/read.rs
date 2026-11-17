@@ -1,10 +1,10 @@
 //! Reading the script: summary, paragraph lists, scenes laid out for a model.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use scriptorium_core::outline::{ParaContext, annotate};
-use scriptorium_core::{Document, ElementKind, ParaId, Paragraph};
+use scriptorium_core::{Document, ElementKind, ParaId, Paragraph, Script};
 use serde_json::{Value, json};
 
 use crate::args::Args;
@@ -164,40 +164,57 @@ fn scene_number(scene: &Value, scenes: &Scenes) -> Option<i64> {
     usize::try_from(n).ok().and_then(|u| scenes.numbered(u)).map(|_| n)
 }
 
+/// The range (an index into `scenes.ranges`) of the scene `scene` names: a
+/// scene number (1 = the first) or part of its heading, as `read_scene`
+/// takes it.
+fn find_scene(cx: &[ParaContext], scenes: &Scenes, scene: &Value) -> Result<usize, ToolError> {
+    match (scene_number(scene, scenes), scene.as_str()) {
+        (Some(n), _) => {
+            let count = scenes.count();
+            let r = usize::try_from(n).ok().and_then(|n| scenes.numbered(n));
+            let r = r.ok_or_else(|| ToolError::Invalid(format!("no scene {n} (1 to {count})")))?;
+            Ok(scenes.holding(r.start).expect("a scene's range holds its start"))
+        }
+        (None, Some(s)) => {
+            let s = s.trim().to_lowercase();
+            if s.is_empty() {
+                return Err(ToolError::Args("`scene` is empty: give a scene number or heading text".into()));
+            }
+            let found = scenes
+                .ranges
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| scenes.number_of(*k).is_some())
+                .find(|(_, r)| cx[r.start].scene.to_lowercase().contains(&s));
+            found.map(|(k, _)| k).ok_or_else(|| {
+                let count = scenes.count();
+                ToolError::Invalid(if !s.starts_with('0') && s.chars().all(|c| c.is_ascii_digit()) {
+                    format!("no scene {s} (1 to {count}) and no scene heading contains {s:?}")
+                } else {
+                    format!("no scene heading contains {s:?}")
+                })
+            })
+        }
+        _ => Err(ToolError::Args("`scene` must be a scene number or heading text".into())),
+    }
+}
+
+/// For the scene `scene` names in `script` (as `read_scene` takes it):
+/// whether each paragraph is in it, by id.
+pub(crate) fn in_scene(script: &Script, scene: &Value) -> Result<HashMap<ParaId, bool>, ToolError> {
+    let cx = annotate(script);
+    let scenes = Scenes::of(&cx);
+    let k = find_scene(&cx, &scenes, scene)?;
+    let range = &scenes.ranges[k];
+    Ok(script.paragraphs.iter().enumerate().map(|(i, p)| (p.id, range.contains(&i))).collect())
+}
+
 pub(crate) fn read_scene(ctx: &Ctx, a: &Args) -> Result<String, ToolError> {
     let doc = ctx.doc;
     let cx = annotate(doc.script());
     let scenes = Scenes::of(&cx);
     let k = match (a.get("scene"), a.opt_int("paragraph_id")?) {
-        (Some(scene), None) => match (scene_number(scene, &scenes), scene.as_str()) {
-            (Some(n), _) => {
-                let count = scenes.count();
-                let r = usize::try_from(n).ok().and_then(|n| scenes.numbered(n));
-                let r = r.ok_or_else(|| ToolError::Invalid(format!("no scene {n} (1 to {count})")))?;
-                scenes.holding(r.start).expect("a scene's range holds its start")
-            }
-            (None, Some(s)) => {
-                let s = s.trim().to_lowercase();
-                if s.is_empty() {
-                    return Err(ToolError::Args("`scene` is empty: give a scene number or heading text".into()));
-                }
-                let found = scenes
-                    .ranges
-                    .iter()
-                    .enumerate()
-                    .filter(|(k, _)| scenes.number_of(*k).is_some())
-                    .find(|(_, r)| cx[r.start].scene.to_lowercase().contains(&s));
-                found.map(|(k, _)| k).ok_or_else(|| {
-                    let count = scenes.count();
-                    ToolError::Invalid(if !s.starts_with('0') && s.chars().all(|c| c.is_ascii_digit()) {
-                        format!("no scene {s} (1 to {count}) and no scene heading contains {s:?}")
-                    } else {
-                        format!("no scene heading contains {s:?}")
-                    })
-                })?
-            }
-            _ => return Err(ToolError::Args("`scene` must be a scene number or heading text".into())),
-        },
+        (Some(scene), None) => find_scene(&cx, &scenes, scene)?,
         (None, Some(id)) => {
             let ix = u64::try_from(id)
                 .ok()

@@ -30,6 +30,7 @@ fn resume(sources: Vec<sessionfile::ReviewSource>, fdx: &FdxFile, saved: Option<
         saved,
         &|k| fdx.is_caps(k.name()),
         "sample.fdx",
+        None,
     )
 }
 

@@ -14,13 +14,14 @@ use crate::write_atomic;
 
 // `version new` (A5b): making a version and its links file.
 mod version_new;
-pub use version_new::{
-    Made, NewVersion, check_version_args, default_version_name, links_name, lock_links, version_new,
-};
+pub use version_new::{Made, NewVersion, check_version_args, default_version_name, links_name, version_new};
 
-// `versions` and `rows` (A5c): a pair loaded for reading, re-found first.
+// Opening a script with its pair (A5c, I1): found, re-found first, the
+// resolver for `ROW:` suggestions, the rows.
 mod pair;
-pub use pair::{LoadedPair, PlacedItem, load_pair, load_pair_at, placed_items, refind_message};
+pub use pair::{
+    LaidOut, LinksGuard, LoadedPair, PairState, PlacedItem, lock_links, placed_items, refind_message, resume,
+};
 
 /// A script's place in its pair, as the links file beside it says.
 #[derive(Debug, Clone, PartialEq, Eq)]

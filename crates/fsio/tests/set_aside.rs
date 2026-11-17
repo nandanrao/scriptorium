@@ -67,6 +67,8 @@ impl Folder {
                  b hash: 0000000000000000\nb created: version new\n---\n",
             )
             .unwrap();
+            // The original, so the pair loads (re-found on first open).
+            std::fs::write(self.0.join("original.fdx"), SCRIPT).unwrap();
         } else {
             let _ = std::fs::remove_file(at);
         }
@@ -111,7 +113,7 @@ fn accept(f: &Folder, made: bool) -> Opened {
     f.made(made);
     let mut notes = vec![];
     let mut o = Opened::open(&f.script(), &[&f.review()], &mut notes).unwrap();
-    assert_eq!(o.pair().map(|p| p.is_made), made.then_some(true));
+    assert_eq!(o.pair().is_made(), made);
     let sel = o.sel();
     o.session.decide(&mut o.doc, sel, 0, 0, Decision::Accept(0)).unwrap();
     o.save().unwrap();
@@ -440,7 +442,7 @@ fn a_broken_links_file_naming_the_script_keeps_progress_on() {
         .unwrap();
     let mut notes = vec![];
     let mut o = Opened::open(&f.script(), &[&f.review()], &mut notes).unwrap();
-    assert!(o.pair().is_none());
+    assert!(o.pair().links_path().is_none() && o.pair().maybe_made());
     assert!(notes.iter().any(|n| n.contains("film.links.txt names film.fdx but can't be read")), "{notes:?}");
     let sel = o.sel();
     o.session.decide(&mut o.doc, sel, 0, 0, Decision::Accept(0)).unwrap();
@@ -461,14 +463,15 @@ fn of_several_links_files_the_made_one_is_used() {
     std::fs::write(f.0.join("b.links.txt"), links("b created: version new\n")).unwrap();
     let mut notes = vec![];
     let o = Opened::open(&f.script(), &[], &mut notes).unwrap();
-    let pair = o.pair().unwrap();
-    assert!(pair.is_made && pair.links.ends_with("b.links.txt"), "{pair:?}");
-    assert!(notes.is_empty(), "{notes:?}");
+    let pair = o.pair();
+    assert!(pair.maybe_made() && pair.links_path().unwrap().ends_with("b.links.txt"), "{pair:?}");
+    // The pair's other file isn't there: told, but the script opens.
+    assert!(notes.iter().all(|n| n.contains("original.fdx is missing")), "{notes:?}");
 
     // Two that say the same: the first by name, with a note.
     std::fs::write(f.0.join("b.links.txt"), links("")).unwrap();
     let mut notes = vec![];
     let o = Opened::open(&f.script(), &[], &mut notes).unwrap();
-    assert!(o.pair().unwrap().links.ends_with("a.links.txt"));
+    assert!(o.pair().links_path().unwrap().ends_with("a.links.txt"));
     assert!(notes.iter().any(|n| n.contains("several links files name film.fdx")), "{notes:?}");
 }

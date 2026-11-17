@@ -691,27 +691,14 @@ impl Review {
     /// a block already decided is placed from its decision (see
     /// [`crate::matching`]). [`Item::index`] is the live position.
     ///
-    /// `ROW:` entries are not found here ([`Unplaced::NoRow`]); see
-    /// [`Self::open_live_with_rows`].
+    /// `ROW:` entries (suggestions for rows of a pair of versions) are placed
+    /// through `rows`, built by the host for `live` (see [`RowResolver`]):
+    /// only through it, never by `PARA:` or `BEFORE`. An entry is placed on
+    /// the first candidate none of whose lines another entry of the review
+    /// has, decided entries before pending ones; its status comes from its
+    /// decision as for any entry. No candidate (or no `rows`): unmatched with
+    /// the reason ([`Unplaced::NoRow`]).
     pub fn open_live(
-        name: impl Into<String>,
-        text: &str,
-        original: &Script,
-        live: &Document,
-        is_caps: impl Fn(&ElementKind) -> bool,
-        script_name: &str,
-    ) -> Self {
-        Self::open_live_with_rows(name, text, original, live, is_caps, script_name, None)
-    }
-
-    /// [`Self::open_live`], placing `ROW:` entries (suggestions for rows of
-    /// a pair of versions) through `rows`, built by the host for `live` (see
-    /// [`RowResolver`]): only through it, never by `PARA:` or `BEFORE`. An
-    /// entry is placed on the first candidate none of whose lines another
-    /// entry of the review has, decided entries before pending ones; its
-    /// status comes from its decision as for any entry. No candidate (or no
-    /// `rows`): unmatched with the reason ([`Unplaced::NoRow`]).
-    pub fn open_live_with_rows(
         name: impl Into<String>,
         text: &str,
         original: &Script,
@@ -1158,7 +1145,7 @@ impl Session {
         entry: Entry,
         is_caps: impl Fn(&ElementKind) -> bool,
     ) -> Result<Appended, String> {
-        let many = self.append_entries_with_rows(doc, r, vec![entry], false, is_caps, None)?;
+        let many = self.append_entries(doc, r, vec![entry], false, is_caps, None)?;
         Ok(Appended { file_text: many.file_text, item: many.results[0].item })
     }
 
@@ -1191,25 +1178,13 @@ impl Session {
     /// `PARA:` line, or a `BEFORE` window), written with every line's id as
     /// `PARA:`, and turn the file's header into `SCRIPT REVIEW v2`.
     ///
-    /// `ROW:` entries are not placed here ([`Unplaced::NoRow`]); see
-    /// [`Self::append_entries_with_rows`].
+    /// `ROW:` entries are placed through `rows` (built by the host for
+    /// `doc`) as [`Review::open_live`] places them, whatever `para_only`
+    /// says; each is written with the lines it went on as its `PARA:`. With
+    /// `rows`, a `ROW:` entry may have a blank `BEFORE` (`BEFORE: [empty]`, a
+    /// blank line to fill in). Without it they are not placed
+    /// ([`Unplaced::NoRow`]).
     pub fn append_entries(
-        &mut self,
-        doc: &Document,
-        r: usize,
-        entries: Vec<Entry>,
-        para_only: bool,
-        is_caps: impl Fn(&ElementKind) -> bool,
-    ) -> Result<AppendedMany, String> {
-        self.append_entries_with_rows(doc, r, entries, para_only, is_caps, None)
-    }
-
-    /// [`Self::append_entries`], placing `ROW:` entries through `rows`
-    /// (built by the host for `doc`) as [`Review::open_live_with_rows`] does,
-    /// whatever `para_only` says; each is written with the lines it went on
-    /// as its `PARA:`. With `rows`, a `ROW:` entry may have a blank `BEFORE`
-    /// (`BEFORE: [empty]`, a blank line to fill in).
-    pub fn append_entries_with_rows(
         &mut self,
         doc: &Document,
         r: usize,

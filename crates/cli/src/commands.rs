@@ -135,12 +135,12 @@ VERSIONS
         links file, rows by status, rows new in the original
   scriptorium rows <script.fdx> [--scene <n|text>] [--needs] [--json]
         the rows as \"#<row> <status>  ¶ids text | ¶ids text\" (this script
-        first), with any suggestion on the row and its status, and notes.
+        first), with the suggestions on the row and their status, and notes.
         --scene: a scene number (1 = the first) or part of its heading;
         --needs: only rows the version needs a suggestion for (none when
         called on the original). With --json: [{row, status, label, needs,
-        note?, this: [{id, kind, text}], other: [...], suggestion?: {review,
-        n, status}}]; status is in_sync, this_changed, other_changed,
+        note?, this: [{id, kind, text}], other: [...], suggestions: [{review,
+        n, status}]}]; status is in_sync, this_changed, other_changed,
         both_changed, blank or one_sided, from the script called on.
   Both re-find first: a file changed outside Scriptorium (Final Draft saved
   it) is found again and the links file updated, with a note. `apply` on
@@ -932,6 +932,9 @@ fn suggest(review: &str, script: &str, rest: &[&str], notes: &mut Vec<String>) -
     let path = Path::new(review);
     let stored = path.canonicalize().ok().map(|at| sessionfile::stored_path(&o.dir, &at));
     let attached = stored.and_then(|st| o.session.reviews.iter().position(|r| r.path == st));
+    // Places `ROW:` suggestions (rows of a pair of versions), from the pair
+    // loaded when the script was opened.
+    let rows = o.row_resolver();
     // The attached review, or the file opened on its own (not attached here).
     let (mut lone, r) = match attached {
         Some(r) => (None, r),
@@ -945,13 +948,13 @@ fn suggest(review: &str, script: &str, rest: &[&str], notes: &mut Vec<String>) -
                 }
             };
             let original = o.fdx.to_script();
-            let review = Review::open_live(review, &t, &original, &o.doc, caps, "");
+            let review = Review::open_live(review, &t, &original, &o.doc, caps, "", rows.as_deref());
             (Some(Session::new(vec![review])), 0)
         }
     };
     let session = lone.as_mut().unwrap_or(&mut o.session);
     // Spliced onto the file (never reserialized), on exactly these paragraphs.
-    let many = session.append_entries(&o.doc, r, vec![entry], true, caps)?;
+    let many = session.append_entries(&o.doc, r, vec![entry], true, caps, rows.as_deref())?;
     let result = many.results[0].clone();
     let Some(i) = result.item else {
         return Err(match result.unplaced {
@@ -1044,10 +1047,18 @@ pub fn apply(
 ) -> Result<String, String> {
     let _lock = lock(script)?;
     let mut o = Opened::open(script, reviews, notes)?;
-    if output.is_none() && o.pair().is_some_and(|p| p.is_made) {
+    if output.is_none() && o.pair().is_made() {
         // The version Scriptorium made is written in place, from the app
         // only (plan, "Writing a version in place"); elsewhere it needs -o.
         return Err(format!("{} is written from the app: Write .fdx (or give -o <file>)", o.script_name));
+    }
+    if output.is_none() && o.pair().maybe_made() {
+        // A links file naming it can't be read: it may be the made version.
+        return Err(format!(
+            "{} may be the version Scriptorium made (a links file naming it can't be used), which is written from \
+             the app: Write .fdx (or give -o <file>)",
+            o.script_name
+        ));
     }
     // Review files named here are attached, as on every command that takes
     // them. Saved before accept_all, which only shapes this output.
@@ -1311,8 +1322,17 @@ pub fn tool(
                     let original = o.fdx.to_script();
                     let fdx = &o.fdx;
                     let caps = |k: &ElementKind| fdx.is_caps(k.name());
-                    let review = Review::open_live(stored.clone(), &text, &original, &o.doc, caps, &o.script_name)
-                        .with_path(stored.clone());
+                    let rows = o.row_resolver();
+                    let review = Review::open_live(
+                        stored.clone(),
+                        &text,
+                        &original,
+                        &o.doc,
+                        caps,
+                        &o.script_name,
+                        rows.as_deref(),
+                    )
+                    .with_path(stored.clone());
                     new_file = Some(at);
                     (o.session.add(review)?, false)
                 }
@@ -1340,7 +1360,9 @@ pub fn tool(
     }
     let fdx = &o.fdx;
     let caps = |k: &ElementKind| fdx.is_caps(k.name());
-    let applied = scriptorium_tools::apply(&mut o.session, &o.doc, r, append, &caps).map_err(|e| e.to_string())?;
+    let rows = o.row_resolver();
+    let applied = scriptorium_tools::apply(&mut o.session, &o.doc, r, append, &caps, rows.as_deref())
+        .map_err(|e| e.to_string())?;
     if let Some(text) = &applied.file_text {
         // Its folder is made only now that there is something to write.
         if let Some(parent) = new_file.as_deref().and_then(Path::parent) {

@@ -1,25 +1,212 @@
-//! Loading a script's pair for reading (plan step A5c): the links file beside
-//! it, checked against the bytes of both files (C6) and re-found where they
+//! Loading a script's pair (plan steps A5c, I1): the links file beside it,
+//! checked against the bytes of both files (C6) and re-found where they
 //! differ, under the links lock; the other member read from its file. Every
-//! host that reads a pair goes through [`load_pair`]: the CLI's `versions`
-//! and `rows`, and later the tool hosts (`list_versions`, `read_rows`).
+//! host opens a script through [`resume`] (fsio's `Opened`, the app), which
+//! loads the pair *before* resuming the session, so the ids it places `ROW:`
+//! suggestions on are the file's; the resolver and the rows then come from
+//! that one [`LoadedPair`].
 //!
 //! Re-find writes the links file (only ids and the member's hash change,
 //! never stamps); nothing else is written. A links file that doesn't parse
-//! is never rewritten.
+//! is never rewritten. One re-find implementation, [`refind_locked`], serves
+//! opening and `version new`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use scriptorium_core::{Document, ElementKind, Script};
+use scriptorium_core::{Document, ElementKind, ParaId, Script};
 use scriptorium_fdx::FdxFile;
-use scriptorium_review::sessionfile;
-use scriptorium_review::{Session, Status};
+use scriptorium_review::file::{Line, RowRef};
+use scriptorium_review::sessionfile::{self, ResumedSession, ReviewSource, RowResolverFactory};
+use scriptorium_review::{RowResolver, Session, Status};
 use scriptorium_versions::links::{self, Links, member_letter};
 use scriptorium_versions::rows::sides;
-use scriptorium_versions::{Alignment, LaidRow, Placed, PlacedState, lay_out, refind};
+use scriptorium_versions::{Alignment, LaidRow, Placed, PlacedState, Resolver, RowQuery, lay_out, refind};
 
-use super::lock_links;
-use crate::write_atomic_no_link;
+use crate::opened::Opened;
+use crate::{LOCK_WAIT, LockError, SessionLock, write_atomic_no_link};
+
+/// Tries before re-find gives up on files that keep changing (or a member
+/// that doesn't parse: Final Draft may be halfway through saving it).
+const TRIES: usize = 5;
+/// The pause between tries.
+const RETRY_PAUSE: Duration = Duration::from_millis(100);
+
+/// The links lock, held: from reading a links file to writing it
+/// ([`lock_links`]). On a file system without locks it holds nothing (a
+/// note said so) but is still the token [`refind_locked`] asks for.
+pub struct LinksGuard {
+    /// The links file it guards.
+    at: PathBuf,
+    _lock: Option<SessionLock>,
+}
+
+impl LinksGuard {
+    /// The links file it guards.
+    pub fn path(&self) -> &Path {
+        &self.at
+    }
+}
+
+/// Take the links file's lock, `<links stem>.lock` (`PURPLE LIST.es.links.lock`
+/// for `PURPLE LIST.es.links.txt`): held from reading the links file to
+/// writing it, after any script lock (plan, "Locking"). The lock is not
+/// reentrant: never take it twice in one process (opening takes and releases
+/// it; `version new` takes it after). On a file system without locks: a
+/// guard holding nothing, with a note.
+pub fn lock_links(links: &Path, notes: &mut Vec<String>) -> Result<LinksGuard, String> {
+    let name = crate::opened::file_name(links);
+    let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
+    let lock = match SessionLock::acquire(&links.with_file_name(format!("{stem}.lock")), LOCK_WAIT) {
+        Ok(l) => Some(l),
+        Err(e @ LockError::NoLocks) => {
+            notes.push(e.to_string());
+            None
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    Ok(LinksGuard { at: links.to_path_buf(), _lock: lock })
+}
+
+/// A script's place in a pair, as opening found it.
+#[derive(Debug, Clone, Default)]
+pub enum PairState {
+    /// No links file beside the script names it.
+    #[default]
+    None,
+    /// The pair, re-found where a member's bytes changed.
+    Loaded(Box<LoadedPair>),
+    /// A links file names the script but can't be used: it doesn't parse,
+    /// or the other member is missing or isn't a Final Draft file. The
+    /// script still opens; `ROW:` suggestions are not found, with `reason`
+    /// (also told as a note).
+    Unusable {
+        /// The links file, when one parsed and named the script.
+        links: Option<PathBuf>,
+        reason: String,
+        /// The script may be the version Scriptorium made (see
+        /// [`super::Found::maybe_made`]).
+        maybe_made: bool,
+    },
+}
+
+impl PairState {
+    /// The pair, when it loaded.
+    pub fn loaded(&self) -> Option<&LoadedPair> {
+        match self {
+            PairState::Loaded(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The links file in use or found broken (when one parsed).
+    pub fn links_path(&self) -> Option<&Path> {
+        match self {
+            PairState::None => None,
+            PairState::Loaded(p) => Some(&p.path),
+            PairState::Unusable { links, .. } => links.as_deref(),
+        }
+    }
+
+    /// This script is the version Scriptorium made (`created:`).
+    pub fn is_made(&self) -> bool {
+        self.loaded().is_some_and(LoadedPair::this_is_made)
+    }
+
+    /// This script is, or may be, the version Scriptorium made: its sessions
+    /// write their decisions into the review files on every save (plan C2),
+    /// and the CLI writes it only with `-o`.
+    pub fn maybe_made(&self) -> bool {
+        match self {
+            PairState::None => false,
+            PairState::Loaded(p) => p.maybe_made,
+            PairState::Unusable { maybe_made, .. } => *maybe_made,
+        }
+    }
+
+    /// The resolver for `ROW:` suggestions on `doc`, the live document of the
+    /// script `this` (its file as opened): `None` without a pair, or when
+    /// this is the original (rows are suggested on the version only).
+    /// Unusable: every `ROW:` entry is not found, with the reason.
+    pub fn resolver(&self, this: &FdxFile, doc: &Document) -> Option<Box<RowResolver<'static>>> {
+        match self {
+            PairState::None => None,
+            PairState::Loaded(p) => p.resolver(this, doc),
+            PairState::Unusable { reason, .. } => Some(refusing(reason)),
+        }
+    }
+
+    /// [`Self::resolver`] for review's open path, which builds it for the
+    /// document it opens reviews against (`sessionfile::resume`).
+    pub fn rows_factory<'a>(&'a self, this: &'a FdxFile) -> Option<Box<RowResolverFactory<'a>>> {
+        match self {
+            PairState::None => None,
+            PairState::Loaded(p) => p.rows_factory(this),
+            PairState::Unusable { reason, .. } => {
+                Some(Box::new(move |_: &Document| -> Box<RowResolver<'a>> { refusing(reason) }))
+            }
+        }
+    }
+}
+
+/// A resolver that finds nothing, saying why.
+fn refusing(reason: &str) -> Box<RowResolver<'static>> {
+    let why = format!("the links file can't be used: {reason}");
+    Box::new(move |_: &RowRef, _: &[Vec<Line>], _: &[ParaId]| Err(why.clone()))
+}
+
+/// Open the script `fdx` (named `name` in `dir`) with its session: find its
+/// pair and load it, re-finding first (C6), then resume the session
+/// (`saved`) with the review files in `sources`, placing `ROW:` suggestions
+/// through the pair's resolver. Every host opens this way: fsio's `Opened`
+/// (the CLI, MCP and chat hosts) and the app. Holds the links lock only
+/// while loading the pair (after any script lock the caller holds). Notes
+/// about the pair (re-finds, a broken or unusable links file) go to `notes`;
+/// an unusable pair doesn't stop the script opening.
+pub fn resume(
+    fdx: &FdxFile,
+    dir: &Path,
+    name: &str,
+    sources: Vec<ReviewSource>,
+    saved: Option<&str>,
+    notes: &mut Vec<String>,
+) -> (ResumedSession, PairState) {
+    let pair = load(dir, name, fdx, notes);
+    let caps = |k: &ElementKind| fdx.is_caps(k.name());
+    // Always checked: reader 1 also misnumbered files without DualDialogue
+    // (nested paragraphs in scene summaries and arc beats), and it's cheap.
+    let reader_1 = Some(fdx.legacy_script());
+    let opened = {
+        let rows = pair.rows_factory(fdx);
+        sessionfile::resume(sources, fdx.to_script(), reader_1.as_ref(), fdx.raw(), saved, &caps, name, rows.as_deref())
+    };
+    (opened, pair)
+}
+
+/// The pair of the script `this` (its file as read, named `script_name`, in
+/// `dir`), re-found where a member's bytes changed ([`load_pair_at`]).
+fn load(dir: &Path, script_name: &str, this: &FdxFile, notes: &mut Vec<String>) -> PairState {
+    let found = super::find_pair(dir, script_name);
+    let maybe_made = found.maybe_made;
+    let broken = found.notes.clone();
+    notes.extend(found.notes);
+    let Some(pair) = found.pair else {
+        if maybe_made {
+            return PairState::Unusable { links: None, reason: broken.join("; "), maybe_made };
+        }
+        return PairState::None;
+    };
+    match load_pair_at(&pair.links, dir, script_name, this, notes) {
+        Ok(mut loaded) => {
+            loaded.maybe_made = maybe_made;
+            PairState::Loaded(Box::new(loaded))
+        }
+        Err(reason) => {
+            notes.push(reason.clone());
+            PairState::Unusable { links: Some(pair.links), reason, maybe_made }
+        }
+    }
+}
 
 /// A script's pair as it reads now: the links file re-found where a
 /// member's bytes changed, so its ids are positions in both files as they
@@ -37,6 +224,27 @@ pub struct LoadedPair {
     pub other: FdxFile,
     /// Where the other member's file is.
     pub other_path: PathBuf,
+    /// The other member's hash as loaded (`sessionfile::hash` of its bytes):
+    /// a host loads the pair again only when it, or the links file, changes.
+    pub other_hash: String,
+    /// What re-find said while loading (already in the notes).
+    pub refound: Vec<String>,
+    /// The script is, or may be, the version Scriptorium made
+    /// ([`PairState::maybe_made`]).
+    pub maybe_made: bool,
+}
+
+/// The pair's rows ([`LoadedPair::lay_out`]), with the suggestions placed on
+/// them.
+#[derive(Debug, Clone)]
+pub struct LaidOut {
+    pub rows: Vec<LaidRow>,
+    /// The version's `ROW:` suggestions ([`LaidRow::suggestions`] indexes
+    /// these); none when the rows are laid out on the original.
+    pub placed: Vec<PlacedItem>,
+    /// Each member's script as the rows read it: the version's live script,
+    /// the original's file (C8).
+    pub scripts: Vec<Script>,
 }
 
 impl LoadedPair {
@@ -53,6 +261,11 @@ impl LoadedPair {
         sides(&self.links).1 == self.this
     }
 
+    /// Whether the script it was loaded for is the member `created:` marks.
+    pub fn this_is_made(&self) -> bool {
+        self.links.made() == Some(self.this)
+    }
+
     /// What the app and tools call member `m`: its language's name, or its
     /// file stem when it has none, or when both members would read the same
     /// (two files in one language).
@@ -65,21 +278,68 @@ impl LoadedPair {
         labels[m].clone()
     }
 
-    /// The pair's rows as they read now ([`lay_out`]). `this` is the file of
-    /// the script the pair was loaded for (its bytes are the ones checked),
-    /// `this_live` its live script (the session applied). The original is
-    /// always read from its file (C8): when `this` is the original,
-    /// `this_live` is not used, the version is read from its file, and
-    /// `placed` should be empty (the version's session isn't opened).
-    /// One `is_caps` for both members, the original's (plan, "Status").
-    pub fn lay_out(&self, this: &FdxFile, this_live: &Script, placed: &[Placed]) -> Vec<LaidRow> {
-        let (original, version, caps_of) = if self.this_is_version() {
-            (self.other.to_script(), this_live.clone(), &self.other)
+    /// Whether both members name the same language (both named): a blank
+    /// version line is then "blank", not "not yet translated".
+    pub fn same_language(&self) -> bool {
+        let (o, v) = sides(&self.links);
+        let lang = |m: usize| self.links.members[m].language.as_deref().map(str::to_lowercase);
+        lang(o).is_some() && lang(o) == lang(v)
+    }
+
+    /// The pair's rows as they read now ([`lay_out`]), for the script `o`
+    /// the pair was loaded with (its `Opened`): on the version, its live
+    /// document and the `ROW:` suggestions of its session; on the original,
+    /// its file (C8) and the version's file, with no suggestions (the
+    /// version's session isn't opened). One `is_caps` for both members, the
+    /// original's (plan, "Status").
+    pub fn lay_out(&self, o: &Opened) -> LaidOut {
+        let mut scripts = vec![Script::default(), Script::default()];
+        let (original, version, caps_of, placed) = if self.this_is_version() {
+            let placed = placed_items(&o.session, &o.doc, &self.links.id);
+            (self.other.to_script(), o.doc.script().clone(), &self.other, placed)
         } else {
-            (this.to_script(), self.other.to_script(), this)
+            (o.fdx.to_script(), self.other.to_script(), &o.fdx, vec![])
         };
         let is_caps = |k: &ElementKind| caps_of.is_caps(k.name());
-        lay_out(&self.links, &original, &version, placed, &is_caps)
+        let only: Vec<Placed> = placed.iter().map(|p| p.placed.clone()).collect();
+        let rows = lay_out(&self.links, &original, &version, &only, &is_caps);
+        let (o_m, v_m) = sides(&self.links);
+        scripts[o_m] = original;
+        scripts[v_m] = version;
+        LaidOut { rows, placed, scripts }
+    }
+
+    /// The resolver for `ROW:` suggestions on `doc`, the version's live
+    /// document (`this` is its file as opened): the rows whose original side
+    /// reads an entry's `ROW TEXT`, read from the original's file (C8).
+    /// `None` when this is the original. Resolves nothing (with the reason)
+    /// unless the pair describes `this`'s bytes (C6).
+    pub fn resolver(&self, this: &FdxFile, doc: &Document) -> Option<Box<RowResolver<'static>>> {
+        self.this_is_version().then(|| self.build_resolver(&self.other.to_script(), this, doc))
+    }
+
+    /// [`Self::resolver`] for review's open path (`sessionfile::resume`),
+    /// reading the original's file once.
+    pub fn rows_factory<'a>(&'a self, this: &'a FdxFile) -> Option<Box<RowResolverFactory<'a>>> {
+        if !self.this_is_version() {
+            return None;
+        }
+        let original = self.other.to_script();
+        Some(Box::new(move |doc: &Document| -> Box<RowResolver<'a>> { self.build_resolver(&original, this, doc) }))
+    }
+
+    fn build_resolver(&self, original: &Script, this: &FdxFile, doc: &Document) -> Box<RowResolver<'static>> {
+        if self.links.members[self.this].hash != sessionfile::hash(this.raw()) {
+            let file = &self.links.members[self.this].file;
+            return refusing(&format!("{file} changed outside Scriptorium; reopen it"));
+        }
+        let is_caps = |k: &ElementKind| self.other.is_caps(k.name());
+        let resolver = Resolver::new(&self.links, original, doc.script(), &is_caps);
+        Box::new(move |row: &RowRef, texts: &[Vec<Line>], para: &[ParaId]| {
+            let texts: Vec<Vec<String>> = texts.iter().map(|t| t.iter().map(|l| l.text.clone()).collect()).collect();
+            let q = RowQuery { links_id: &row.id, row_text: &row.texts, texts: &texts, para };
+            resolver.candidates(&q).map_err(|e| e.text())
+        })
     }
 }
 
@@ -116,41 +376,16 @@ pub fn placed_items(session: &Session, doc: &Document, links_id: &str) -> Vec<Pl
     out
 }
 
-/// The pair of the script `this` (its file as read, named `script_name`, in
-/// `dir`), checked against the bytes of both files and re-found where they
-/// differ (C6): `Ok(None)` when no links file beside it names it. Holds the
-/// links lock from reading the links file to writing it (after any script
-/// lock the caller holds, plan "Locking").
+/// The pair in the links file at `at`, which names `script_name` (in `dir`;
+/// `this` is its file as read), checked against the bytes of both files and
+/// re-found where they differ (C6): lock, parse, [`refind_locked`]. Holds
+/// the links lock from reading the links file to writing it, and releases
+/// it before returning.
 ///
-/// A re-find rewrites the links file, re-reading the other member just
-/// before and starting over if it changed meanwhile; if `this` changed on
-/// disk since the caller read it, that is an error (its live script would
-/// no longer be what the ids describe). Re-find messages ("PURPLE LIST.fdx
-/// changed outside Scriptorium: …") and notes about other links files go to
-/// `notes`.
-///
-/// Errors: a links file naming the script that can't be read (nothing is
-/// rewritten), the other member missing (with the fix, and any `.fdx` in
-/// the folder holding the recorded bytes) or not a Final Draft file.
-pub fn load_pair(
-    dir: &Path,
-    script_name: &str,
-    this: &FdxFile,
-    notes: &mut Vec<String>,
-) -> Result<Option<LoadedPair>, String> {
-    let found = super::find_pair(dir, script_name);
-    let Some(pair) = found.pair else {
-        if found.notes.is_empty() {
-            return Ok(None);
-        }
-        return Err(found.notes.join("; "));
-    };
-    notes.extend(found.notes);
-    load_pair_at(&pair.links, dir, script_name, this, notes).map(Some)
-}
-
-/// [`load_pair`] for the links file at `at`, which names `script_name`.
-pub fn load_pair_at(
+/// Errors: a links file that can't be read (nothing is rewritten), the
+/// other member missing (with the fix, and any `.fdx` in the folder holding
+/// the recorded bytes) or not a Final Draft file, `this` changed on disk.
+pub(crate) fn load_pair_at(
     at: &Path,
     dir: &Path,
     script_name: &str,
@@ -158,21 +393,81 @@ pub fn load_pair_at(
     notes: &mut Vec<String>,
 ) -> Result<LoadedPair, String> {
     let links_name = crate::opened::file_name(at);
-    let _lock = lock_links(at, notes)?;
-    for _ in 0..5 {
-        let text = std::fs::read_to_string(at).map_err(|e| format!("{}: {e}", at.display()))?;
-        let mut pair =
-            links::parse(&text).map_err(|e| format!("{links_name} can't be read ({e}); it is left as it is"))?;
-        let this_m = pair.member_of(script_name).ok_or_else(|| format!("{links_name} doesn't name {script_name}"))?;
-        let other_m = if this_m == 0 { 1 } else { 0 };
-        let other_file = pair.members[other_m].file.clone();
-        let other_path = dir.join(&other_file);
+    let guard = lock_links(at, notes)?;
+    let text = std::fs::read_to_string(at).map_err(|e| format!("{}: {e}", at.display()))?;
+    let pair = links::parse(&text).map_err(|e| format!("{links_name} can't be read ({e}); it is left as it is"))?;
+    let this_m = pair.member_of(script_name).ok_or_else(|| format!("{links_name} doesn't name {script_name}"))?;
+    let found = refind_locked(&guard, dir, pair, &text, this_m, &dir.join(script_name), this)?;
+    drop(guard);
+    notes.extend(found.msgs.iter().cloned());
+    let other_hash = sessionfile::hash(found.other.raw());
+    Ok(LoadedPair {
+        path: at.to_path_buf(),
+        links: found.links,
+        this: this_m,
+        other: found.other,
+        other_path: found.other_path,
+        other_hash,
+        refound: found.msgs,
+        maybe_made: false,
+    })
+}
+
+/// What [`refind_locked`] found.
+pub(crate) struct Refound {
+    /// The pair, describing both files' bytes now (written if it changed).
+    pub links: Links,
+    /// The other member as read (and checked unchanged before any write).
+    pub other: FdxFile,
+    pub other_path: PathBuf,
+    /// One message per member re-found ("PURPLE LIST.fdx changed outside
+    /// Scriptorium: …"); empty when nothing changed and nothing was written.
+    pub msgs: Vec<String>,
+}
+
+/// Re-find each member of `links` (read from `text`, the links file `guard`
+/// holds) whose file isn't the bytes the links file describes, and write
+/// the links file if anything changed. `this` is member `this_m`'s file as
+/// the caller read it (from `this_path`); the other member is read here.
+/// Just before writing, both files are read again: `this` changed is an
+/// error (the caller's ids would no longer be what the links file says);
+/// the other changed starts over. The other member not parsing (Final Draft
+/// may be halfway through saving it) is tried again after a pause too.
+/// Nothing is written unless every check passed.
+pub(crate) fn refind_locked(
+    guard: &LinksGuard,
+    dir: &Path,
+    links: Links,
+    text: &str,
+    this_m: usize,
+    this_path: &Path,
+    this: &FdxFile,
+) -> Result<Refound, String> {
+    let at = guard.path();
+    let links_name = crate::opened::file_name(at);
+    let this_name = links.members[this_m].file.clone();
+    let other_m = if this_m == 0 { 1 } else { 0 };
+    let other_file = links.members[other_m].file.clone();
+    let other_path = dir.join(&other_file);
+    let mut unparsed = String::new();
+    for attempt in 0..TRIES {
+        if attempt > 0 {
+            std::thread::sleep(RETRY_PAUSE);
+        }
         let other_raw = std::fs::read_to_string(&other_path).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => missing(dir, &text, &links_name, other_m, &pair),
+            std::io::ErrorKind::NotFound => missing(dir, text, &links_name, other_m, &links),
             _ => format!("{}: {e}", other_path.display()),
         })?;
-        let other = FdxFile::parse(other_raw).map_err(|e| format!("{}: {e}", other_path.display()))?;
+        let other = match FdxFile::parse(other_raw) {
+            Ok(f) => f,
+            Err(e) => {
+                unparsed = format!("{other_file} can't be read ({e}); if Final Draft is saving it, run again");
+                continue;
+            }
+        };
+        unparsed.clear();
 
+        let mut pair = links.clone();
         let mut msgs = vec![];
         for (m, fdx) in [(this_m, this), (other_m, &other)] {
             let hash = sessionfile::hash(fdx.raw());
@@ -187,10 +482,9 @@ pub fn load_pair_at(
         }
         if !msgs.is_empty() {
             // Just before writing: both files still the bytes re-found.
-            let this_path = dir.join(script_name);
-            let now = std::fs::read_to_string(&this_path).map_err(|e| format!("{}: {e}", this_path.display()))?;
+            let now = std::fs::read_to_string(this_path).map_err(|e| format!("{}: {e}", this_path.display()))?;
             if now != this.raw() {
-                return Err(format!("{script_name} changed while this command ran; run it again"));
+                return Err(format!("{this_name} changed while this command ran; run it again"));
             }
             let again = std::fs::read_to_string(&other_path).map_err(|e| format!("{}: {e}", other_path.display()))?;
             if again != other.raw() {
@@ -198,9 +492,11 @@ pub fn load_pair_at(
             }
             let out = links::write(&pair).map_err(|e| format!("{links_name}: {e}"))?;
             write_atomic_no_link(at, out.as_bytes()).map_err(|e| format!("{}: {e}", at.display()))?;
-            notes.extend(msgs);
         }
-        return Ok(LoadedPair { path: at.to_path_buf(), links: pair, this: this_m, other, other_path });
+        return Ok(Refound { links: pair, other, other_path, msgs });
+    }
+    if !unparsed.is_empty() {
+        return Err(unparsed);
     }
     Err(format!("the files of {links_name} keep changing; try again when they're saved"))
 }
@@ -267,5 +563,183 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(2914), "2,914");
         assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    use scriptorium_versions::{Member, blank_copy};
+
+    const SCRIPT: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<FinalDraft DocumentType="Script" Template="No" Version="5">
+  <Content>
+    <Paragraph Type="Scene Heading">
+      <Text>EXT. FARM HOUSE - NIGHT</Text>
+    </Paragraph>
+    <Paragraph Type="Action">
+      <Text>Laura smiles.</Text>
+    </Paragraph>
+    <Paragraph Type="Character">
+      <Text>CESAR</Text>
+    </Paragraph>
+    <Paragraph Type="Dialogue">
+      <Text>I am going to town tomorrow.</Text>
+    </Paragraph>
+  </Content>
+</FinalDraft>
+"#;
+
+    /// A folder with `film.fdx`, its placeholder version `film.es.fdx` and
+    /// `film.es.links.txt`; removed on drop.
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("scriptorium-pair-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let dir = dir.canonicalize().unwrap();
+            std::fs::write(dir.join("film.fdx"), SCRIPT).unwrap();
+            let fdx = FdxFile::parse(SCRIPT.to_string()).unwrap();
+            let a = Member {
+                file: "film.fdx".into(),
+                language: Some("en".into()),
+                hash: sessionfile::hash(SCRIPT),
+                created: None,
+            };
+            let b =
+                Member { file: "film.es.fdx".into(), language: Some("es".into()), hash: String::new(), created: None };
+            let (script, mut pair) =
+                blank_copy(&fdx.to_script(), "lk-test", a, b, |k: &ElementKind| fdx.is_caps(k.name())).unwrap();
+            let written = scriptorium_fdx::clear_text_offsets(&fdx.write_script(&script).unwrap());
+            pair.members[1].hash = sessionfile::hash(&written);
+            std::fs::write(dir.join("film.es.fdx"), &written).unwrap();
+            std::fs::write(dir.join("film.es.links.txt"), links::write(&pair).unwrap()).unwrap();
+            Self(dir)
+        }
+        fn at(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+        fn read(&self, name: &str) -> String {
+            std::fs::read_to_string(self.at(name)).unwrap()
+        }
+        fn links(&self) -> Links {
+            links::parse(&self.read("film.es.links.txt")).unwrap()
+        }
+        /// Load the pair for `name`, read from disk now.
+        fn load(&self, name: &str, notes: &mut Vec<String>) -> Result<LoadedPair, String> {
+            let this = FdxFile::parse(self.read(name)).unwrap();
+            load_pair_at(&self.at("film.es.links.txt"), &self.0, name, &this, notes)
+        }
+        /// What Final Draft does when a line is typed into the version.
+        fn translate(&self) -> String {
+            let es = self.read("film.es.fdx").replacen(
+                "<Paragraph Type=\"Dialogue\">\n      <Text></Text>",
+                "<Paragraph Type=\"Dialogue\">\n      <Text>Mañana voy al pueblo.</Text>",
+                1,
+            );
+            assert_ne!(es, self.read("film.es.fdx"));
+            std::fs::write(self.at("film.es.fdx"), &es).unwrap();
+            es
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The original with a line added before the cue.
+    fn english_with_a_dog() -> String {
+        SCRIPT.replace(
+            "    <Paragraph Type=\"Character\">",
+            "    <Paragraph Type=\"Action\">\n      <Text>A dog barks.</Text>\n    </Paragraph>\n    <Paragraph \
+             Type=\"Character\">",
+        )
+    }
+
+    #[test]
+    fn the_version_side_is_found_again() {
+        let d = Dir::new("version-side");
+        let es = d.translate();
+        // Loaded for the original: the other member (the version) changed.
+        let mut notes = vec![];
+        let p = d.load("film.fdx", &mut notes).unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("film.es.fdx changed outside Scriptorium"), "{notes:?}");
+        assert_eq!(p.refound, notes);
+        assert_eq!(p.other_hash, sessionfile::hash(&es));
+        assert_eq!(d.links().members[1].hash, sessionfile::hash(&es));
+        // Found once: nothing more to say or write.
+        let before = d.read("film.es.links.txt");
+        let mut notes = vec![];
+        d.load("film.es.fdx", &mut notes).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(d.read("film.es.links.txt"), before);
+    }
+
+    #[test]
+    fn blank_reads_blank_only_between_two_named_languages_alike() {
+        let d = Dir::new("same-language");
+        let mut p = d.load("film.es.fdx", &mut vec![]).unwrap();
+        assert!(!p.same_language(), "en and es");
+        p.links.members[0].language = None;
+        p.links.members[1].language = None;
+        assert!(!p.same_language(), "neither named");
+        p.links.members[0].language = Some("ES".into());
+        p.links.members[1].language = Some("es".into());
+        assert!(p.same_language());
+    }
+
+    #[test]
+    fn both_members_changed_at_once() {
+        let d = Dir::new("both");
+        let es = d.translate();
+        let en = english_with_a_dog();
+        std::fs::write(d.at("film.fdx"), &en).unwrap();
+        let mut notes = vec![];
+        let p = d.load("film.es.fdx", &mut notes).unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.iter().any(|n| n.starts_with("film.fdx changed") && n.contains("1 new")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.starts_with("film.es.fdx changed")), "{notes:?}");
+        let links = d.links();
+        assert_eq!(links.members[0].hash, sessionfile::hash(&en));
+        assert_eq!(links.members[1].hash, sessionfile::hash(&es));
+        assert_eq!(links.rows.len(), 5, "the dog has a row of its own");
+        assert_eq!(p.links, links);
+    }
+
+    #[test]
+    fn this_changed_during_the_run_is_an_error_and_nothing_is_written() {
+        let d = Dir::new("this-changed");
+        let before = d.read("film.es.links.txt");
+        // The caller read other bytes than are on disk now (and than the
+        // links file describes): re-find would describe bytes no longer there.
+        let read = FdxFile::parse(english_with_a_dog()).unwrap();
+        let e = load_pair_at(&d.at("film.es.links.txt"), &d.0, "film.fdx", &read, &mut vec![]).unwrap_err();
+        assert!(e.contains("film.fdx changed while this command ran"), "{e}");
+        assert_eq!(d.read("film.es.links.txt"), before);
+    }
+
+    #[test]
+    fn another_member_that_doesnt_parse_is_tried_again_then_refused() {
+        let d = Dir::new("unparsed");
+        let es = d.translate();
+        let before = d.read("film.es.links.txt");
+        std::fs::write(d.at("film.es.fdx"), "<FinalDraft").unwrap();
+        let e = d.load("film.fdx", &mut vec![]).unwrap_err();
+        assert!(e.contains("film.es.fdx can't be read") && e.contains("if Final Draft is saving it, run again"), "{e}");
+        assert_eq!(d.read("film.es.links.txt"), before, "nothing rewritten");
+
+        // Final Draft finishes saving while re-find waits: found on a retry.
+        let at = d.at("film.es.fdx");
+        let saver = std::thread::spawn(move || {
+            std::thread::sleep(RETRY_PAUSE + RETRY_PAUSE / 2);
+            std::fs::write(at, es).unwrap();
+        });
+        let mut notes = vec![];
+        let p = d.load("film.fdx", &mut notes);
+        saver.join().unwrap();
+        let p = p.unwrap();
+        assert!(notes[0].starts_with("film.es.fdx changed outside Scriptorium"), "{notes:?}");
+        assert_eq!(d.links().members[1].hash, p.other_hash);
     }
 }

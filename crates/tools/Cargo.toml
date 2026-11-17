@@ -9,6 +9,8 @@ rust-version.workspace = true
 [dependencies]
 scriptorium-core.workspace = true
 scriptorium-review.workspace = true
+# Rows of a pair of versions (`LinksCtx`, `RowView`); pure, like this crate.
+scriptorium-versions.workspace = true
 # Only for `ToolSpec`, so hosts receive the catalogue in the agent's own type.
 scriptorium-agent.workspace = true
 serde.workspace = true

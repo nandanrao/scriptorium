@@ -240,7 +240,7 @@ fn a_changed_original_is_found_again_first() {
         notes,
         vec!["film.fdx changed outside Scriptorium: 6 lines found again, 0 changed, 1 new, 0 gone.".to_string()]
     );
-    assert!(text.contains("#3 nothing on one side  — | ¶2 A dog barks."), "{text}");
+    assert!(text.contains("#3 nothing on this side  — | ¶2 A dog barks."), "{text}");
     assert!(text.contains("    note: nothing on this side"), "{text}");
     // Rows after it moved on the English side only.
     assert!(text.contains("#4 in sync  ¶2 CESAR | ¶3 CESAR"), "{text}");
@@ -313,4 +313,64 @@ fn real_script_new_version() {
         }
     }
     assert!(headings > 0);
+}
+
+/// What an agent's host does for a `row` suggestion (the tools pass the
+/// open's resolver to `append_entries`): the suggestion goes on its row.
+#[test]
+fn an_agents_row_suggestion_shows_on_its_row_and_accepting_puts_it_in_sync() {
+    use scriptorium_fsio::opened::Opened;
+    use scriptorium_review::{Entry, RowRef};
+
+    let p = Pair::new("agent-row");
+    let es = p.path("film.es.fdx");
+    let review = p.path("tr.review.txt");
+    std::fs::write(&review, "SCRIPT REVIEW v1\nScript: film.es.fdx\nId: tr-1\n").unwrap();
+    let mut o = Opened::open(&es, &[&review], &mut vec![]).unwrap();
+    let rows = o.row_resolver();
+    assert!(rows.is_some());
+    let entry = Entry {
+        row: Some(RowRef { id: "lk-test".into(), texts: vec!["Laura smiles.".into()] }),
+        ..Entry::single("", ["Laura sonríe."])
+    };
+    let fdx = &o.fdx;
+    let caps = |k: &ElementKind| fdx.is_caps(k.name());
+    let done = o.session.append_entries(&o.doc, 0, vec![entry], true, caps, rows.as_deref()).unwrap();
+    assert_eq!(done.results[0].item, Some(0), "{:?}", done.results[0]);
+    let at = o.review_path(0);
+    o.write_review(&at, &done.file_text).unwrap();
+    o.save().unwrap();
+
+    let rows = p.json(&["rows", &es, "--json"]);
+    assert_eq!(rows[1]["status"], "blank");
+    assert_eq!(rows[1]["needs"], false, "a suggestion is on it");
+    assert_eq!(rows[1]["suggestions"], serde_json::json!([{ "review": "tr.review.txt", "n": 1, "status": "pending" }]));
+    let (text, _) = p.run(&["rows", &es]).unwrap();
+    assert!(
+        text.contains(
+            "#2 not yet translated  ¶1 [empty] | ¶1 Laura smiles.\n    suggestion: tr.review.txt #1 (pending)"
+        ),
+        "{text}"
+    );
+
+    p.run(&["decide", &es, "1", "accept"]).unwrap();
+    let rows = p.json(&["rows", &es, "--json"]);
+    assert_eq!(rows[1]["status"], "in_sync");
+    assert_eq!(rows[1]["this"][0]["text"], "Laura sonríe.");
+    assert_eq!(rows[1]["suggestions"][0]["status"], "accepted 1");
+}
+
+#[test]
+fn a_broken_links_file_still_opens_other_commands_and_apply_needs_an_output() {
+    let p = Pair::new("broken-apply");
+    let at = p.0.join("film.es.links.txt");
+    let text = std::fs::read_to_string(&at).unwrap();
+    std::fs::write(&at, text.replacen("1 | 1", "0 | 1", 1)).unwrap();
+    let es = p.path("film.es.fdx");
+    let (_, notes) = p.run(&["reviews", &es]).unwrap();
+    assert!(notes.iter().any(|n| n.contains("film.es.links.txt names film.es.fdx but can't be read")), "{notes:?}");
+    // It may be the made version: written from the app, or with -o.
+    let e = p.run(&["apply", &es]).unwrap_err();
+    assert!(e.contains("may be the version Scriptorium made"), "{e}");
+    assert!(!p.0.join("film.es (scriptorium).fdx").exists());
 }

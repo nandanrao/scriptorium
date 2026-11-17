@@ -55,9 +55,16 @@ impl Mem {
 
     fn open(&self, path: &Path) -> Review {
         let stored = stored_path(&self.dir, path);
-        let mut review =
-            Review::open_live(stored.clone(), &self.files[path], &self.original, &self.doc, &self.caps, "film.fdx")
-                .with_path(stored);
+        let mut review = Review::open_live(
+            stored.clone(),
+            &self.files[path],
+            &self.original,
+            &self.doc,
+            &self.caps,
+            "film.fdx",
+            None,
+        )
+        .with_path(stored);
         review.pin_id();
         review
     }

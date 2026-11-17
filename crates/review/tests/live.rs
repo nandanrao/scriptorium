@@ -25,7 +25,7 @@ fn edit(doc: &mut Document, para: u64, text: &str) {
 
 fn open_live(text: &str, doc: &Document) -> Review {
     let f = fdx();
-    Review::open_live("a.review.txt", text, &f.to_script(), doc, |k| f.is_caps(k.name()), "sample.fdx")
+    Review::open_live("a.review.txt", text, &f.to_script(), doc, |k| f.is_caps(k.name()), "sample.fdx", None)
         .with_path("a.review.txt")
 }
 
@@ -43,6 +43,7 @@ fn resume(text: &str, saved: Option<&str>) -> sessionfile::ResumedSession {
         saved,
         &|k| f.is_caps(k.name()),
         "sample.fdx",
+        None,
     )
 }
 
@@ -57,6 +58,7 @@ fn empty() -> sessionfile::ResumedSession {
         None,
         &|k| f.is_caps(k.name()),
         "sample.fdx",
+        None,
     )
 }
 
@@ -293,7 +295,7 @@ fn append_entries_matches_the_batch_and_writes_once() {
         entry("CESAR", Some(2), &["Cesar"]),
         entry("I am go to the town tomorrow.", None, &["I'm going to town tomorrow."]),
     ];
-    let out = o.session.append_entries(&doc, 0, batch, false, |k| f.is_caps(k.name())).unwrap();
+    let out = o.session.append_entries(&doc, 0, batch, false, |k| f.is_caps(k.name()), None).unwrap();
     let got: Vec<_> = out.results.iter().map(|r| (r.item, r.entry)).collect();
     assert_eq!(
         got,
@@ -332,7 +334,7 @@ fn append_entries_para_only_never_lands_on_an_identical_line() {
         entry("Yes.", Some(99), &["Aye."]),                 // no such paragraph
         entry("Laura smiles.", Some(6), &["Laura grins."]), // BEFORE doesn't fit ¶6
     ];
-    let out = o.session.append_entries(&doc, 0, batch, true, |k| f.is_caps(k.name())).unwrap();
+    let out = o.session.append_entries(&doc, 0, batch, true, |k| f.is_caps(k.name()), None).unwrap();
     let got: Vec<_> = out.results.iter().map(|r| (r.item, r.entry)).collect();
     assert_eq!(got, [(Some(0), Some(0)), (None, None), (None, None), (None, None), (None, None)]);
     assert_eq!(o.session.item(0, 0).para, ParaId(6));
@@ -387,9 +389,14 @@ fn para_fallback_is_written_with_the_paragraph_matched() {
     // PARA 3 doesn't fit; BEFORE finds ¶6.
     let out = o
         .session
-        .append_entries(&doc, 0, vec![entry("Thank you very much.", Some(3), &["Thanks."])], false, |k| {
-            f.is_caps(k.name())
-        })
+        .append_entries(
+            &doc,
+            0,
+            vec![entry("Thank you very much.", Some(3), &["Thanks."])],
+            false,
+            |k| f.is_caps(k.name()),
+            None,
+        )
         .unwrap();
     assert_eq!(o.session.item(0, out.results[0].item.unwrap()).para, ParaId(6));
     assert!(out.file_text.contains("PARA: 6\n") && !out.file_text.contains("PARA: 3"), "{}", out.file_text);
@@ -414,7 +421,7 @@ fn append_entries_says_why_an_entry_got_no_item() {
         entry("Thank you very much.", Some(6), &["Thanks."]), // placed
         entry("Thank you very much.", Some(6), &["Many thanks."]), // ¶6 claimed by the one above
     ];
-    let out = o.session.append_entries(&doc, 0, batch, true, caps).unwrap();
+    let out = o.session.append_entries(&doc, 0, batch, true, caps, None).unwrap();
     let why: Vec<_> = out.results.iter().map(|r| r.unplaced.clone()).collect();
     assert_eq!(
         why,
@@ -434,13 +441,13 @@ fn append_entries_says_why_an_entry_got_no_item() {
 
     // Without para_only: a BEFORE that fits only a taken line says so; nothing fitting is Missing.
     let more = vec![entry("Laura smiles.", None, &["Laura beams."]), entry("Nowhere at all.", None, &["x"])];
-    let out = o.session.append_entries(&doc, 0, more, false, caps).unwrap();
+    let out = o.session.append_entries(&doc, 0, more, false, caps, None).unwrap();
     let why: Vec<_> = out.results.iter().map(|r| r.unplaced.clone()).collect();
     assert_eq!(why, [Some(Unplaced::Taken { entry: 0, item: Some(0) }), Some(Unplaced::Missing)]);
 
     // A BEFORE that only fits a taken line approximately is Taken too, not Missing.
     let fuzzy = vec![entry("Thank you very much!", None, &["Thanks!"])];
-    let out = o.session.append_entries(&doc, 0, fuzzy, false, caps).unwrap();
+    let out = o.session.append_entries(&doc, 0, fuzzy, false, caps, None).unwrap();
     assert_eq!(out.results[0].unplaced, Some(Unplaced::Taken { entry: 2, item: Some(1) }));
     assert_eq!(out.results[0].entry, None);
 }
@@ -499,9 +506,14 @@ fn fuzzy_before_is_written_as_the_line_matched() {
     // No PARA, and BEFORE only fits ¶6 approximately.
     let out = o
         .session
-        .append_entries(&doc, 0, vec![entry("Thank you very much!", None, &["Thanks."])], false, |k| {
-            f.is_caps(k.name())
-        })
+        .append_entries(
+            &doc,
+            0,
+            vec![entry("Thank you very much!", None, &["Thanks."])],
+            false,
+            |k| f.is_caps(k.name()),
+            None,
+        )
         .unwrap();
     let item = o.session.item(0, out.results[0].item.unwrap());
     assert!(item.fuzzy);
@@ -540,12 +552,12 @@ fn para_on_a_non_editable_paragraph_is_not_editable() {
 "#;
     let f = FdxFile::parse(xml.to_string()).unwrap();
     let caps = |k: &scriptorium_core::ElementKind| f.is_caps(k.name());
-    let mut o = sessionfile::resume(vec![source("Id: n\n")], f.to_script(), None, f.raw(), None, &caps, "x.fdx");
+    let mut o = sessionfile::resume(vec![source("Id: n\n")], f.to_script(), None, f.raw(), None, &caps, "x.fdx", None);
     let doc = o.doc.clone();
     assert!(!doc.paragraphs()[1].kind.is_editable());
     for para_only in [true, false] {
         let e = entry("END OF ACT ONE", Some(1), &["END OF ACT 1"]);
-        let out = o.session.append_entries(&doc, 0, vec![e], para_only, caps).unwrap();
+        let out = o.session.append_entries(&doc, 0, vec![e], para_only, caps, None).unwrap();
         assert_eq!(out.results[0].unplaced, Some(Unplaced::NotEditable), "para_only {para_only}");
         assert_eq!(out.results[0].entry, None);
     }
