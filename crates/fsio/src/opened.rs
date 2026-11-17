@@ -49,6 +49,10 @@ pub struct Opened {
     /// the review files ([`crate::versions::write_progress`]), so the
     /// decisions outlive a Final Draft save of the script (plan C2).
     pair: PairState,
+    /// The session's "Lined up on the left" choice
+    /// ([`SessionFile::links`]): read with the session, written back by
+    /// every [`Self::save`].
+    pub links: Option<String>,
 }
 
 impl Opened {
@@ -189,7 +193,7 @@ impl Opened {
         if !read_only {
             notes.extend(opened.notes.iter().cloned());
         }
-        let sessionfile::ResumedSession { mut session, doc, base, .. } = opened;
+        let sessionfile::ResumedSession { mut session, doc, base, links, .. } = opened;
         let mut pin = vec![];
         for (at, stored) in newly {
             if let Some(review) = session.reviews.iter_mut().find(|r| r.path == stored)
@@ -198,7 +202,7 @@ impl Opened {
                 pin.push((at, text));
             }
         }
-        Ok(Self { fdx, raw, session, doc, base, session_path, dir, script_name, given, pin, aside, pair })
+        Ok(Self { fdx, raw, session, doc, base, session_path, dir, script_name, given, pin, aside, pair, links })
     }
 
     /// Open, and pick the one review a command works on: the file given
@@ -387,7 +391,8 @@ impl Opened {
             // Draft save refuses rather than lose them.
             crate::versions::write_progress(&self.dir, &mut self.session, &self.doc)?;
         }
-        let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, self.doc.log()).to_json();
+        let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, self.doc.log(), self.links.clone())
+            .to_json();
         write_atomic_no_link(&self.session_path, json.as_bytes())
             .map_err(|e| format!("{}: {e}", self.session_path.display()))?;
         Ok(())

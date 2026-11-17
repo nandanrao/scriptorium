@@ -8,6 +8,7 @@ mod disk;
 mod editor;
 mod elements;
 mod layout;
+mod links_view;
 mod log;
 mod menus;
 mod script_view;

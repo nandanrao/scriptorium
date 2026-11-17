@@ -684,3 +684,25 @@ fn reviews_add_refuses_a_links_file_given_with_a_review() {
     // The review alone still attaches.
     assert!(f.ok(&["reviews", "film.fdx", "add", "a.review.txt"]).contains("attached a.review.txt"));
 }
+
+/// The app's "Lined up on the left" choice (the session's `links` field) is
+/// kept by every command that writes the session (plan B1: it used to be
+/// dropped on every save).
+#[test]
+fn the_left_choice_survives_cli_saves() {
+    let f = Folder::new("links-field");
+    f.ok(&["reviews", "film.fdx", "add", "a.review.txt"]);
+    let at = f.path("film.scriptorium.json");
+    let mut s = session(&f.0);
+    s["links"] = "none".into();
+    std::fs::write(&at, s.to_string()).unwrap();
+    let kept = |what: &str| assert_eq!(session(&f.0)["links"], "none", "after {what}");
+    f.ok(&["decide", "film.fdx", "1", "accept"]);
+    kept("decide");
+    f.ok(&["undo", "film.fdx"]);
+    kept("undo");
+    f.ok(&["reviews", "film.fdx", "add", "notes/b.review.txt"]);
+    kept("reviews add");
+    f.ok(&["reviews", "film.fdx", "remove", "a.review.txt"]);
+    kept("reviews remove");
+}

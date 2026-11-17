@@ -57,6 +57,13 @@ pub struct SessionFile {
     #[serde(default)]
     pub base: Option<Vec<Event>>,
     pub events: Vec<Event>,
+    /// What the app shows lined up on the left of the script (plan, B1):
+    /// `None`, the script's pair if it has one; `"none"`, nothing; else the
+    /// file name of the links file whose other member is shown. Every save
+    /// carries it ([`SessionFile::new`] takes it, [`ResumedSession`] keeps
+    /// it); builds before it drop it, which only resets the choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<String>,
 }
 
 /// A review file attached to the script.
@@ -81,7 +88,16 @@ pub struct Attached {
 }
 
 impl SessionFile {
-    pub fn new(script_contents: &str, reviews: Vec<Attached>, base: &[Event], events: &[Event]) -> Self {
+    /// `links`: the choice under "Lined up on the left" ([`Self::links`]),
+    /// as read with the session ([`ResumedSession::links`]) or as changed
+    /// since.
+    pub fn new(
+        script_contents: &str,
+        reviews: Vec<Attached>,
+        base: &[Event],
+        events: &[Event],
+        links: Option<String>,
+    ) -> Self {
         Self {
             version: VERSION,
             script_hash: hash(script_contents),
@@ -89,6 +105,7 @@ impl SessionFile {
             reviews,
             base: Some(base.to_vec()),
             events: events.to_vec(),
+            links,
         }
     }
 
@@ -154,12 +171,15 @@ pub struct ResumedSession {
     pub how: Resumed,
     /// Things to tell the user: a duplicate review, a review file that changed.
     pub notes: Vec<String>,
+    /// The saved session's [`SessionFile::links`], kept even when its events
+    /// weren't used (the choice is about the pair, not the script's bytes).
+    pub links: Option<String>,
 }
 
 impl ResumedSession {
     /// The session file to write for the current state.
     pub fn to_file(&self, script_contents: &str) -> SessionFile {
-        SessionFile::new(script_contents, self.session.attached(), &self.base, self.doc.log())
+        SessionFile::new(script_contents, self.session.attached(), &self.base, self.doc.log(), self.links.clone())
     }
 }
 
@@ -247,11 +267,16 @@ pub fn resume(
         }
         session
     };
+    // A JSON object with a `links` string, whatever else it holds.
+    let links = saved.and_then(|s| {
+        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+        v.get("links")?.as_str().map(str::to_string)
+    });
     let fresh = |how: Resumed| {
         let mut notes = vec![];
         let session = open_all(None, &mut notes);
         let (doc, base) = session.open_document_with_base(script.clone());
-        ResumedSession { session, doc, base, how, notes }
+        ResumedSession { session, doc, base, how, notes, links: links.clone() }
     };
     let Some(saved) = saved else { return fresh(Resumed::Fresh) };
     let file = match SessionFile::from_json(saved) {
@@ -285,7 +310,7 @@ pub fn resume(
         let session = open_all(None, &mut notes);
         let (start, base) = session.document_with_base(script.clone(), true);
         return match start.replay_onto(&file.events) {
-            Ok(doc) => ResumedSession { session, doc, base, how, notes },
+            Ok(doc) => ResumedSession { session, doc, base, how, notes, links: file.links },
             Err(e) => fresh(doesnt_apply(e)),
         };
     };
@@ -326,7 +351,7 @@ pub fn resume(
         }
     }
     session.note_removed_by(&doc);
-    ResumedSession { session, doc, base, how, notes }
+    ResumedSession { session, doc, base, how, notes, links: file.links }
 }
 
 /// Whether every paragraph id means the same line in both scripts: same
@@ -404,9 +429,13 @@ mod tests {
     fn round_trips() {
         let reviews =
             vec![Attached { path: "a.review.txt".into(), id: "0123456789ab".into(), text_hash: "00ff".into() }];
-        let f = SessionFile::new("<FinalDraft/>", reviews, &[Event::Redo], &[Event::Undo, Event::Redo]);
+        let f = SessionFile::new("<FinalDraft/>", reviews, &[Event::Redo], &[Event::Undo, Event::Redo], None);
         let back = SessionFile::from_json(&f.to_json()).unwrap();
         assert_eq!(back, f);
+        // No choice: not written, so older builds read the same file.
+        assert!(!f.to_json().contains("links"));
+        let chosen = SessionFile { links: Some("none".into()), ..f.clone() };
+        assert_eq!(SessionFile::from_json(&chosen.to_json()).unwrap().links.as_deref(), Some("none"));
         assert_eq!(back.version, 2);
         assert_eq!(back.reader, READER);
         assert!(back.is_for("<FinalDraft/>"));

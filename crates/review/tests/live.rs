@@ -562,3 +562,23 @@ fn para_on_a_non_editable_paragraph_is_not_editable() {
         assert_eq!(out.results[0].entry, None);
     }
 }
+
+/// The session's "Lined up on the left" choice (`links`) is kept through a
+/// resume and the next save, also when the saved events can't be used (the
+/// script changed): the choice is about the pair, not the script's bytes.
+#[test]
+fn the_left_choice_survives_resume_and_save() {
+    let mut o = empty();
+    assert_eq!(o.links, None);
+    o.links = Some("none".into());
+    let json = saved(&o);
+    let back = resume("", Some(&json));
+    assert!(matches!(back.how, sessionfile::Resumed::Resumed { .. }), "{:?}", back.how);
+    assert_eq!(back.links.as_deref(), Some("none"));
+    assert_eq!(sessionfile::SessionFile::from_json(&saved(&back)).unwrap().links.as_deref(), Some("none"));
+    // Saved for other bytes: the events are dropped, the choice isn't.
+    let other = json.replace(&sessionfile::hash(fdx().raw()), "0000");
+    let fresh = resume("", Some(&other));
+    assert!(matches!(fresh.how, sessionfile::Resumed::Discarded(_)), "{:?}", fresh.how);
+    assert_eq!(fresh.links.as_deref(), Some("none"));
+}

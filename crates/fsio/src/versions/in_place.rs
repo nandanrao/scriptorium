@@ -271,12 +271,14 @@ pub fn write_in_place_with(
         refound: vec![],
         ..loaded.clone()
     };
-    let fresh = {
+    let mut fresh = {
         let rows = fresh_pair.rows_factory(&new_fdx);
         let caps = |k: &ElementKind| new_fdx.is_caps(k.name());
         let reader_1 = Some(new_fdx.legacy_script());
         sessionfile::resume(sources, written, reader_1.as_ref(), &new_raw, None, &caps, &name, Some(&*rows))
     };
+    // The session's choice under "Lined up on the left" stays.
+    fresh.links = o.links.clone();
     let session_json = fresh.to_file(&new_raw).to_json();
 
     // 2. Progress. Under the script lock nothing else writes them; still,

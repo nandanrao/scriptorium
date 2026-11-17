@@ -551,3 +551,18 @@ fn a_review_that_cant_be_written_refuses_even_for_para_hints_only() {
     );
     assert_eq!(f.files(), files, "nothing written");
 }
+
+/// The session's "Lined up on the left" choice (`links`, plan B1) is kept
+/// by a save and by the fresh session written in place.
+#[test]
+fn the_left_choice_survives_a_write_in_place() {
+    let f = Folder::new("links-field");
+    let mut o = f.open();
+    assert_eq!(o.links, None);
+    o.links = Some("none".into());
+    decide(&mut o, 0, Decision::Accept(0));
+    write(&mut o).unwrap();
+    let saved = SessionFile::from_json(&f.read("film.es.scriptorium.json")).unwrap();
+    assert_eq!(saved.links.as_deref(), Some("none"));
+    assert_eq!(f.open().links.as_deref(), Some("none"));
+}

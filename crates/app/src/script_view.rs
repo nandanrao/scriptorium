@@ -29,17 +29,16 @@ use scriptorium_core::outline::{ParaContext, annotate};
 use scriptorium_core::{Document, ElementKind, ParaId, Paragraph, Script};
 use scriptorium_fdx::FdxFile;
 use scriptorium_fsio::versions::{self, InPlaceError, PairState};
-use scriptorium_review::file::RowRef;
 use scriptorium_review::sessionfile::{self, Change, Disk, Resumed, Seen, SessionFile};
 use scriptorium_review::{Decision, LineChange, Refusal, Review, Session, Status};
 use scriptorium_tools::item_numbers;
-use scriptorium_versions::links::Links;
 
 use crate::agent_panel::{self, AgentPanel, AgentPanelEvent};
 use crate::blocks::{self, CardLine, Side};
 use crate::disk::{self, Plan};
 use crate::editor::{Decor, EditorEvent, Mark, ScriptEditor, is_changed};
 use crate::layout;
+use crate::links_view::{LinksView, RowCard, Stale, pair_note};
 use crate::theme::*;
 
 actions!(
@@ -211,187 +210,6 @@ fn resume_from_disk(
         notices.append(&mut review_notes(&opened.session, r));
     }
     (opened, pair, seen, notices)
-}
-
-/// The status bar's note on opening the original of a pair: its rows are
-/// translated (or, two files in one language, reviewed) in the version.
-fn pair_note(pair: &PairState) -> Option<String> {
-    let p = pair.loaded()?;
-    if p.this_is_version() {
-        return None;
-    }
-    let version = &p.links.members[p.links.sides().1].file;
-    let what = if p.links.same_language() { "review it" } else { "translate" };
-    Some(format!("Lined up with {version}: open that file to {what}."))
-}
-
-/// A file's modification time and length: looked at every tick, before
-/// reading it again.
-type FileSig = Option<(std::time::SystemTime, u64)>;
-
-fn file_sig(path: &Path) -> FileSig {
-    let m = std::fs::metadata(path).ok()?;
-    Some((m.modified().ok()?, m.len()))
-}
-
-/// The `*.links.txt` files in `dir`, by name.
-fn links_files(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .filter(|n| n.to_lowercase().ends_with(".links.txt"))
-        .collect();
-    names.sort();
-    names
-}
-
-/// How long after a pair couldn't be used to try loading it again: a links
-/// lock held a moment, or Final Draft halfway through saving the other
-/// file. Then only a change to its files loads it again.
-const PAIR_RETRIES: [Duration; 5] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(4),
-    Duration::from_secs(8),
-    Duration::from_secs(16),
-];
-
-/// What the app looks at every tick to know when to load the script's pair
-/// again: loading may re-find and write the links file, so it isn't done on
-/// every tick, only when
-/// - a file of the pair changed: the links file or the other member (time
-///   and length first, then, only then, its bytes against the hashes the
-///   pair was loaded from);
-/// - without a pair, a `*.links.txt` file came or went in the folder (a
-///   version made by the CLI or Claude while the original is open);
-/// - a pair that couldn't be used is due another try ([`PAIR_RETRIES`]).
-#[derive(Debug, Default)]
-struct PairWatch {
-    files: Vec<Watched>,
-    /// Without a pair: the folder and its links files when loaded.
-    folder: Option<(PathBuf, Vec<String>)>,
-    /// An unusable pair: when to try again, and the tries left after that.
-    retry: Option<(Instant, usize)>,
-}
-
-#[derive(Debug)]
-struct Watched {
-    path: PathBuf,
-    /// `sessionfile::hash` of the bytes the pair was loaded from; `None`:
-    /// any change counts (a pair that couldn't be used).
-    hash: Option<String>,
-    /// The file's [`FileSig`] when its bytes were last found to be `hash`;
-    /// `None` until then.
-    seen: Option<FileSig>,
-}
-
-impl PairWatch {
-    /// What to look at for `pair`, just loaded for the script `script_name`
-    /// in `dir`.
-    fn of(pair: &PairState, dir: &Path, script_name: &str) -> Self {
-        let any_change = |path: PathBuf| Watched { seen: Some(file_sig(&path)), path, hash: None };
-        match pair {
-            PairState::None => Self { folder: Some((dir.to_path_buf(), links_files(dir))), ..Self::default() },
-            PairState::Loaded(p) => Self {
-                files: vec![
-                    Watched { path: p.path.clone(), hash: Some(p.links_hash.clone()), seen: None },
-                    Watched { path: p.other_path.clone(), hash: Some(p.other_hash.clone()), seen: None },
-                ],
-                ..Self::default()
-            },
-            PairState::Unusable { links, .. } => {
-                let mut files = vec![];
-                if let Some(l) = links {
-                    // The other member too: Final Draft finishing its save
-                    // makes the pair usable.
-                    let other = std::fs::read_to_string(l)
-                        .ok()
-                        .and_then(|t| scriptorium_versions::links::parse(&t).ok())
-                        .and_then(|x| {
-                            x.member_of(script_name).map(|m| x.members[if m == 0 { 1 } else { 0 }].file.clone())
-                        });
-                    files.push(any_change(l.clone()));
-                    files.extend(other.map(|o| any_change(dir.join(o))));
-                }
-                let retry = Some((Instant::now() + PAIR_RETRIES[0], 1));
-                Self { files, folder: None, retry }
-            }
-        }
-    }
-
-    /// Whether to load the pair again now (see [`PairWatch`]).
-    fn changed(&mut self) -> bool {
-        if let Some((at, n)) = self.retry
-            && Instant::now() >= at
-        {
-            self.retry = PAIR_RETRIES.get(n).map(|d| (Instant::now() + *d, n + 1));
-            return true;
-        }
-        if let Some((dir, names)) = &self.folder {
-            return links_files(dir) != *names;
-        }
-        for w in &mut self.files {
-            // Before reading: a write after this shows as a newer time later.
-            let sig = file_sig(&w.path);
-            if w.seen == Some(sig) {
-                continue;
-            }
-            let Some(hash) = &w.hash else { return true };
-            match std::fs::read_to_string(&w.path) {
-                Ok(text) if sessionfile::hash(&text) == *hash => w.seen = Some(sig),
-                _ => return true,
-            }
-        }
-        false
-    }
-}
-
-/// On the version of a loaded pair: for each of its lines, the original's
-/// line(s) of its row, shown dimmed while the line is blank (what is left to
-/// translate reads in place). Rows of one version line and several original
-/// lines show them all; several version lines pair with the original's in
-/// order where the counts agree, else the first takes them all.
-fn pair_ghosts(pair: &PairState) -> HashMap<ParaId, String> {
-    let Some(p) = pair.loaded().filter(|p| p.this_is_version()) else { return HashMap::new() };
-    let (o, v) = p.links.sides();
-    let text = |id: &ParaId| p.other_script.paragraphs.iter().find(|q| q.id == *id).map(|q| q.text());
-    let by_id: HashMap<ParaId, String> =
-        p.links.rows.iter().flat_map(|row| row.cells[o].iter()).filter_map(|id| text(id).map(|t| (*id, t))).collect();
-    let mut out = HashMap::new();
-    for row in &p.links.rows {
-        let (orig, ver) = (&row.cells[o], &row.cells[v]);
-        let texts: Vec<&str> = orig.iter().filter_map(|id| by_id.get(id).map(String::as_str)).collect();
-        if ver.len() == texts.len() {
-            out.extend(ver.iter().zip(&texts).map(|(id, t)| (*id, t.to_string())));
-        } else if let Some(first) = ver.first() {
-            out.insert(*first, texts.join(" "));
-        }
-    }
-    out.retain(|_, t| !t.trim().is_empty());
-    out
-}
-
-/// What the card shows above a `ROW:` suggestion: the original's line(s) it
-/// was made for (`ROW TEXT`, which the original's file still reads: an
-/// entry whose original line changed isn't placed, so it has no card).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RowCard {
-    /// The original's label ("English", or its file stem).
-    label: String,
-    /// The version's label ("Español").
-    version: String,
-    /// `ROW TEXT`, one line per paragraph.
-    text: String,
-    /// What the card says for the version's line while it is blank.
-    blank: &'static str,
-}
-
-/// The card's [`RowCard`] for `row` (an item's `ROW:`) in the pair `links`.
-fn row_card(links: &Links, row: &RowRef) -> RowCard {
-    let (o, v) = links.sides();
-    let blank = if links.same_language() { "empty" } else { "empty \u{2014} not yet translated" };
-    RowCard { label: links.label(o), version: links.label(v), text: row.texts.join("\n"), blank }
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -582,15 +400,13 @@ pub struct ScriptView {
     dir: PathBuf,
     raw: Rc<str>,
     fdx: Rc<FdxFile>,
-    /// The script's pair of versions as last loaded: its resolver places
-    /// `ROW:` suggestions whenever a review is opened here.
-    pair: Rc<PairState>,
-    /// The pair's files as loaded, looked at every tick ([`PairWatch`]).
-    pair_watch: PairWatch,
-    /// [`pair_ghosts`] of the pair as loaded.
-    ghosts: Rc<HashMap<ParaId, String>>,
-    /// Load the pair again on the next tick (a version was just made).
-    recheck_pair: bool,
+    /// The script's pair of versions as last loaded (its resolver places
+    /// `ROW:` suggestions whenever a review is opened here), its rows over
+    /// the live document, and the session's "Lined up on the left" choice.
+    links: LinksView,
+    /// Lays the pair's rows out again once typing settles ([`Stale::Text`]),
+    /// for the log length it was scheduled at.
+    links_task: Option<(usize, Task<()>)>,
     /// Written in place and being replaced by the written file
     /// ([`Reopen`]): never saves, looks at files or writes again.
     retired: bool,
@@ -708,9 +524,9 @@ const WATCH_EVERY: Duration = Duration::from_millis(1000);
 impl ScriptView {
     pub fn new(opened: Opened, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let Opened { script_path, raw, fdx, opened, pair, session_path, dir, seen, unsynced, notices } = opened;
-        let sessionfile::ResumedSession { session, doc, base, .. } = opened;
+        let sessionfile::ResumedSession { session, doc, base, links: left, .. } = opened;
         let synced = doc.log().len();
-        let pair_watch = PairWatch::of(&pair, &dir, &file_name(&script_path));
+        let links = LinksView::new(pair, &dir, &file_name(&script_path), left);
         let originals: HashMap<ParaId, Paragraph> = fdx.to_script().paragraphs.into_iter().map(|p| (p.id, p)).collect();
 
         let editor = cx.new(|cx| ScriptEditor::new(doc, cx));
@@ -725,11 +541,9 @@ impl ScriptView {
             dir,
             raw: raw.into(),
             fdx: Rc::new(fdx),
-            pair_watch,
-            ghosts: Rc::new(pair_ghosts(&pair)),
-            recheck_pair: false,
+            links,
+            links_task: None,
             retired: false,
-            pair: Rc::new(pair),
             session_path,
             originals: Rc::new(originals),
             ctx: Rc::default(),
@@ -973,7 +787,7 @@ impl ScriptView {
     ) -> Result<usize, String> {
         let source = read_review(p, &self.dir)?;
         let fdx = &self.fdx;
-        let rows = self.pair.resolver(fdx, self.doc(cx));
+        let rows = self.links.pair().resolver(fdx, self.doc(cx));
         let review = Review::open_live(
             source.name,
             &source.text,
@@ -1042,7 +856,8 @@ impl ScriptView {
     /// `loud`: also show it as an error (a reload's own notice already says
     /// where the lost text went, so it passes false).
     fn set_aside(&mut self, doc: &Document, why: &str, loud: bool) -> String {
-        let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log()).to_json();
+        let json =
+            SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log(), self.left_choice()).to_json();
         let path = disk::set_aside_path(&self.dir, &file_name(&self.script_path));
         let msg = match scriptorium_fsio::write_atomic(&path, json.as_bytes()) {
             Ok(()) => format!("Your unsaved work {why}; it was kept in {}.", file_name(&path)),
@@ -1060,7 +875,7 @@ impl ScriptView {
         let changed = self.changed_lines(cx);
         let written = self.applied.as_deref() == Some(self.doc(cx).script());
         match (changed, written) {
-            (0, _) if !matches!(*self.pair, PairState::None) => {
+            (0, _) if !matches!(self.links.pair(), PairState::None) => {
                 format!("No changes since {}", file_name(&self.script_path))
             }
             (0, _) => "Same as the original".to_string(),
@@ -1125,15 +940,58 @@ impl ScriptView {
         }
     }
 
+    /// Keep the pair's rows up with the document and the reviews: at once
+    /// when paragraphs came or went or the reviews changed (the row index
+    /// is wrong then), else, after typing, once it settles, as the outline
+    /// does.
+    fn sync_links(&mut self, cx: &mut Context<Self>) {
+        let doc = &self.editor.read(cx).doc;
+        match self.links.stale(&self.session, doc) {
+            Stale::No => {}
+            Stale::Now => {
+                self.links_task = None;
+                self.links.lay_out(&self.fdx, &self.session, doc);
+            }
+            Stale::Text => {
+                let len = doc.log().len();
+                if self.links_task.as_ref().is_none_or(|(at, _)| *at != len) {
+                    let task = cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(OUTLINE_SETTLE).await;
+                        this.update(cx, |w, cx| {
+                            w.links_task = None;
+                            let doc = &w.editor.read(cx).doc;
+                            w.links.lay_out(&w.fdx, &w.session, doc);
+                            cx.notify();
+                        })
+                        .ok();
+                    });
+                    self.links_task = Some((len, task));
+                }
+            }
+        }
+    }
+
+    /// The pair, its rows and the "Lined up on the left" choice.
+    #[allow(dead_code)] // B2 and B3 read it.
+    pub(crate) fn links_view(&self) -> &LinksView {
+        &self.links
+    }
+
+    /// The session's `links` field as it is to be saved.
+    fn left_choice(&self) -> Option<String> {
+        self.links.left_choice().map(str::to_string)
+    }
+
     /// Push the current line and the margin marks to the editor.
     fn refresh(&mut self, cx: &mut Context<Self>) {
         if structure_key(self.doc(cx).script()) != self.structure {
             self.rebuild_outline(cx);
         }
+        self.sync_links(cx);
         let doc = self.doc(cx);
         self.numbers = self.session.reviews.iter().map(|review| item_numbers(doc, &review.items)).collect();
         let protect = self.rewriting.as_ref().map(|rw| self.session.item(rw.r, rw.i).para);
-        let mut decor = Decor { originals: self.originals.clone(), ghosts: self.ghosts.clone(), ..Decor::default() };
+        let mut decor = Decor { originals: self.originals.clone(), ghosts: self.links.ghosts(), ..Decor::default() };
         // Lines move under blocks (accepting one gives its lines new ids), so
         // which item a line belongs to is worked out again each time.
         self.item_by_para = (0..self.session.reviews.len()).map(|r| items_by_para(&self.session, doc, r)).collect();
@@ -1520,7 +1378,7 @@ impl ScriptView {
     /// refuses the whole save: its command fails and nothing is written.)
     /// False: the session file wasn't written (said).
     fn write_session(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.pair.maybe_made() {
+        if self.links.pair().maybe_made() {
             let doc = &self.editor.read(cx).doc;
             match versions::write_progress(&self.dir, Rc::make_mut(&mut self.session), doc) {
                 Ok(notes) => {
@@ -1541,7 +1399,8 @@ impl ScriptView {
         }
         let doc = self.doc(cx);
         let len = doc.log().len();
-        let json = SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log()).to_json();
+        let json =
+            SessionFile::new(&self.raw, self.session.attached(), &self.base, doc.log(), self.left_choice()).to_json();
         match scriptorium_fsio::write_atomic_no_link(&self.session_path, json.as_bytes()) {
             Ok(()) => {
                 self.seen_session = Seen::wrote(&json);
@@ -1631,10 +1490,7 @@ impl ScriptView {
         // window, the CLI, Final Draft), or a version was just made here.
         // Loading it again re-places `ROW:` suggestions, so it goes through
         // the reload, which can't run under a rewrite.
-        if self.rewriting.is_none()
-            && self.stuck.is_none()
-            && (std::mem::take(&mut self.recheck_pair) || self.pair_watch.changed())
-        {
+        if self.rewriting.is_none() && self.stuck.is_none() && self.links.due() {
             self.reload(cx);
         }
     }
@@ -1695,7 +1551,7 @@ impl ScriptView {
         let view_id = self.review().map(|r| self.session.reviews[r].id.clone());
         let was_current = self.current().map(|(r, i)| at(&self.session, r, Some(i)));
 
-        let sessionfile::ResumedSession { mut session, doc: reloaded, base, notes: more, .. } = opened;
+        let sessionfile::ResumedSession { mut session, doc: reloaded, base, notes: more, links: left, .. } = opened;
         let new_synced = reloaded.log().len();
         let replayed = sessionfile::with_unsaved(start.clone(), unsaved, reloaded.clone());
         let mut notes: Vec<String> = notes.into_iter().chain(more).collect();
@@ -1706,11 +1562,11 @@ impl ScriptView {
         let script_name = file_name(&self.script_path);
         // The pair as loaded with this session: reviews reopened here place
         // `ROW:` suggestions (an agent may just have appended some) too.
-        notes.extend(pair_note(&pair));
-        self.pair_watch = PairWatch::of(&pair, &self.dir, &script_name);
-        self.ghosts = Rc::new(pair_ghosts(&pair));
-        self.pair = Rc::new(pair);
-        let rows = self.pair.resolver(&self.fdx, &replayed.doc);
+        self.links.set_pair(pair, &self.dir, &script_name);
+        notes.extend(self.links.note());
+        // The session file's choice: the app writes its own as it changes.
+        self.links.set_left_choice(left);
+        let rows = self.links.pair().resolver(&self.fdx, &replayed.doc);
         let mut still = vec![];
         for p in std::mem::take(&mut self.attached_since_sync) {
             match read_review(&p, &self.dir) {
@@ -2049,7 +1905,7 @@ impl ScriptView {
     /// the pair loaded with the session (`None` without one, or on the
     /// original).
     pub(crate) fn row_resolver(&self, cx: &App) -> Option<Box<scriptorium_review::RowResolver<'static>>> {
-        self.pair.resolver(&self.fdx, self.doc(cx))
+        self.links.pair().resolver(&self.fdx, self.doc(cx))
     }
 
     pub(crate) fn session(&self) -> &Session {
@@ -2060,13 +1916,13 @@ impl ScriptView {
     /// `Ctx::links` (`PairState::view`): `None` without a pair, the reason
     /// when its links file can't be used.
     pub(crate) fn pair_view<'a>(&'a self, cx: &'a App) -> Option<Result<scriptorium_versions::PairView<'a>, String>> {
-        self.pair.view(&self.fdx, &self.session, self.doc(cx))
+        self.links.pair().view(&self.fdx, &self.session, self.doc(cx))
     }
 
     /// Whether this script is, or may be, the version of its pair
     /// (`PairState::maybe_made`).
     pub(crate) fn may_be_version(&self) -> bool {
-        self.pair.maybe_made()
+        self.links.pair().maybe_made()
     }
 
     /// After the agent's `new_version` (made or refused): say `notes`, and
@@ -2087,7 +1943,7 @@ impl ScriptView {
     }
 
     pub(crate) fn after_new_version(&mut self, notes: Vec<String>, cx: &mut Context<Self>) {
-        self.recheck_pair = true;
+        self.links.recheck_soon();
         let new: Vec<String> = notes.into_iter().filter(|n| self.shown_notes.insert(n.clone())).collect();
         if !new.is_empty() {
             self.say(new.join("  "));
@@ -2171,7 +2027,7 @@ impl ScriptView {
             return;
         }
         self.commit_rewrite_quietly(cx);
-        if self.pair.is_made() {
+        if self.links.pair().is_made() {
             self.write_in_place(cx);
             cx.notify();
             return;
@@ -2236,7 +2092,7 @@ impl ScriptView {
         // Save first: what other programs wrote (the pair too, so the
         // session matches what `write_in_place` opens and numbers), then the
         // app's own work.
-        if self.disk_plan().1 == Plan::Reload || self.pair_watch.changed() {
+        if self.disk_plan().1 == Plan::Reload || self.links.files_changed() {
             self.reload(cx);
         }
         if let Some(why) = &self.stuck {
@@ -2921,8 +2777,7 @@ impl ScriptView {
     /// the version of a loaded pair.
     fn row_card_for(&self, r: usize, i: usize) -> Option<RowCard> {
         let row = self.session.item(r, i).row.as_ref()?;
-        let pair = self.pair.loaded().filter(|p| p.this_is_version())?;
-        Some(row_card(&pair.links, row))
+        self.links.row_card(row)
     }
 
     /// The original's line a `ROW:` suggestion was made for, labelled with
@@ -4012,7 +3867,7 @@ mod row_tests {
         // Opened with the (empty) review attached, and saved.
         let (opened, pair, _, _) = resume_from_disk(&es, &fdx, &session_path, std::slice::from_ref(&review));
         assert!(pair.is_made(), "{pair:?}");
-        let json = SessionFile::new(fdx.raw(), opened.session.attached(), &opened.base, opened.doc.log()).to_json();
+        let json = opened.to_file(fdx.raw()).to_json();
         std::fs::write(&session_path, json).unwrap();
 
         // An agent appends a suggestion for the blank dialogue's row.
@@ -4039,6 +3894,7 @@ mod row_tests {
 #[cfg(test)]
 mod version_tests {
     use super::*;
+    use crate::links_view::{PairWatch, row_card};
     use gpui::{TestAppContext, WindowHandle};
     use std::cell::RefCell;
 
@@ -4146,7 +4002,7 @@ mod version_tests {
             }
         );
         // The blank dialogue reads the English, dimmed; the sidebar too.
-        let ghosts = pair_ghosts(&opened.pair);
+        let ghosts = LinksView::new(opened.pair.clone(), &p.dir, "film.es.fdx", None).ghosts();
         assert_eq!(ghosts.get(&item.para).map(String::as_str), Some("I am going to town tomorrow."));
         assert_eq!(blank_item_text(session, &opened.opened.doc, 0, 0), "I am going to town tomorrow.");
         // The review's name says what it is.
@@ -4154,7 +4010,7 @@ mod version_tests {
         assert_eq!(review_title(Path::new("/x/PURPLE LIST.review.txt")), "PURPLE LIST review");
         // Nothing on the original.
         let original = Opened::load(&p.at("film.fdx"), &[]).unwrap();
-        assert!(pair_ghosts(&original.pair).is_empty());
+        assert!(LinksView::new(original.pair.clone(), &p.dir, "film.fdx", None).ghosts().is_empty());
     }
 
     #[test]
@@ -4256,7 +4112,7 @@ mod version_tests {
         let (w, view) = open(cx, &p);
         let got = reopens(cx, &view);
         w.update(cx, |v, window, cx| {
-            assert!(v.pair.is_made());
+            assert!(v.links.pair().is_made());
             assert_eq!(v.row_card_for(0, 0).unwrap().label, "English");
             v.accept(0, window, cx);
             // An autosave is due when the writer writes.
@@ -4299,6 +4155,37 @@ mod version_tests {
         let statuses: Vec<Status> = (0..2).map(|i| s.status(doc, 0, i)).collect();
         assert!(statuses.contains(&Status::Accepted(0)), "{statuses:?}");
         assert!(statuses.contains(&Status::Pending), "{statuses:?}");
+    }
+
+    /// The session's "Lined up on the left" choice (`links`, plan B1) is
+    /// kept by the app's saves and by Write .fdx in place, and read back on
+    /// opening.
+    #[gpui::test]
+    fn the_left_choice_survives_app_saves(cx: &mut TestAppContext) {
+        let p = Pair::new("left-choice");
+        let (w, view) = open(cx, &p);
+        let got = reopens(cx, &view);
+        let saved = || SessionFile::from_json(&p.read("film.es.scriptorium.json")).unwrap().links;
+        w.update(cx, |v, window, cx| {
+            assert_eq!(v.links.left_choice(), None);
+            v.links.set_left_choice(Some(crate::links_view::NOTHING_ON_THE_LEFT.into()));
+            v.accept(0, window, cx);
+            assert_eq!(v.save_now(cx), None);
+        })
+        .unwrap();
+        assert_eq!(saved().as_deref(), Some("none"));
+        w.update(cx, |v, window, cx| v.apply_to_fdx(&ApplyToFdx, window, cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(got.borrow().len(), 1, "written in place");
+        assert_eq!(saved().as_deref(), Some("none"));
+        let opened = Opened::load(&p.at("film.es.fdx"), &[]).unwrap();
+        let window = cx.add_window(|window, cx| ScriptView::new(opened, window, cx));
+        window
+            .update(cx, |v, _, _| {
+                assert_eq!(v.links.left_choice(), Some("none"));
+                assert!(!v.links.shows_left());
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -4365,7 +4252,7 @@ mod version_tests {
         cx.executor().advance_clock(WATCH_EVERY * 2);
         cx.run_until_parked();
         view.read_with(cx, |v, _| {
-            assert_eq!(v.pair.loaded().unwrap().other_hash, sessionfile::hash(&en));
+            assert_eq!(v.links.loaded().unwrap().other_hash, sessionfile::hash(&en));
             // The suggestion was made for the old line: no longer placed.
             let r = &v.session.reviews[0];
             assert!(r.items.is_empty(), "{:?}", r.items);
