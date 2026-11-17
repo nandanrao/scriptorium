@@ -209,6 +209,16 @@ the user:
 
 ### 3. Feedback review
 
+**Parked, no feature for now (decided 2026-11-17).** Since v0.6.0 it is
+workable without one: paste the notes into a connected agent (Claude Desktop,
+Claude Code…) and ask it to address them; it writes suggestions into a review
+named for the notes, each `why` quoting the note it answers. Broad notes stay
+in the chat. Known wrinkle, left as is: the review guidance's "if the writer
+asks for feedback, notes or opinions… answer in chat" could make an agent
+answer pasted notes in chat; asking for suggestions explicitly avoids it.
+Revisit only if writers miss notes as tasks, a report back to the giver, or
+quoting an older draft. The original idea, for then:
+
 Paste an email or a blob of notes from someone. AI splits it into individual
 notes, anchors each one, and you work through the script note by note.
 - Most notes aren't line edits ("Marta's arc feels rushed"). A note is a *task*
