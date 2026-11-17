@@ -5,17 +5,15 @@
 //! the script), and `guide` ([`crate::guidance`]). Also each tool's MCP
 //! annotations.
 //!
-//! Paths: `script` is taken as given (relative to the server's folder, which
-//! in Cowork and Claude Desktop isn't the script's, so the schema asks for an
-//! absolute path). Every other path a tool names is relative to the
-//! script's folder, and confined to it by the host (AGENTS.md rule 6).
+//! Paths: `script` is optional (left out, the host uses the script open in
+//! the app); given, it is an absolute path. Every other path a tool names is
+//! relative to the script's folder, and confined to it by the host (AGENTS.md rule 6).
 
 use serde_json::{Value, json};
 
 use crate::catalogue::{HostField, KINDS, ToolSpec, add_before, add_host_fields, spec};
 
-const SCRIPT: &str = "Absolute path to the screenplay (.fdx). A relative path is taken from the folder the server \
-                      was started in, which usually isn't the script's.";
+const SCRIPT: &str = "Leave out to use the script open in Scriptorium; otherwise its absolute path (.fdx).";
 const REVIEW: &str = "Which attached review to use, by name or file (a path relative to the script's folder). Leave \
                       out when only one review is attached to the script.";
 const REVIEW_FILE: &str = "The review file to add to, e.g. \"dialogue-pass.review.txt\": a .review.txt file in the \
@@ -89,6 +87,9 @@ pub(crate) fn offer(base: Vec<ToolSpec>) -> Vec<ToolSpec> {
         add_host_fields(spec, &[HostField::Script, HostField::ReviewFile]);
         crate::guidance::add_hint(spec);
         spec.schema["properties"]["script"]["description"] = json!(SCRIPT);
+        if let Some(required) = spec.schema["required"].as_array_mut() {
+            required.retain(|r| r != "script");
+        }
         if spec.schema["properties"].get("review_file").is_some() {
             spec.schema["properties"]["review_file"]["description"] = json!(REVIEW_FILE);
         }
@@ -109,13 +110,13 @@ fn agent_only() -> Vec<ToolSpec> {
              script so they show up in the app and in these tools. suggest_change and suggest_changes attach their \
              review_file themselves. Files elsewhere are attached by the writer in the app.",
             json!({ "script": script, "files": files(FILES) }),
-            &["script", "files"],
+            &["files"],
         ),
         spec(
             "detach_reviews",
             "Detach review files from the script. Decisions already made stay in the script's text.",
             json!({ "script": script, "files": files(ATTACHED) }),
-            &["script", "files"],
+            &["files"],
         ),
         spec(
             "decide_suggestion",
@@ -147,7 +148,7 @@ fn agent_only() -> Vec<ToolSpec> {
                                     Shot or General). an option `[]` cuts the lines (give `lines: []`).",
                 },
             }),
-            &["script", "n", "decision"],
+            &["n", "decision"],
         ),
         spec(
             "edit_paragraph",
@@ -157,15 +158,15 @@ fn agent_only() -> Vec<ToolSpec> {
                 "paragraph_id": { "type": "integer" },
                 "text": { "type": "string" },
             }),
-            &["script", "paragraph_id", "text"],
+            &["paragraph_id", "text"],
         ),
         spec(
             "undo",
             "Undo the last change to the script (an edit or a decision, made here or in the app).",
             json!({ "script": script }),
-            &["script"],
+            &[],
         ),
-        spec("redo", "Redo the last undone change.", json!({ "script": script }), &["script"]),
+        spec("redo", "Redo the last undone change.", json!({ "script": script }), &[]),
         spec(
             "write_script",
             "Write the script with every decision and edit so far to a new .fdx (default: \"<name> (scriptorium).fdx\" \
@@ -177,7 +178,7 @@ fn agent_only() -> Vec<ToolSpec> {
                 "script": script,
                 "output": { "type": "string", "description": "Where to write, instead of the default: a .fdx in the script's folder (relative to it, or absolute)." },
             }),
-            &["script"],
+            &[],
         ),
     ]
 }

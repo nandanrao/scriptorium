@@ -26,9 +26,9 @@ crates/
   tools/  scriptorium-tools  the screenplay tools agents call (catalogue, call, apply) and the system prompt
   providers/ scriptorium-providers  AI accounts, model and price tables, request building; shell: keyring keys, accounts file, HTTP (features `shell`, `keyring`)
   chat/   scriptorium-chat   chat threads and the host run loop shared by the CLI and the panel: `<script>.threads/`, locks, shared apply path (feature `shell`; core builds without it)
-  fsio/   scriptorium-fsio   atomic writes, the session lock, `opened` (feature): the script opened as the CLI and chat host open it
-  cli/    scriptorium-cli    `scriptorium` binary: headless access to everything, including `chat`, `threads`, `accounts` (feature `chat`, default)
-  mcp/    scriptorium-mcp    MCP server for the Claude plugin; depends on cli with default-features = false (no providers, keyring or HTTP)
+  fsio/   scriptorium-fsio   atomic writes, the session lock, `opened` (feature): the script opened as the CLI and chat host open it; `link` (feature): the socket between `scriptorium mcp` and the running app
+  connect/ scriptorium-connect  agents' settings (Claude Desktop, Claude Code, Codex) merged and written for "Connect an AI agent…", and installing the command-line tool (feature `shell`)
+  cli/    scriptorium-cli    `scriptorium` binary: headless access to everything, including `chat`, `threads`, `accounts` (feature `chat`, default), `connect`, and `mcp`: the MCP server agents start, which sends each call to the open app or runs it on the files
   app/    scriptorium-app    GPUI desktop app: script view, reviews, editing inside paragraphs, the agent panel (Ctrl/Cmd+L) and the accounts sheet
 ```
 

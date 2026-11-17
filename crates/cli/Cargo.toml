@@ -32,7 +32,8 @@ scriptorium-chat.workspace = true
 scriptorium-connect.workspace = true
 scriptorium-core.workspace = true
 scriptorium-fdx.workspace = true
-scriptorium-fsio = { workspace = true, features = ["opened"] }
+# `mcp`: the link to the running app.
+scriptorium-fsio = { workspace = true, features = ["opened", "link"] }
 scriptorium-providers = { workspace = true, optional = true }
 scriptorium-review.workspace = true
 scriptorium-tools.workspace = true

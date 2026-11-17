@@ -393,3 +393,34 @@ fn close_removes_the_socket_but_keeps_the_lock() {
     drop(other);
     drop(Server::bind_at(&path).unwrap());
 }
+
+/// A connector that stops reading never blocks the app's writes: a reply
+/// that can't be written within `REPLY_TIMEOUT` fails (the app takes the
+/// connector as gone) instead of waiting forever.
+#[test]
+fn a_connector_that_never_reads_cannot_block_a_reply() {
+    let dir = scratch();
+    let path = sock(&dir);
+    let server = Server::bind_at(&path).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut conn = server.accept().unwrap();
+        conn.handshake(&Hello::this_build()).unwrap();
+        let replier = conn.replier();
+        let big = Reply::Done(Done { text: "x".repeat(64 * 1024), is_error: false });
+        let started = std::time::Instant::now();
+        // Fill the socket's buffers: some write must fail, not block.
+        let failed = (0..10_000).any(|i| replier.reply(i, &big).is_err());
+        tx.send((failed, started.elapsed())).unwrap();
+        drop(server);
+    });
+    // Hello, then never read again.
+    let mut stream = UnixStream::connect(&path).unwrap();
+    writeln!(stream, "{}", Hello::this_build().encode()).unwrap();
+    let mut first = String::new();
+    BufReader::new(stream.try_clone().unwrap()).read_line(&mut first).unwrap();
+    let (failed, took) = rx.recv_timeout(Duration::from_secs(20)).expect("a reply blocked");
+    assert!(failed);
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    drop(stream);
+}

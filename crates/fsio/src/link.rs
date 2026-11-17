@@ -33,11 +33,20 @@ mod shell {
     /// on the files instead (and how long the app waits for a hello).
     pub const HELLO_TIMEOUT: Duration = Duration::from_secs(1);
 
+    /// How long the app waits to write one reply to a connector that isn't
+    /// reading, before taking it as gone.
+    pub const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+
     /// The socket path for this user on this platform: [`proto::socket_path`]
-    /// from `$HOME` on macOS, [`proto::linux_socket_path`] elsewhere. `None`
-    /// without a home folder.
+    /// from `$HOME` on macOS, [`proto::linux_socket_path`] elsewhere. Without
+    /// `$HOME` (an agent may start the connector with almost no
+    /// environment), the user's home folder from the user database; `None`
+    /// without either.
     pub fn default_socket_path() -> Option<PathBuf> {
-        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)?;
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from).or_else(|| {
+            let user = nix::unistd::User::from_uid(nix::unistd::getuid()).ok().flatten()?;
+            Some(user.dir).filter(|d| d.is_absolute())
+        })?;
         if cfg!(target_os = "macos") {
             Some(proto::socket_path(&home))
         } else {
@@ -387,7 +396,10 @@ mod shell {
             self.writer.reply_raw(&ours.encode())?;
             let stream = self.reader.get_ref();
             stream.set_read_timeout(None)?;
-            stream.set_write_timeout(None)?;
+            // Replies are written from the app's UI thread too (`taken`):
+            // a connector that stops reading must never block it. A reply
+            // that can't be written within this is a hang-up.
+            stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
             Ok(proto::compatible(ours, &theirs).then_some(theirs))
         }
 

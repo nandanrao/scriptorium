@@ -5419,18 +5419,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scriptorium-mcp"
-version = "0.5.0"
-dependencies = [
- "scriptorium-agent",
- "scriptorium-chat",
- "scriptorium-cli",
- "scriptorium-fsio",
- "scriptorium-tools",
- "serde_json",
-]
-
-[[package]]
 name = "scriptorium-providers"
 version = "0.5.0"
 dependencies = [

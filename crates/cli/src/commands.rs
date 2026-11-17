@@ -203,6 +203,10 @@ CONNECTING AI AGENTS (the app's Scriptorium › Connect an AI agent…)
         whether each agent is connected, and its settings file
   scriptorium connect --print
         the setup command for other agents
+  scriptorium mcp
+        Scriptorium's MCP server on stdin and stdout (what agents start):
+        each tool call goes to the open app when it's running (the script
+        open there when `script` is left out), otherwise to the files
   scriptorium --version
 
 CHAT (the built-in agent; the same threads and accounts as the app's panel)

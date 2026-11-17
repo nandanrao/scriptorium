@@ -1,7 +1,8 @@
-//! The server driven over stdio as an MCP client would: handshake, list tools,
-//! then a review round trip on a small script in a temporary folder.
-//!
-//! The server runs the CLI library in-process: no `scriptorium` binary needed.
+//! `scriptorium mcp` driven over stdio as an MCP client would: handshake,
+//! list tools, then a review round trip on a small script in a temporary
+//! folder. With no app (no socket in the test's own runtime folder) every
+//! call runs on the files; a fake app (`fsio::link::Server` in this process)
+//! checks the routes over the link.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -46,13 +47,34 @@ impl Server {
     /// (as in Cowork or Claude Desktop, where the server's folder isn't the
     /// script's).
     fn start_in(name: &str, script_sub: &str, cwd_sub: &str) -> Self {
+        Self::start_with(name, script_sub, Some(cwd_sub))
+    }
+
+    /// The script in `dir/<script_sub>`, the server running in
+    /// `dir/<cwd_sub>`, or in `/` (as agents start it) when `None`.
+    fn start_with(name: &str, script_sub: &str, cwd_sub: Option<&str>) -> Self {
         let dir = std::env::temp_dir().join(format!("scriptorium-mcp-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(script_sub)).unwrap();
-        std::fs::create_dir_all(dir.join(cwd_sub)).unwrap();
         std::fs::write(dir.join(script_sub).join("film.fdx"), SCRIPT).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_scriptorium-mcp"))
-            .current_dir(dir.join(cwd_sub))
+        let cwd = match cwd_sub {
+            Some(sub) => {
+                std::fs::create_dir_all(dir.join(sub)).unwrap();
+                dir.join(sub)
+            }
+            None => PathBuf::from("/"),
+        };
+        // Its own runtime and home folders, so no real app is reached; and
+        // as little environment as Claude Desktop passes.
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_scriptorium"))
+            .arg("mcp")
+            .current_dir(cwd)
+            .env_clear()
+            .env("HOME", dir.join("home"))
+            .env("XDG_RUNTIME_DIR", dir.join("run"))
+            .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -142,7 +164,8 @@ fn the_versions_read_tools_are_read_only_and_read_the_pair() {
     for name in ["list_versions", "read_rows"] {
         let t = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap();
         assert_eq!(t["annotations"]["readOnlyHint"], true, "{name}");
-        assert!(t["inputSchema"]["required"].as_array().unwrap().contains(&json!("script")), "{name}");
+        assert!(t["inputSchema"]["properties"]["script"].is_object(), "{name}");
+        assert!(!t["inputSchema"]["required"].as_array().unwrap().contains(&json!("script")), "{name}");
     }
     let en = s.dir.join("film.fdx").to_string_lossy().into_owned();
     assert_eq!(
@@ -166,7 +189,7 @@ fn new_version_then_rows_suggested_on_the_version_and_written_only_with_an_outpu
     let tools = s.request("tools/list", json!({}));
     let t = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "new_version").unwrap();
     assert_eq!(t["annotations"]["readOnlyHint"], false);
-    assert_eq!(t["inputSchema"]["required"], json!(["script", "language", "original_language"]));
+    assert_eq!(t["inputSchema"]["required"], json!(["language", "original_language"]));
     let en = s.dir.join("film.fdx").to_string_lossy().into_owned();
     let args = json!({ "script": en, "language": "es", "original_language": "en" });
     let out = s.ok("new_version", args.clone());
@@ -359,9 +382,8 @@ fn paths_are_relative_to_the_script_not_the_server() {
     assert_eq!(std::fs::read_to_string(s.dir.join("outside.review.txt")).unwrap(), "SCRIPT REVIEW v1\n");
     assert!(!scripts.join("made").exists() && !s.dir.join("made").exists() && !s.dir.join("new.review.txt").exists());
     assert!(!scripts.join(".bashrc.d").exists());
-    if let Some(home) = std::env::var_os("HOME") {
-        assert!(!Path::new(&home).join("scriptorium-mcp-test-never.review.txt").exists());
-    }
+    // `~` is the server's home folder.
+    assert!(!s.dir.join("home/scriptorium-mcp-test-never.review.txt").exists());
 
     // attach_reviews and detach_reviews are the model's choice too: only
     // reviews in the script's folder, and an attached one must read as one.
@@ -646,4 +668,288 @@ fn write_script_never_replaces_a_file_named_after_the_link() {
     let (text, err) = s.call("write_script", json!({ "script": link, "output": "linked (scriptorium).fdx" }));
     assert!(err && text.contains("another name"), "{text}");
     assert_eq!(std::fs::read_to_string(other.join("linked (scriptorium).fdx")).unwrap(), "keep me");
+}
+
+// ---- the link: a fake app in this process ------------------------------------
+
+use scriptorium_fsio::link::proto::{Done, Hello, Reply, Route};
+
+/// What the fake app does with one request.
+enum Act {
+    /// `taken` (naming the script), then `done` with this text.
+    Done(&'static str),
+    /// `route: files`.
+    Files,
+    /// `taken` (naming the script), then hang up.
+    TakenThenHangUp,
+    /// `taken`, then a `done` for another request: a protocol break.
+    WrongId,
+    /// `taken`, then `route: files`: a protocol break.
+    TakenThenRoute,
+}
+
+impl Server {
+    fn script_path(&self) -> String {
+        self.dir.join("film.fdx").to_string_lossy().into_owned()
+    }
+
+    /// A fake app on this server's socket: for each of `conns`, it accepts
+    /// one connection, answers its hello with that hello, and its requests
+    /// with the acts in turn, then hangs up. After the last it closes the
+    /// socket. The thread returns the calls it got (name and arguments).
+    fn fake_app(&self, conns: Vec<(Hello, Vec<Act>)>) -> std::thread::JoinHandle<Vec<(String, Value)>> {
+        let socket = self.dir.join("run/scriptorium/agent.sock");
+        let server = scriptorium_fsio::link::Server::bind_at(&socket).unwrap();
+        let script = self.script_path();
+        std::thread::spawn(move || {
+            let mut got = vec![];
+            for (hello, acts) in conns {
+                let mut conn = server.accept().unwrap();
+                if conn.handshake(&hello).unwrap().is_none() {
+                    continue;
+                }
+                for act in acts {
+                    let req = conn.next_request().unwrap().unwrap();
+                    got.push((req.call.name.clone(), req.call.arguments.clone()));
+                    let taken = Reply::Taken { script: Some(script.clone()) };
+                    match act {
+                        Act::Done(text) => {
+                            conn.reply(req.id, &taken).unwrap();
+                            conn.reply(req.id, &Reply::Done(Done { text: text.into(), is_error: false })).unwrap();
+                        }
+                        Act::Files => conn.reply(req.id, &Reply::Route(Route::Files)).unwrap(),
+                        Act::TakenThenHangUp => {
+                            conn.reply(req.id, &taken).unwrap();
+                            break;
+                        }
+                        Act::WrongId => {
+                            conn.reply(req.id, &taken).unwrap();
+                            let done = Reply::Done(Done { text: "x".into(), is_error: false });
+                            conn.reply(req.id + 100, &done).unwrap();
+                            break;
+                        }
+                        Act::TakenThenRoute => {
+                            conn.reply(req.id, &taken).unwrap();
+                            conn.reply(req.id, &Reply::Route(Route::Files)).unwrap();
+                            break;
+                        }
+                    }
+                }
+            }
+            got
+        })
+    }
+}
+
+#[test]
+fn calls_go_to_the_app_when_it_answers() {
+    let mut s = Server::start("routed");
+    let app = s.fake_app(vec![(Hello::this_build(), vec![Act::Done("a"), Act::Done("b"), Act::Done("c")])]);
+    // No script: the app uses its open one.
+    assert_eq!(s.ok("read_scene", json!({ "scene": 1 })), "a");
+    // A relative script reaches the app absolute, from the connector's folder.
+    assert_eq!(s.ok("read_scene", json!({ "script": "film.fdx", "scene": 1 })), "b");
+    // guide goes to the app while it is up.
+    assert_eq!(s.ok("guide", json!({ "topic": "review" })), "c");
+    let got = app.join().unwrap();
+    assert_eq!(got[0], ("read_scene".to_string(), json!({ "scene": 1 })));
+    assert_eq!(got[1].1["script"], json!(s.script_path()));
+    assert_eq!(got[2].0, "guide");
+    // The app is gone: where_is_writer answers plainly, and a call with no
+    // script says how to go on.
+    let text = s.ok("where_is_writer", json!({}));
+    assert!(text.contains("Scriptorium isn't open"), "{text}");
+    let (text, err) = s.call("read_scene", json!({ "scene": 1 }));
+    assert!(err && text.contains("Scriptorium isn't open") && text.contains("`script`"), "{text}");
+    // guide still works without the app.
+    assert!(s.ok("guide", json!({ "topic": "translate" })).len() > 100);
+}
+
+#[test]
+fn route_files_runs_the_call_on_the_files() {
+    let mut s = Server::start("route-files");
+    let app = s.fake_app(vec![(Hello::this_build(), vec![Act::Files, Act::Files])]);
+    let script = s.script_path();
+    let scene = s.ok("read_scene", json!({ "script": script, "scene": 1 }));
+    assert!(scene.contains("FARM HOUSE"), "{scene}");
+    // Sent to the files with no script: nothing is open in the app.
+    let (text, err) = s.call("read_scene", json!({ "scene": 1 }));
+    assert!(err && text.contains("no script open"), "{text}");
+    app.join().unwrap();
+}
+
+#[test]
+fn another_version_of_the_app_is_told_once_and_the_files_used() {
+    let mut s = Server::start("mismatch");
+    let other = Hello { version: "0.0.1-other".into(), ..Hello::this_build() };
+    let app = s.fake_app(vec![(other.clone(), vec![]), (other.clone(), vec![]), (other, vec![])]);
+    let script = s.script_path();
+    let first = s.ok("read_scene", json!({ "script": script, "scene": 1 }));
+    assert!(first.contains("FARM HOUSE"), "{first}");
+    assert!(first.contains("Scriptorium 0.0.1-other is open but this connection is from"), "{first}");
+    let second = s.ok("read_scene", json!({ "script": script, "scene": 1 }));
+    assert!(second.contains("FARM HOUSE") && !second.contains("0.0.1-other"), "{second}");
+    // Something is open: never "isn't open".
+    let text = s.ok("where_is_writer", json!({}));
+    assert!(text.contains("a different version") && !text.contains("isn't open"), "{text}");
+    app.join().unwrap();
+}
+
+#[test]
+fn the_app_gone_between_calls_means_not_delivered() {
+    let mut s = Server::start("gone-between");
+    // It hangs up after one call and takes the next connection.
+    let app =
+        s.fake_app(vec![(Hello::this_build(), vec![Act::Done("a")]), (Hello::this_build(), vec![Act::Done("b")])]);
+    assert_eq!(s.ok("read_scene", json!({ "scene": 1 })), "a");
+    // Not delivered on the old link: sent again on a new one.
+    assert_eq!(
+        s.ok("suggest_change", json!({ "review_file": "x.review.txt", "paragraph_id": 3, "options": ["y"] })),
+        "b"
+    );
+    app.join().unwrap();
+    // Now it is gone for good: a writing call runs on the files, with no
+    // "maybe applied".
+    let script = s.script_path();
+    let out = s.ok(
+        "suggest_change",
+        json!({ "script": script, "review_file": "pass.review.txt", "paragraph_id": 3,
+                "options": ["I am going to town tomorrow."] }),
+    );
+    assert!(out.contains("#1") && !out.contains("may have been applied"), "{out}");
+    assert!(s.dir.join("pass.review.txt").is_file());
+}
+
+#[test]
+fn the_app_gone_after_taking_a_read_runs_it_on_the_files() {
+    let mut s = Server::start("gone-read");
+    let app = s.fake_app(vec![(Hello::this_build(), vec![Act::TakenThenHangUp])]);
+    // No script given: the one the app's `taken` named.
+    let scene = s.ok("read_scene", json!({ "scene": 1 }));
+    assert!(scene.contains("FARM HOUSE"), "{scene}");
+    app.join().unwrap();
+}
+
+#[test]
+fn the_app_gone_after_taking_a_write_never_runs_it_twice() {
+    let mut s = Server::start("gone-write");
+    let app = s.fake_app(vec![(Hello::this_build(), vec![Act::TakenThenHangUp])]);
+    let script = s.script_path();
+    let (text, err) = s.call(
+        "suggest_change",
+        json!({ "script": script, "review_file": "pass.review.txt", "paragraph_id": 3, "options": ["x y"] }),
+    );
+    assert!(err && text.contains("may have been applied") && text.contains("list_suggestions"), "{text}");
+    assert!(!s.dir.join("pass.review.txt").exists());
+    app.join().unwrap();
+    // The next call uses the files.
+    let scene = s.ok("read_scene", json!({ "script": script, "scene": 1 }));
+    assert!(scene.contains("FARM HOUSE"), "{scene}");
+}
+
+#[test]
+fn the_files_route_waits_for_a_held_lock() {
+    let mut s = Server::start("lock-wait");
+    let script = s.dir.join("film.fdx").canonicalize().unwrap();
+    let lock = scriptorium_fsio::SessionLock::acquire(
+        &scriptorium_fsio::SessionLock::path_for(&script),
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let held = std::time::Duration::from_millis(800);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(held);
+        drop(lock);
+    });
+    let start = std::time::Instant::now();
+    let out = s.ok(
+        "suggest_change",
+        json!({ "script": script.to_string_lossy(), "review_file": "pass.review.txt", "paragraph_id": 3,
+                "options": ["I am going to town tomorrow."] }),
+    );
+    assert!(out.contains("#1"), "{out}");
+    assert!(start.elapsed() >= held, "it waited for the lock");
+    release.join().unwrap();
+}
+
+#[test]
+fn started_in_the_root_folder_with_no_app() {
+    let mut s = Server::start_with("root", "", None);
+    let init = s.request("initialize", json!({ "protocolVersion": "2099-01-01" }));
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
+    assert!(init["result"]["instructions"].as_str().unwrap().contains("where_is_writer"));
+    assert!(init["result"]["capabilities"]["prompts"].is_object());
+    let script = s.script_path();
+    let scene = s.ok("read_scene", json!({ "script": script, "scene": 1 }));
+    assert!(scene.contains("FARM HOUSE"), "{scene}");
+    // Unknown tools are protocol errors; a script that isn't a .fdx a tool error.
+    assert_eq!(s.request("tools/call", json!({ "name": "nope", "arguments": {} }))["error"]["code"], -32602);
+    let (text, err) = s.call("read_scene", json!({ "script": "/nowhere/x.fdx", "scene": 1 }));
+    assert!(err && text.contains("x.fdx"), "{text}");
+}
+
+#[test]
+fn prompts_are_listed_and_fetched() {
+    let mut s = Server::start("prompts");
+    let list = s.request("prompts/list", json!({}));
+    let names: Vec<&str> =
+        list["result"]["prompts"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["review_pass", "translate"]);
+    let got = s.request("prompts/get", json!({ "name": "translate", "arguments": { "language": "Spanish" } }));
+    let messages = got["result"]["messages"].as_array().unwrap();
+    assert!(messages[1]["content"]["text"].as_str().unwrap().contains("Spanish"), "{got}");
+    assert_eq!(s.request("prompts/get", json!({ "name": "nope" }))["error"]["code"], -32602);
+}
+
+#[test]
+fn a_protocol_break_on_a_write_is_maybe_applied() {
+    let mut s = Server::start("garbled");
+    let ok = || Hello::this_build();
+    let app = s.fake_app(vec![(ok(), vec![Act::WrongId]), (ok(), vec![Act::TakenThenRoute])]);
+    let script = s.script_path();
+    for _ in 0..2 {
+        let (text, err) = s.call(
+            "suggest_change",
+            json!({ "script": script, "review_file": "pass.review.txt", "paragraph_id": 3, "options": ["x y"] }),
+        );
+        assert!(err && text.contains("may have been applied"), "{text}");
+    }
+    assert!(!s.dir.join("pass.review.txt").exists());
+    app.join().unwrap();
+}
+
+#[test]
+fn a_stale_link_then_another_version_tells_once() {
+    let mut s = Server::start("stale-mismatch");
+    let other = Hello { version: "0.0.1-other".into(), ..Hello::this_build() };
+    let app = s.fake_app(vec![(Hello::this_build(), vec![Act::Done("a")]), (other.clone(), vec![]), (other, vec![])]);
+    assert_eq!(s.ok("read_scene", json!({ "scene": 1 })), "a");
+    let script = s.script_path();
+    // The old link is gone; the new one is another version.
+    let first = s.ok("read_scene", json!({ "script": script, "scene": 1 }));
+    assert!(first.contains("FARM HOUSE") && first.contains("0.0.1-other is open"), "{first}");
+    let (text, err) = s.call("read_scene", json!({ "scene": 1 }));
+    assert!(err && text.contains("a different version") && !text.contains("0.0.1-other is open"), "{text}");
+    app.join().unwrap();
+}
+
+#[test]
+fn a_line_that_isnt_utf8_is_a_parse_error_and_the_server_goes_on() {
+    let mut s = Server::start("utf8");
+    s.stdin.write_all(b"{\"id\": 1, \"method\": \"ping\xff\"}\n").unwrap();
+    s.stdin.flush().unwrap();
+    let mut line = String::new();
+    s.stdout.read_line(&mut line).unwrap();
+    let reply: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["error"]["code"], -32700, "{reply}");
+    s.next_id = 2;
+    assert_eq!(s.request("ping", json!({}))["result"], json!({}));
+}
+
+#[test]
+fn mcp_takes_no_arguments() {
+    let out = Command::new(env!("CARGO_BIN_EXE_scriptorium")).args(["mcp", "--x"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("`scriptorium mcp` takes no arguments"));
+    assert!(out.stdout.is_empty());
 }

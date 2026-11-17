@@ -570,8 +570,12 @@ there.
     up. The app answers them even for another script.
 - `script` is optional:
   - Over the link the app uses its open script.
-  - On the files, a missing `script` is an error: "Scriptorium isn't open.
-    Ask the writer for the script's path, or to open it in Scriptorium."
+  - On the files, a missing `script` is an error: "Scriptorium isn't open,
+    so there's no open script to use. Ask the writer to open the script in
+    Scriptorium, or give its absolute path as `script`." (When the app is
+    open but sent the call to the files, is another version, or didn't
+    answer, the message says that instead; `where_is_writer` with no app
+    answers plainly that Scriptorium isn't open.)
   - In the Agent offer (`tools/src/agent.rs`): drop `script` from
     `required`, and reword `SCRIPT` to "Leave out to use the script open
     in Scriptorium; otherwise its absolute path". Update

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "scriptorium": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/scriptorium-mcp",
-      "args": []
-    }
-  }
-}

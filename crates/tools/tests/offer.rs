@@ -57,10 +57,14 @@ fn every_agent_tool_takes_script() {
             continue;
         }
         assert!(spec.schema["properties"]["script"].is_object(), "{}", spec.name);
+        // Left out, the host uses the script open in the app.
         let required = spec.schema["required"].as_array().unwrap();
-        assert!(required.iter().any(|r| r == "script"), "{}: script not required", spec.name);
+        assert!(!required.iter().any(|r| r == "script"), "{}: script required", spec.name);
         assert!(
-            spec.schema["properties"]["script"]["description"].as_str().unwrap().starts_with("Absolute path"),
+            spec.schema["properties"]["script"]["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Leave out to use the script open in Scriptorium; otherwise its absolute path"),
             "{}",
             spec.name
         );

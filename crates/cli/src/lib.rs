@@ -12,6 +12,8 @@
 //! - [`structure`]: insert, remove, split, join and retype, as typed functions.
 //! - [`commands`]: each command, returning the text it prints.
 //! - [`chat`]: `chat`, `threads` and `accounts`, the built-in agent.
+//! - [`mcp`]: `scriptorium mcp`, the agent connector (MCP over stdio, to the
+//!   running app or the files).
 
 #[cfg(feature = "chat")]
 pub mod chat;
@@ -21,6 +23,7 @@ mod connect;
 /// paths keep working. New code depends on `scriptorium-fsio` directly.
 pub use scriptorium_fsio as fsio;
 mod links;
+pub mod mcp;
 mod rows;
 pub mod structure;
 mod version_new;

@@ -1,7 +1,0 @@
-{
-  "name": "scriptorium",
-  "version": "0.5.0",
-  "description": "Review, edit and translate screenplays (Final Draft .fdx) with Scriptorium: propose changes or translations for the writer to decide, or decide them when asked.",
-  "license": "MIT OR Apache-2.0",
-  "keywords": ["screenplay", "final-draft", "review", "writing"]
-}

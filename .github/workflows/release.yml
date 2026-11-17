@@ -51,52 +51,20 @@ jobs:
           ditto -c -k --keepParent target/bundle/Scriptorium.app "$zip"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
 
-      - name: Build plugin binaries
-        env:
-          UNIVERSAL: ${{ inputs.universal && '1' || '0' }}
-          MACOSX_DEPLOYMENT_TARGET: "13.0"
-        run: |
-          targets=(aarch64-apple-darwin)
-          [[ "$UNIVERSAL" == 1 ]] && targets+=(x86_64-apple-darwin)
-          rm -rf target/plugin-bin && mkdir -p target/plugin-bin
-          for t in "${targets[@]}"; do
-            cargo build --release --locked --target "$t" -p scriptorium-cli -p scriptorium-mcp
-          done
-          for bin in scriptorium scriptorium-mcp; do
-            inputs=()
-            for t in "${targets[@]}"; do inputs+=("target/$t/release/$bin"); done
-            lipo -create "${inputs[@]}" -output "target/plugin-bin/$bin"
-          done
-
-      - name: Zip plugin
-        id: plugin
-        run: |
-          version=$(cargo pkgid -p scriptorium-app | sed 's/.*@//')
-          plugin/package.sh target/plugin-pkg target/plugin-bin
-          codesign --force -s - target/plugin-pkg/scriptorium-plugin/bin/scriptorium
-          codesign --force -s - target/plugin-pkg/scriptorium-plugin/bin/scriptorium-mcp
-          zip="Scriptorium-plugin-$version-mac.zip"
-          ditto -c -k --keepParent target/plugin-pkg/scriptorium-plugin "$zip"
-          echo "zip=$zip" >> "$GITHUB_OUTPUT"
-
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.zip.outputs.zip }}
           path: ${{ steps.zip.outputs.zip }}
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.plugin.outputs.zip }}
-          path: ${{ steps.plugin.outputs.zip }}
-          if-no-files-found: error
-
+      # TODO(G1): sign the bundled CLI (Contents/MacOS/scriptorium) before the
+      # app, smoke-test `scriptorium mcp` from the bundle, and new release notes.
       - name: GitHub Release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            "${{ steps.zip.outputs.zip }}" "${{ steps.plugin.outputs.zip }}" \
+            "${{ steps.zip.outputs.zip }}" \
             --title "Scriptorium $GITHUB_REF_NAME" \
-            --notes "Unsigned (ad-hoc) macOS build, macOS 13+. First launch: see docs/testing-on-mac.md (it covers the xattr quarantine step). New: translation versions. Ask Claude (plugin or in-app chat) or use File > New version (Cmd+T) to make a version of your script in another language, lined up row by row with the original shown on the left; Claude fills it with suggestions you decide as usual, and Write .fdx saves the version file itself (testing-on-mac.md section 7). Also new: AI chat. Ctrl/Cmd+L opens a chat panel where an agent proposes edits as suggestions you decide as usual; add your own API key (Anthropic, OpenAI, OpenRouter or a custom endpoint) under AI accounts. macOS asks to use the Keychain: choose Always Allow (testing-on-mac.md section 9). The chat is also in the CLI: scriptorium chat, threads, accounts. Chat sends your messages and the parts of the script the agent reads to your provider; the first use shows what. Work on a copy of your script. Sharing a folder needs the same Scriptorium version."
+            --notes "Unsigned (ad-hoc) macOS build, macOS 13+. First launch: see docs/testing-on-mac.md (it covers the xattr quarantine step). New: translation versions. Ask the in-app chat or use File > New version (Cmd+T) to make a version of your script in another language, lined up row by row with the original shown on the left; the agent fills it with suggestions you decide as usual, and Write .fdx saves the version file itself (testing-on-mac.md section 7). Also new: AI chat. Ctrl/Cmd+L opens a chat panel where an agent proposes edits as suggestions you decide as usual; add your own API key (Anthropic, OpenAI, OpenRouter or a custom endpoint) under AI accounts. macOS asks to use the Keychain: choose Always Allow (testing-on-mac.md section 9). The chat is also in the CLI: scriptorium chat, threads, accounts. Chat sends your messages and the parts of the script the agent reads to your provider; the first use shows what. Work on a copy of your script. Sharing a folder needs the same Scriptorium version."
