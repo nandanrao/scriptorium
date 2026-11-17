@@ -747,12 +747,13 @@ impl Ctx<'_, '_> {
     ) -> Result<Found, &'static str> {
         const MOVED: &str = "the row's lines were split, removed or moved apart since this suggestion";
         if e.is_line() {
-            // Several lines: a pending entry only on the line it names
-            // (`PARA`), which the resolver gives this way when that line was
-            // split since; it then reads as split, and can't be accepted
-            // over the split. Never a decided one: restoring its decision
+            // Several lines: only on the line the entry names (`PARA`, or
+            // where its decision in the document is), which the resolver
+            // gives this way when that line was split since; it then reads
+            // as split (a pending one can't be accepted over the split).
+            // Never one decided only in its file: restoring its decision
             // would write the whole line into the head.
-            let pending = v.is_none() && e.status == FileStatus::Pending;
+            let pending = v.is_some() || e.status == FileStatus::Pending;
             let id = match (cell, now) {
                 ([id], _) => id,
                 (_, [p]) if pending && cell.contains(p) => p,

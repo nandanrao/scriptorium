@@ -93,10 +93,19 @@ pub fn only_decisions(saved: &SessionFile, fresh: &Document, session: &Session) 
             meta.insert(key, to);
         }
     }
-    let was = decisions(meta.iter().filter_map(|(k, v)| Some((*k, (*v)?))));
+    // Every key the session holds (set at its start or by its events, an
+    // undecided one included) must read as the files do. Keys only the
+    // files have (decided on lines not placed when the session began) are
+    // theirs alone: nothing of them is in the session to lose.
     let files = saved_progress(session);
-    if was.len() != files.len() || !was.iter().all(|(k, v)| v.as_ref().ok() == files.get(*k)) {
-        return Err(Kept::Decisions);
+    for (key, value) in &meta {
+        let held = match value {
+            None => None,
+            Some(v) => Some(MetaValue::parse(v).ok_or(Kept::Decisions)?.decision),
+        };
+        if held != files.get(*key).copied() {
+            return Err(Kept::Decisions);
+        }
     }
     let applied: Vec<&Op> = events.iter().flatten().flat_map(|t| &t.ops).collect();
     let lines = line_keys(&events).ok_or(Kept::Decisions)?;
@@ -126,7 +135,12 @@ pub fn only_decisions(saved: &SessionFile, fresh: &Document, session: &Session) 
         let before = || item.map_or_else(|| one(Some(&entry.before)), |it| Ok(it.before.clone()));
         let option = |k: usize| match item {
             Some(it) => it.options.get(k).cloned().ok_or(Kept::Decisions),
-            None => one(entry.options.get(k)),
+            // The session's option `k` among those that don't read as the
+            // line already (as `saved_progress` maps them).
+            None => {
+                let before = Line::join(&entry.before);
+                one(entry.options.iter().filter(|o| Line::join(o) != before).nth(k))
+            }
         };
         let began = match start.get(key).copied().flatten().map(MetaValue::parse) {
             None | Some(Some(MetaValue { decision: Stored::Rejected, .. })) => before()?,
@@ -239,10 +253,14 @@ fn own_lines_only(group: &[&Transaction]) -> bool {
 }
 
 /// The decisions the review files hold, under the keys a session stores them
-/// by: `accepted` with the option (the file's `CHOSEN` mapped to the item's
-/// option index where the entry is placed now; where it isn't, the file's
-/// own number, which is the same unless an option repeats the `BEFORE`
-/// line), `rejected`, `rewritten`. Pending entries have none.
+/// by: `accepted` with the option, `rejected`, `rewritten`. Pending entries
+/// have none. A session numbers an accepted option among the item's options,
+/// which leave out those that read like the line already (`option_src`):
+/// the file's `CHOSEN` is mapped through the item where the entry is placed
+/// now, and where it isn't, by leaving out the options before it whose text
+/// is exactly the entry's `BEFORE` (the matcher also leaves out ones that
+/// differ only in case or quote style; those still read as another option
+/// and refuse, never lose anything).
 fn saved_progress(session: &Session) -> BTreeMap<String, Stored> {
     let mut out = BTreeMap::new();
     for review in &session.reviews {
@@ -256,7 +274,10 @@ fn saved_progress(session: &Session) -> BTreeMap<String, Stored> {
                     let item = review.items.iter().find(|it| it.entry == e);
                     let k = match item {
                         Some(it) => it.option_src.iter().position(|&src| src == chosen).unwrap_or(chosen),
-                        None => chosen,
+                        None => {
+                            let before = Line::join(&entry.before);
+                            chosen - entry.options.iter().take(chosen).filter(|o| Line::join(o) == before).count()
+                        }
                     };
                     Stored::Accepted(k)
                 }
@@ -265,12 +286,4 @@ fn saved_progress(session: &Session) -> BTreeMap<String, Stored> {
         }
     }
     out
-}
-
-/// What was decided under each decision key: its decision, or the raw value
-/// when it doesn't parse (compared as is).
-fn decisions<'a>(meta: impl Iterator<Item = (&'a str, &'a str)>) -> BTreeMap<&'a str, Result<Stored, &'a str>> {
-    meta.filter(|(k, _)| k.starts_with(PREFIX))
-        .map(|(k, v)| (k, MetaValue::parse(v).map(|m| m.decision).ok_or(v)))
-        .collect()
 }

@@ -332,8 +332,10 @@ fn a_version_from_new_to_written_twice_through_final_draft_edits() {
     f.write("film.fdx", &e);
 
     // Reopened: both re-found, the old session set aside.
-    // The session holds only the decisions the review files hold (the lines
-    // Final Draft changed just aren't found now): set aside with a note.
+    // The session is the fresh one the write left: no events of its own,
+    // only its start from the review files (some of whose lines Final Draft
+    // changed, so they aren't found now). It holds nothing beyond the files:
+    // set aside with a note.
     let mut notes = vec![];
     let mut o = Opened::open(&s(&es), &[], &mut notes).unwrap_or_else(|e| panic!("{e}"));
     for file in ["film.es.fdx", "film.fdx"] {
@@ -463,14 +465,13 @@ fn a_decided_block_of_another_length_is_placed_after_a_write() {
     assert_eq!(rows(&o)[9].placed, [(0, Status::Accepted(0))]);
 }
 
-/// BUG (A12): after a decision on a row (saved, its progress in the review
-/// file), Final Draft retypes that line of the version. The CLI's open then
-/// refuses ("its session holds decisions that aren't saved in a review
-/// file") though the review file holds the decision: `aside::only_decisions`
-/// compares the session's decisions with those the fresh open *placed*, and
-/// an entry whose line was retyped isn't placed. The plan ("Opening a
-/// version from the CLI after a Final Draft save") compares with the review
-/// files' saved progress.
+/// Found by A12: after a decision on a row (saved, its progress in the
+/// review file) and a write in place, Final Draft retypes that line of the
+/// version. The CLI's open must not refuse: the session the write left has
+/// no events of its own, so it holds nothing beyond the review files (see
+/// `aside::only_decisions`). The path that compares a session's own
+/// decisions with the files' saved progress is covered in `set_aside.rs`
+/// (`a_decision_after_an_unplaced_one_survives_another_final_draft_save`).
 #[test]
 fn a_final_draft_edit_to_a_decided_line_still_opens_from_the_cli() {
     let (f, es) = made("retyped");
@@ -566,8 +567,9 @@ fn the_real_script_from_new_to_written_twice() {
     let v = f.read("PURPLE LIST.es.fdx");
     f.write("PURPLE LIST.es.fdx", &v.replace("\n    <Paragraph", "\n\t<Paragraph"));
 
-    // The session holds only what the review file holds (the reworded
-    // row's decision just isn't placed now): set aside with a note.
+    // The session is the fresh one the write left, with no events of its
+    // own (the reworded row's decision just isn't placed now): it holds
+    // nothing beyond the review file, so it is set aside with a note.
     let mut notes = vec![];
     let mut o = Opened::open(&s(&es), &[], &mut notes).unwrap_or_else(|e| panic!("{e}"));
     for file in ["PURPLE LIST.es.fdx", "PURPLE LIST.fdx"] {

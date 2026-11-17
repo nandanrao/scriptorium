@@ -34,10 +34,10 @@ use crate::links::{Links, Para, Row, Stamp};
 
 /// What re-find found: which old id is which new one, and what's left over.
 ///
-/// The shell's message ("PURPLE LIST.fdx changed outside Scriptorium: N
-/// lines found again, X changed, Y new, Z gone") reads: found again =
-/// `exact`, changed = [`Alignment::changed`], new = `new.len()`, gone =
-/// `gone.len()`. For the made member, `new` are the lines left unlisted
+/// The shell's message ("PURPLE LIST.fdx changed outside Scriptorium: X
+/// lines reworded, Y new, Z removed; …") reads: reworded =
+/// [`Alignment::changed`], new = `new.len()`, removed = `gone.len()`; the
+/// rest (`exact`) are where they were. For the made member, `new` are the lines left unlisted
 /// (D3), not new rows.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Alignment {
@@ -214,6 +214,15 @@ fn pair_stretch(old: &[(&ElementKind, &str)], new: &[(&ElementKind, String)]) ->
     out
 }
 
+/// How alike (`similarity`) a split's joined halves must be to the old
+/// line, and by how much more than any one half: a reworded line next to
+/// an added one is not a split.
+const SPLIT_ALIKE: f64 = 0.6;
+const SPLIT_MARGIN: f64 = 0.1;
+/// Joined halves this alike are the old line itself (a split and nothing
+/// else), so any gain over the best half will do.
+const SPLIT_SAME: f64 = 0.95;
+
 /// (old or first-half index, new index) within one stretch.
 type IndexPair = (usize, usize);
 
@@ -223,17 +232,21 @@ const SPLIT_REACH: usize = 8;
 /// Splits in one stretch, after [`pair_stretch`]: for each pair (i, j),
 /// the unpaired same-kind lines right before and after j may be halves of
 /// old line i split in the file. The range around j whose joined text
-/// (whitespace-joined) is most like old i is taken when it reads more like
-/// it than any one line in it does; then i pairs with the range's first
-/// line and the others are its rest. Returns the pairs and (first, rest)
+/// (whitespace-joined) is most like old i is taken when it reads clearly
+/// like it (`SPLIT_ALIKE`) and clearly more than any one line in it does
+/// (`SPLIT_MARGIN`), or reads as the old line itself (`SPLIT_SAME`) and
+/// more than any one line; then i pairs with the range's first line and the
+/// others are its rest. Pairs claim in order; a line claimed once is never
+/// claimed again. Returns the pairs and (first, rest)
 /// index pairs. Blank old lines have nothing to compare, so never split.
 fn find_splits(
     old: &[(&ElementKind, &str)],
     new: &[(&ElementKind, String)],
     pairs: Vec<(usize, usize)>,
 ) -> (Vec<IndexPair>, Vec<IndexPair>) {
-    let paired: HashSet<usize> = pairs.iter().map(|(_, j)| *j).collect();
-    let free = |j: usize, kind: &ElementKind| !paired.contains(&j) && new[j].0 == kind;
+    // Lines a pair holds or a split claimed; updated as splits claim more,
+    // so no line is ever claimed twice.
+    let mut taken: HashSet<usize> = pairs.iter().map(|(_, j)| *j).collect();
     let mut out = Vec::with_capacity(pairs.len());
     let mut rests = Vec::new();
     for (i, j) in pairs {
@@ -242,12 +255,13 @@ fn find_splits(
             out.push((i, j));
             continue;
         }
+        let free = |k: usize| !taken.contains(&k) && new[k].0 == kind;
         let mut lo = j;
-        while lo > 0 && j - lo < SPLIT_REACH && free(lo - 1, kind) {
+        while lo > 0 && j - lo < SPLIT_REACH && free(lo - 1) {
             lo -= 1;
         }
         let mut hi = j;
-        while hi + 1 < new.len() && hi - j < SPLIT_REACH && free(hi + 1, kind) {
+        while hi + 1 < new.len() && hi - j < SPLIT_REACH && free(hi + 1) {
             hi += 1;
         }
         let mut best: Option<(f64, usize, usize)> = None;
@@ -259,13 +273,16 @@ fn find_splits(
                 let joined = new[s..=e].iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" ");
                 let alike = similarity(text, &joined);
                 let single = new[s..=e].iter().map(|(_, t)| similarity(text, t)).fold(0.0, f64::max);
-                if alike > single && best.is_none_or(|(b, _, _)| alike > b) {
+                let clear =
+                    (alike >= SPLIT_ALIKE && alike >= single + SPLIT_MARGIN) || (alike >= SPLIT_SAME && alike > single);
+                if clear && best.is_none_or(|(b, _, _)| alike > b) {
                     best = Some((alike, s, e));
                 }
             }
         }
         match best {
             Some((_, s, e)) => {
+                taken.extend(s..=e);
                 out.push((i, s));
                 rests.extend((s + 1..=e).map(|r| (s, r)));
             }

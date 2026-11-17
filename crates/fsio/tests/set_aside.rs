@@ -515,3 +515,70 @@ fn a_decided_line_retyped_in_final_draft_still_opens() {
     retype(&h);
     assert!(open(&h).is_err());
 }
+
+/// A decision made after one whose line Final Draft changed: the session
+/// that began then holds only its own (the unplaced one is the file's
+/// alone), and another Final Draft save must still set it aside.
+#[test]
+fn a_decision_after_an_unplaced_one_survives_another_final_draft_save() {
+    let f = Folder::new("after-unplaced");
+    let review = format!("{REVIEW}\n---\nBEFORE: Laura smiles.\nAFTER: Laura grins.\n");
+    std::fs::write(f.review(), review).unwrap();
+    // The first item is Laura's line (entry 1).
+    accept(&f, true);
+    // Final Draft retypes the decided line: set aside, the new session
+    // begins without that decision (it isn't placed).
+    let s = std::fs::read_to_string(f.script()).unwrap();
+    std::fs::write(f.script(), s.replace("Laura smiles.", "Nobody is here.")).unwrap();
+    let mut o = open(&f).unwrap_or_else(|e| panic!("{e}"));
+    o.save().unwrap();
+    // A decision of this session's own (an event), with its progress.
+    let mut o = open(&f).unwrap();
+    let i = o.session.reviews[0].items.iter().position(|it| it.entry == 0).unwrap();
+    let sel = o.sel();
+    o.session.decide(&mut o.doc, sel, 0, i, Decision::Accept(0)).unwrap();
+    o.save().unwrap();
+    let text = std::fs::read_to_string(f.review()).unwrap();
+    assert_eq!(text.matches("STATUS: accepted").count(), 2, "{text}");
+    // Final Draft re-saves the version.
+    let s = std::fs::read_to_string(f.script()).unwrap();
+    std::fs::write(f.script(), s.replace("\n    <Paragraph", "\n\t<Paragraph")).unwrap();
+    let mut notes = vec![];
+    let o = Opened::open(&f.script(), &[], &mut notes).unwrap_or_else(|e| panic!("{e}"));
+    assert!(notes.iter().any(|n| n.contains("held only decisions")), "{notes:?}");
+    assert_eq!(o.session.progress(&o.doc, 0).accepted, 1, "the placed one");
+
+    // Undecided in a session while the file says decided: refused.
+    let g = Folder::new("undecided-unsaved");
+    accept(&g, true);
+    g.made(false);
+    let mut o = open(&g).unwrap();
+    let sel = o.sel();
+    o.session.decide(&mut o.doc, sel, 0, 0, Decision::Undecided).unwrap();
+    o.save().unwrap();
+    g.final_draft_save(false);
+    assert!(open(&g).is_err());
+}
+
+/// An option that repeats the line isn't one of the item's options: the
+/// session's option 1 is the file's `CHOSEN` 2, also when Final Draft
+/// changed the line and the entry isn't placed.
+#[test]
+fn an_option_repeating_the_line_is_counted_out_when_not_placed() {
+    let f = Folder::new("repeat-option");
+    std::fs::write(
+        f.review(),
+        "SCRIPT REVIEW v1\nScript: film.fdx\n\n---\nBEFORE: I am go to the town tomorrow.\n\
+         AFTER: I am go to the town tomorrow.\nAFTER: I am going to town tomorrow.\n",
+    )
+    .unwrap();
+    accept(&f, true);
+    let text = std::fs::read_to_string(f.review()).unwrap();
+    assert!(text.contains("CHOSEN: 2"), "{text}");
+    let s = std::fs::read_to_string(f.script()).unwrap();
+    std::fs::write(f.script(), s.replace("I am go to the town tomorrow.", "We leave now, Laura.")).unwrap();
+    let mut notes = vec![];
+    let o = Opened::open(&f.script(), &[], &mut notes).unwrap_or_else(|e| panic!("{e}"));
+    assert!(notes.iter().any(|n| n.contains("held only decisions")), "{notes:?}");
+    assert_eq!(o.session.reviews[0].unmatched.len(), 1);
+}

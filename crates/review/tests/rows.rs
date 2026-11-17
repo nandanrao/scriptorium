@@ -442,3 +442,22 @@ fn a_line_split_since_keeps_a_pending_entry_on_its_head_but_never_a_decided_one(
     assert!(o.session.reviews[0].items.is_empty());
     assert_eq!((line(&o.doc, 6), line(&o.doc, 9)), ("S".to_string(), "í.".to_string()));
 }
+
+#[test]
+fn accepted_in_the_session_then_split_stays_placed_after_resuming() {
+    let text = file(&["BEFORE: [empty]\nAFTER: Mirá cómo lo hago.\nWHY:\nROW: lk-1\nROW TEXT: Watch me."]);
+    let mut o = resume(version(&[]), &text, None);
+    decide(&mut o, 0, Decision::Accept(0));
+    o.doc.enter(Selection::cursor(Pos::new(ParaId(4), 5))).unwrap();
+    let tail = o.doc.paragraphs()[o.doc.index_of(ParaId(4)).unwrap() + 1].id;
+    let saved = o.to_file(CONTENTS).to_json();
+    // The resolver gives the split row (both lines), as `versions` does.
+    let cell = [4, tail.0];
+    let factory: &RowResolverFactory = &move |_: &Document| fixed(&[&cell]);
+    let source = ReviewSource { name: "t.review.txt".into(), path: "t.review.txt".into(), text };
+    let back = sessionfile::resume(vec![source], version(&[]), None, CONTENTS, Some(&saved), &caps, "", Some(factory));
+    assert!(back.session.reviews[0].unmatched.is_empty(), "{:?}", why(&back.session.reviews[0]));
+    assert_eq!(placed(&back.session.reviews[0]).iter().map(|p| p.1).collect::<Vec<_>>(), [4]);
+    assert_ne!(back.session.status(&back.doc, 0, 0), Status::Pending);
+    assert_eq!((line(&back.doc, 4), line(&back.doc, tail.0)), ("Mirá".to_string(), " cómo lo hago.".to_string()));
+}

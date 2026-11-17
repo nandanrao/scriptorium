@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use scriptorium_core::rules::is_caps;
 use scriptorium_core::{ElementKind, ParaId, Paragraph, Script};
 
-use super::{Alignment, by_text, refind};
+use super::{Alignment, by_text, find_splits, refind};
 use crate::links::{self, Para, Stamp};
 
 use ElementKind::{Action as A, Character as C, Dialogue as D, SceneHeading as H};
@@ -559,4 +559,163 @@ fn line_split_in_three() {
     let al = align(&o, &n);
     assert_eq!(al.pairs, pairs(&[(0, 0), (1, 1), (2, 4)]));
     assert_eq!(al.split, pairs(&[(1, 2), (1, 3)]));
+}
+
+const HOME: &str = "\
+SCRIPTORIUM LINKS v1
+Id: lk-1
+a: film.fdx
+a hash: aaaa
+b: film.es.fdx
+b hash: bbbb
+b created: version new
+---
+0 | 0
+  a0 character = ANA
+  b0 character = ANA
+1 | 1
+  a1 action = She looks out at the rain.
+  b1 action = Mira la lluvia.
+2 | 2
+  a2 action = Not now, Laura. Tomorrow we go to town.
+  b2 action = Ahora no.
+3 | 3
+  a3 action = I am going home.
+  b3 action = Me voy a casa.
+4 | 4
+  a4 character = BOB
+  b4 character = BOB
+";
+
+/// A reworded line followed by a split line: the reworded line's search
+/// must not claim the split's first half too (it was listed twice, and the
+/// links file couldn't be written).
+#[test]
+fn reworded_line_then_split_never_claims_a_line_twice() {
+    let l = links::parse(HOME).unwrap();
+    let n = script(&[
+        (C, "ANA"),
+        (A, "She looks out at the rain."),
+        (A, "Take me with you."),
+        (A, "I"),
+        (A, "am going home."),
+        (C, "BOB"),
+    ]);
+    let (out, al) = re(&l, 0, &n, "x");
+    assert_eq!(al.pairs, pairs(&[(0, 0), (1, 1), (2, 2), (3, 3), (4, 5)]));
+    assert_eq!(al.split, pairs(&[(3, 4)]));
+    assert_eq!(rows(&out), vec![r(&[0], &[0]), r(&[1], &[1]), r(&[2], &[2]), r(&[3, 4], &[3]), r(&[5], &[4])]);
+    links::parse(&links::write(&out).unwrap()).unwrap();
+}
+
+/// A heavily reworded line with a line added after it is not a split: the
+/// added English line gets its own row (C4).
+#[test]
+fn added_line_next_to_reworded_line_is_not_absorbed() {
+    let l = links::parse(HOME).unwrap();
+    let n = script(&[
+        (C, "ANA"),
+        (A, "She looks out at the rain."),
+        (A, "Laura shrugs, then walks off toward the barn."),
+        (A, "A dog barks somewhere."),
+        (A, "I am going home."),
+        (C, "BOB"),
+    ]);
+    let (out, al) = re(&l, 0, &n, "x");
+    assert!(al.split.is_empty(), "{:?}", al.split);
+    assert_eq!(al.new, ids(&[3]));
+    assert_eq!(
+        rows(&out),
+        vec![r(&[0], &[0]), r(&[1], &[1]), r(&[2], &[2]), r(&[3], &[]), r(&[4], &[3]), r(&[5], &[4])]
+    );
+}
+
+/// Property: whatever the edits (splits, rewordings, inserts, removals),
+/// no new id is claimed twice (pairs and split rests together), pairs are
+/// ascending on both sides, and every refind output is a valid links file,
+/// for either member.
+#[test]
+fn random_edits_never_claim_a_line_twice() {
+    const WORDS: [&str; 12] =
+        ["rain", "the", "door", "opens", "Laura", "smiles", "home", "I", "am", "going", "dog", "barks"];
+    let mut seed = 7u64;
+    let mut rnd = |m: usize| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % m
+    };
+    for _ in 0..400 {
+        // An original of 8–20 lines: actions and dialogue between cues.
+        let len = 8 + rnd(13);
+        let mut base: Vec<(ElementKind, String)> = Vec::new();
+        for i in 0..len {
+            let kind = match (i % 4, rnd(3)) {
+                (0, _) => C,
+                (_, 0) => A,
+                _ => D,
+            };
+            let words = 1 + rnd(6);
+            let text = if kind == C {
+                ["ANA", "BOB", "LAURA"][rnd(3)].to_string()
+            } else {
+                (0..words).map(|_| WORDS[rnd(WORDS.len())]).collect::<Vec<_>>().join(" ")
+            };
+            base.push((kind, text));
+        }
+        let mut text = String::from(
+            "SCRIPTORIUM LINKS v1\nId: lk-1\na: A.fdx\na hash: x\nb: B.fdx\nb hash: y\nb created: version new\n---\n",
+        );
+        for (i, (kind, t)) in base.iter().enumerate() {
+            let k = if *kind == C {
+                "character"
+            } else if *kind == A {
+                "action"
+            } else {
+                "dialogue"
+            };
+            text.push_str(&format!("{i} | {i}\n  a{i} {k} = {t}\n  b{i} {k} = {t}\n"));
+        }
+        let l = links::parse(&text).unwrap();
+        // Up to five edits.
+        let mut new = base.clone();
+        for _ in 0..1 + rnd(5) {
+            let at = rnd(new.len());
+            let (kind, t) = new[at].clone();
+            match rnd(4) {
+                0 => {
+                    if let Some(k) = t.find(' ') {
+                        new[at].1 = t[..k].to_string();
+                        new.insert(at + 1, (kind, t[k + 1..].to_string()));
+                    }
+                }
+                1 => new[at].1 = format!("{} {}", WORDS[rnd(WORDS.len())], WORDS[rnd(WORDS.len())]),
+                2 => new.insert(at + 1, (kind, t.clone())),
+                _ => {
+                    if new.len() > 2 {
+                        new.remove(at);
+                    }
+                }
+            }
+        }
+        let refs: Vec<(ElementKind, &str)> = new.iter().map(|(k, t)| (k.clone(), t.as_str())).collect();
+        let n = script(&refs);
+        for member in 0..2 {
+            let (_, al) = re(&l, member, &n, "z");
+            let mut seen = std::collections::HashSet::new();
+            for id in al.pairs.iter().map(|p| p.1).chain(al.split.iter().map(|s| s.1)) {
+                assert!(seen.insert(id), "{id:?} claimed twice: {al:?}\n{new:?}");
+            }
+            assert!(al.pairs.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 < w[1].1), "{al:?}");
+        }
+    }
+}
+
+/// Two old lines that could each claim the line between them: the first
+/// claims it, the second never does.
+#[test]
+fn a_line_between_two_splits_is_claimed_once() {
+    let old = [(&A, "alpha beta"), (&A, "beta gamma")];
+    let new = [(&A, "alpha".to_string()), (&A, "beta".to_string()), (&A, "gamma".to_string())];
+    let (pairs, rests) = find_splits(&old, &new, vec![(0, 0), (1, 2)]);
+    assert_eq!(pairs, [(0, 0), (1, 2)]);
+    assert_eq!(rests, [(0, 1)]);
 }
