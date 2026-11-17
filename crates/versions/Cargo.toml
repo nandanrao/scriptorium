@@ -9,5 +9,8 @@ rust-version.workspace = true
 [dependencies]
 scriptorium-core.workspace = true
 
+[dev-dependencies]
+scriptorium-fdx.workspace = true
+
 [lints]
 workspace = true

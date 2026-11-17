@@ -231,7 +231,7 @@ changes in Scriptorium that aren't in the file. Write .fdx and save the
 written file over PURPLE LIST.fdx, or undo them." The version's own text
 is its live document (the session applied), as everywhere else.
 
-`stamp_text(kind, text)` = `core::text::normalize` (`core/src/text.rs:5`:
+`stamp_text(text, caps)` (`versions::links`) = `core::text::normalize` (`core/src/text.rs:5`:
 whitespace, quote and dash style, ellipsis), upper-cased for kinds shown in
 capitals (`FdxFile::is_caps`, `fdx/src/lib.rs:268`, passed to `versions`
 as a closure). So a Final Draft re-save or smart quotes never count as a
@@ -274,13 +274,15 @@ ROW TEXT: Watch me.
 Per row: the live paragraphs of each cell. In this order:
 
 1. A side with no live paragraphs → `OneSided`.
-2. The version's side all blank while the other side has text → `Blank`.
-3. A decided suggestion (accepted, rewritten; kept only if the side isn't
-   blank) placed on this row (see the resolver): `InSync` when its `ROW
-   TEXT` equals the original's current text (any such suggestion will do),
-   else `OtherChanged`. This comes before step 4 so that an accepted line
-   identical to the original ("MONTAGE", a heading of proper names) reads
-   in sync (D1).
+2. Both sides all blank → `InSync` (nothing to translate). The version's
+   side all blank while the other side has text → `Blank`.
+3. A decided suggestion (accepted, rewritten, kept) placed on this row
+   (see the resolver) whose `ROW TEXT` equals the original's current text
+   (any such suggestion will do) → `InSync`. If there are decided
+   suggestions but none reads the original now, and the original's side
+   differs from its `=` stamps → `OtherChanged`; otherwise go on to the
+   stamps. This comes before step 4 so that an accepted line identical to
+   the original ("MONTAGE", a heading of proper names) reads in sync (D1).
 4. The version's side still equal to its `~` stamps → `Blank`.
 5. Otherwise against the links file's `=` stamps: a side is changed when a
    paragraph has no `=` stamp or its `stamp_text` differs. Neither →
@@ -291,8 +293,15 @@ Only the version's side can be `Blank`. Non-editable kinds
 the note "can't be translated here; change it in Final Draft".
 
 `needs` (what Claude should work on) is `Blank`, `OtherChanged` or
-`BothChanged`, **and no suggestion of any status placed on the row** (C9);
-a non-editable row never needs. Rows new in the original (C4) need nothing
+`BothChanged`, **and no suggestion of any status placed on the row whose
+`ROW TEXT` equals the original's current text** (C9; amended after the A2
+review: a row whose original changed since every suggestion on it needs a
+new one); a non-editable row never needs.
+
+`RowStatus` is always from the version's side ("this" = the version,
+"other" = the original). A host showing rows on the original swaps
+`ThisChanged`/`OtherChanged` and shows nothing as `needs`. One `is_caps`
+(the original file's) is used for both members for now. Rows new in the original (C4) need nothing
 in Phase A and carry the note "new in the original: add an empty line of
 this type in Final Draft at this point, then reopen" (Phase C adds lines
 by suggestion).
@@ -310,7 +319,10 @@ added by hand or in Final Draft) goes into the first row after the nearest
 listed paragraph above it whose version side is empty, if there is one
 before the next listed paragraph; otherwise into that paragraph's row. New
 paragraphs of the **original** are never placed by D3: re-find gives each
-its own row (C4).
+its own row (C4). A row whose listed version lines are all gone counts as
+empty here. Several unlisted lines in a run go in order: each after the
+row of the line placed just above it (listed or placed by D3), so they
+never cross.
 
 Two examples (rows as `a | b`):
 
@@ -334,10 +346,16 @@ resolver, `&dyn Fn(&Entry, &[Vec<Line>]) -> Vec<Vec<ParaId>>`, built by
 `ROW:` goes only through it, never through `match_para` (`:228`) or
 `before_pass` (`:200`). For an entry it returns the version-side cells of
 the rows whose original side reads `ROW TEXT` and whose version side reads
-one of the texts review passes: `BEFORE`, any option, `MINE`. Review then
-places the entry on the first candidate not already used (the `PARA` cell
-if it is a candidate), and computes its status from its decision metadata
-as today.
+one of the texts review passes: a pending entry passes `BEFORE` then its
+options; an accepted or rewritten one only the text it put there (the
+chosen option or `MINE`); a kept one only `BEFORE`. Candidates whose
+version side reads the first text (`BEFORE`, or a decided entry's one
+text) come first, so a pending entry never takes a row already accepted
+with its option; within each group, the `PARA` cell comes first. Review
+then places the entry on the first candidate not already used, and
+computes its status from its decision metadata as today. No candidate
+gives a reason (`NotFound`: another pair, the original's line changed,
+the version's line reads none of the texts).
 
 - A Final Draft save of either file renumbers ids, but a row's texts don't
   change, so pending and decided suggestions stay on their rows.
@@ -505,7 +523,12 @@ happens after typing in the version.
     from the host (review items with `ROW:`), so versions doesn't depend
     on review. D3 lives here.
   - `resolve`: the resolver.
-  - `placeholder`: `blank_copy(script) -> Result<(Script, Links), Refusal>`.
+  - `placeholder`: `blank_copy(original: &Script, id, original_member:
+    Member, version_member: Member, is_caps: impl Fn(&ElementKind) -> bool)
+    -> Result<(Script, Links), BlankCopyError>` (sets `created` on both
+    members; the host fills the version's hash once written).
+  - `links::stamp_text(text, caps)`, re-exported at the crate root: the one
+    normalization every stamp and `ROW TEXT` comparison uses.
   - `align::by_text`: re-find.
   - `written`: `after_write`.
   - Later: `edit` (B3/C), `align::by_structure` (E), `glossary` (D).
@@ -568,8 +591,15 @@ hand-typed → none; `PARA` picks among identical rows.
 → kept, `=`. Everything else → spans emptied, `~` "". Rows `i | i`. Dual
 dialogue (`Script::fixed`, `core/src/model.rs:133`) stays fixed; blanking
 is a text edit. The host writes it with `write_script` on the original's
-`FdxFile`, so every byte outside the blanked runs is the original's: title
-page, Mores and Continueds, scene numbers and summaries.
+`FdxFile`, then `scriptorium_fdx::clear_text_offsets`, so every byte
+outside the blanked runs is the original's (title page, Mores and
+Continueds, scene numbers and summaries) except two lists of character
+offsets into the English text: `<ScriptNotes>` (the writer's notes,
+`ScriptNote Range="…"`) and `<SpellCheckIgnoreLists><IgnoredRanges>`.
+Those are emptied (the wrapper elements stay, their children go): in the
+version they would sit on the wrong words, and the notes are the English
+writer's. The title page and scene summaries stay in English by design;
+the translator changes them in Final Draft.
 
 Tests (fixtures; the real script when present): count, kinds and ids of
 the written file match; headings and names byte-identical; dual dialogue
@@ -789,6 +819,9 @@ notice; the chat agent's `read_rows` works in the panel.
     saves the file before you Write .fdx; decisions are not.
   - Keep the project folder out of iCloud-synced Desktop or Documents, and
     edit it on one computer.
+  - The title page and scene summaries stay in English, and the English
+    script notes aren't copied: change the title page (and summaries, if
+    you use them) in Final Draft.
   - New English lines: add an empty line of that type in the Spanish in
     Final Draft at that place, then reopen; Claude fills it.
   - Start over: delete `PURPLE LIST.es.fdx`, `PURPLE LIST.es.links.txt`,
@@ -992,7 +1025,9 @@ On copies, in a scratch folder, not in iCloud. Screenshot each result.
    Open `PURPLE LIST.es.fdx` in **Final Draft**: no warning; headings and
    names in English with scene numbers; every other line an empty line of
    the right type; "(CONT'D)" still appears where Final Draft adds it; the
-   English title page; dual dialogue intact; revision colours sane. Save it
+   English title page and scene summaries (by design: they are changed
+   in Final Draft); no script notes; dual dialogue intact; revision
+   colours sane. Save it
    once unchanged and close. `scriptorium rows "PURPLE LIST.es.fdx"`: the
    file is found again and nothing moved (note whether Final Draft dropped
    or merged empty paragraphs).

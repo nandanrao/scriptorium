@@ -93,6 +93,16 @@ impl Stamp {
     }
 }
 
+/// A paragraph's text as the links file stamps it (and as status, `ROW
+/// TEXT` and re-find compare it): `core::text::normalize` (whitespace, quote
+/// and dash style, ellipsis), upper-cased when `caps` (the paragraph's kind
+/// is shown in capitals, `FdxFile::is_caps`), so a Final Draft re-save or
+/// smart quotes never count as a change. One line, no edge spaces.
+pub fn stamp_text(text: &str, caps: bool) -> String {
+    let t = scriptorium_core::text::normalize(text);
+    if caps { t.to_uppercase() } else { t }
+}
+
 /// Why a links file can't be read or written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinksError {

@@ -39,8 +39,11 @@ use regex::Regex;
 use scriptorium_core::diff::{Tag, opcodes};
 use scriptorium_core::{ElementKind, ParaId, Paragraph, Script, Span, Style};
 
+mod ranges;
 mod scan;
 mod write;
+
+pub use ranges::clear_text_offsets;
 
 use write::Plan;
 
