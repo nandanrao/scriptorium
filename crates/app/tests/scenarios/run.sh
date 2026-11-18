@@ -2,7 +2,9 @@
 # The chat panel's end-to-end scenarios (docs/plans/chat-panel.md, "Headless-Sway
 # test plan", S1–S14), replayed from cassettes in a private headless Sway, and
 # S15: an outside agent through `scriptorium mcp` with the app opening and
-# quitting (docs/plans/agent-connect.md, G3; crates/cli/tests/mcp_link.rs).
+# quitting (docs/plans/agent-connect.md, G3; crates/cli/tests/mcp_link.rs),
+# and S16: apps in the browser (docs/plans/apps.md, A11; s16_apps.sh, sourced
+# below; its browser step needs firefox and geckodriver, else it says SKIP).
 #
 #   crates/app/tests/scenarios/run.sh              # build, then every scenario
 #   crates/app/tests/scenarios/run.sh S5 S11       # only these
@@ -28,7 +30,7 @@
 # lib.sh. Cassettes come from make_cassettes.py beside this file.
 #
 # Packages (Debian/Ubuntu names; a CI image needs all of them): sway, wtype,
-# grim, jq, imagemagick (7's `magick` or 6's `convert`), dbus (for
+# grim, jq, curl, imagemagick (7's `magick` or 6's `convert`), dbus (for
 # dbus-run-session), util-linux (setsid), mesa-vulkan-drivers (lavapipe:
 # GPUI draws with Vulkan, software is enough), fonts-dejavu-core, and a Rust
 # toolchain. CI=1 sets WLR_RENDERER=pixman for Sway. There is no CI job yet.
@@ -40,8 +42,10 @@
 
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# S16 (apps) lives in its own file: its curl and WebDriver helpers.
+. "$(dirname "${BASH_SOURCE[0]}")/s16_apps.sh"
 
-ALL=(S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 S14 S15)
+ALL=(S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16)
 
 # ---- S1 toggle ---------------------------------------------------------------------
 
@@ -578,7 +582,7 @@ main() {
     for s in "${picked[@]}"; do
         declare -F "$s" > /dev/null || { echo "no scenario $s (have: ${ALL[*]})" >&2; exit 2; }
     done
-    for t in sway swaymsg wtype grim jq dbus-run-session setsid; do
+    for t in sway swaymsg wtype grim jq dbus-run-session setsid curl; do
         command -v "$t" > /dev/null || { echo "needs $t" >&2; exit 2; }
     done
     command -v magick > /dev/null || command -v convert > /dev/null || { echo "needs ImageMagick" >&2; exit 2; }
@@ -608,7 +612,7 @@ main() {
     cp "$TARGET/debug/scriptorium-app" "$APP" && cp "$TARGET/debug/examples/vpointer" "$VPOINTER" || exit 2
     # Before anything starts: whatever happens, the compositor, the app and
     # the binaries' copies go.
-    trap 'app_kill; sway_stop; rm -rf "$BIN"' EXIT
+    trap 'browser_stop; app_kill; sway_stop; rm -rf "$BIN"' EXIT
     sway_start 1500x1000
     local results=() failed=0 unverified=0
     for s in "${picked[@]}"; do
@@ -617,6 +621,7 @@ main() {
         "$s"
         # Never leave an app behind for the next scenario.
         [ -n "$WORK" ] && app_kill
+        browser_stop
         local n=${#VISUAL[@]} also=""
         [ "$n" -gt 0 ] && also=" ($n visual item$([ "$n" = 1 ] || echo s) unverified)"
         unverified=$((unverified + n))

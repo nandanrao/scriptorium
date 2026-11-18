@@ -44,8 +44,11 @@ fi
 
 # The File menu (Linux dropdown, menus.rs): its button, then its items.
 FILE_MENU="27 18"
-MENU_UNDO="41 158"        # Undo, the 4th item (after Open…, Add review…, Write .fdx)
-MENU_ACCOUNTS="66 283"    # AI accounts…, after About Scriptorium
+MENU_UNDO="41 187"        # Undo, the 5th item (after Open…, Add review…, New version…, Write .fdx)
+# AI accounts…, after About Scriptorium: below the Apps heading, so with no
+# apps in the folder (its one line "No apps in this script's folder"); each
+# app past the first moves it down a row (29 px).
+MENU_ACCOUNTS="66 439"
 # The accounts sheet (agent_panel/accounts.rs, a 440 px column on the right):
 SHEET_CUSTOM="1395 249"   # "Add an account": Custom, with Work listed above
 SHEET_BASE_URL="1280 259" # the Custom form's fields, top to bottom
