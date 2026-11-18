@@ -11,7 +11,7 @@ CLI, so you (or your coding agent) can add what you need. See [AGENTS.md](AGENTS
 agent can do from the command line (suggest changes, accept them, rewrite a
 line, undo), working on the same saved session you see in the app.
 
-**Status:** v0.6.0: reviewing, full editing, multi-line suggestions, AI chat, translation versions (a second script lined up row by row, filled by suggestions), and connecting outside AI agents (Claude Desktop, Claude Code, Codex) to the open script work; see the roadmap.
+**Status:** v0.7.0 adds apps (below). v0.6.0: reviewing, full editing, multi-line suggestions, AI chat, translation versions (a second script lined up row by row, filled by suggestions), and connecting outside AI agents (Claude Desktop, Claude Code, Codex) to the open script work; see the roadmap.
 
 ## Try it
 
@@ -108,6 +108,23 @@ are pointed at a stable path. **Scriptorium › Install command-line tool…**
 links `scriptorium` onto your PATH (agents don't need it). Testing on a Mac:
 [docs/testing-on-mac.md](docs/testing-on-mac.md).
 
+## Apps
+
+An app is a small web page that reads your open script and shows it in a new
+way: a scene list, a character-by-scene chart, a storyboard. You don't write
+it. You ask Claude, with Scriptorium connected and a way for Claude to write
+files (Claude Code, Cowork, or Claude Desktop with the Filesystem extension).
+The app is a folder named `apps/<name>/` next to your script. Pick it from the
+**Apps** menu and it opens in your own browser. Scriptorium must be open with
+that script. An app can read the script and propose suggestions, never edit it
+directly. It reloads itself when its files change.
+
+Apps are served on `127.0.0.1:28417`, only while Scriptorium is open. They are
+code you trust, like any program you run: see "What this does and doesn't
+protect" in [docs/testing-on-mac.md](docs/testing-on-mac.md). From the command
+line, `scriptorium apps "MY SCRIPT.fdx"` lists a folder's apps and checks their
+manifests.
+
 ## AI chat
 
 Press `Ctrl+L` (`Cmd+L` on a Mac) to open a chat column at the right of the
@@ -159,7 +176,7 @@ scriptorium threads "MY SCRIPT.fdx" [show <id> | set-model <id> <account> <model
 
 Being planned; see [docs/PLAN.md](docs/PLAN.md). Direction so far: writing stays
 in Final Draft at first, and Scriptorium starts with **review** and
-**translation**. v0.6.0 is done: outside agents (Claude Desktop, Claude Code, Codex) connected to the open script, on top of v0.5.0's translation versions and AI chat and v0.3.0's full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
+**translation**. v0.7.0 is done: apps in your browser. v0.6.0 before it: outside agents (Claude Desktop, Claude Code, Codex) connected to the open script, on top of v0.5.0's translation versions and AI chat and v0.3.0's full editing and block (multi-line) suggestions. Next: see [docs/PLAN.md](docs/PLAN.md).
 
 Done so far: the document model, Final Draft import/export with byte-identical
 round trips, an event-sourced editing core (undo/redo, stable paragraph ids), a

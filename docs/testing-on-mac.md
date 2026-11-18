@@ -3,6 +3,21 @@
 Thank you for testing this. Scriptorium is an early version, so things may
 be rough. Everything you notice helps, including the small things.
 
+## What's new in 0.7.0
+
+0.7.0 adds **apps**. See section 10.
+
+- **Apps.** An app is a small web page about your script (a scene list, a
+  character chart). You ask Claude to build one. It opens in your own
+  browser from the new **Apps** menu.
+- **They stay current.** The page follows where you are in the script, and
+  reloads when Claude changes the app.
+- **Suggestions only.** An app can propose changes. You decide them in
+  Scriptorium, as always.
+- **Scriptorium must be open**, with that script, for an app to work.
+
+The checklist is at the end of section 10, "Please try (0.7.0)".
+
 ## What's new in 0.6.0
 
 0.6.0 is about connecting Claude (or another AI app) to Scriptorium. See
@@ -757,3 +772,117 @@ you are happy for us to see them.
 Where things live: accounts in
 `~/Library/Application Support/scriptorium/accounts.json` (no keys in it),
 keys in the Keychain (open Keychain Access and search "scriptorium").
+
+## 10. Apps (0.7.0)
+
+An app is a small web page that shows your script in a new way, for example
+a scene list or a chart of which characters are in which scenes. You don't
+write it. Claude does.
+
+**What you need.**
+
+- Claude connected to Scriptorium (section 7).
+- A way for Claude to write files in your script's folder: Claude Code,
+  Cowork in Claude Desktop, or Claude Desktop with the **Filesystem**
+  extension set to allow writing in that folder.
+- Scriptorium open, with that script.
+
+**Getting one.** Ask Claude: "Build me an app that shows which characters
+are in which scene." Claude reads Scriptorium's app guide, writes the app
+into a folder called `apps/<name>/` next to your script, and opens it.
+Ask again to change it. The open page reloads by itself.
+
+**Opening one.** Choose it in the **Apps** menu. It opens in your own
+browser (your default one), not inside Scriptorium. The link may look odd
+the first time; it signs your browser in, then goes away.
+
+**What the page does.**
+
+- It follows the script and where you are in it.
+- It can propose changes. They show up as suggestions on a card, named
+  "<app name> (app)". You accept or reject them as usual. An app never edits
+  your script directly.
+- It keeps its own notes and data in `apps/<name>/data/`, next to the app.
+- If you quit Scriptorium, the page says "Scriptorium isn't running" and
+  comes back by itself when you open it again.
+- If a different script (in another folder) is open, the page says "Open
+  <script> in Scriptorium to use this."
+- The address stays the same after a restart, so reloading and bookmarks
+  keep working.
+
+**Good to know.**
+
+- Apps belong to the folder, not to one script. A script and its versions
+  in the same folder share them.
+- Keep to a few app tabs open at once. Browsers allow only about six
+  connections to one address.
+- The first time, macOS may ask whether Scriptorium (or Claude) can use a
+  folder like Documents or Desktop. Say yes.
+- Apps use port 28417. If another program has it, Scriptorium says "Apps
+  can't open: another program is using port 28417", and the Apps menu is
+  greyed out. Quit that program and restart Scriptorium.
+- With two copies of Scriptorium open, only the first one serves apps.
+
+### What this does and doesn't protect
+
+**It stops:**
+
+- Other websites open in your browser from reading your script or making
+  suggestions through Scriptorium. They don't have the cookie, and
+  Scriptorium turns them away.
+- An app loading things from the internet by accident: a library from a CDN,
+  analytics, fonts. The browser blocks those loads.
+
+**It does not:**
+
+- Keep apps apart. All apps share one address. Any app can read and write
+  every other app's data, and act on whatever script is open.
+- Protect you from other programs or other users on this computer. Any
+  program running as you can read the sign-in token. Anything listening on
+  127.0.0.1 may receive the cookie, because browsers send cookies to every
+  port of an address.
+- Stop an app written to leak. A page can still send your script away by
+  navigating (a link, `window.open`, changing its own address). The block
+  covers loads, not navigation.
+- Keep the token out of your browser history. The opening link holds it.
+
+**So: an app is code you trust, like any program you run.** Use apps you
+or Claude wrote, and look at what Claude built before relying on it.
+
+### Please try (0.7.0)
+
+On a copy of a script. Screenshot anything that looks wrong, and note your
+macOS version.
+
+- [ ] **Safari.** With Safari as your default browser, ask Claude: "Make me
+      a Scriptorium app that lists the scenes, and lets me suggest a new
+      heading for one." **Apps › (its name)**: Safari opens it. Click around in
+      Scriptorium: the page follows the scene within a second. Suggest a
+      change from the page: it shows on the card.
+- [ ] **Quit and come back.** Quit Scriptorium: the page says "Scriptorium
+      isn't running." Open the same script: the page comes back by itself.
+      Reload by hand: it still works. Bookmark the page, quit Safari and
+      Scriptorium, open both, and use the bookmark: it works.
+- [ ] **Chrome.** Set Chrome as your default browser and repeat the two
+      above.
+- [ ] **Another script.** Open a script from a different folder: the page
+      says "Open <script> in Scriptorium to use this." Open the first one
+      again: it comes back.
+- [ ] **Claude Desktop with Filesystem.** Allow the extension to write the
+      script's folder. Ask: "Make me an app that shows which characters are
+      in which scene." Does the app appear and open in your browser? Then
+      ask for something that needs the internet ("use Chart.js from a
+      CDN"): Claude should notice it's blocked and fix it.
+- [ ] **Claude Code.** Ask for an app, then for a change: the open page
+      reloads once by itself. Try `scriptorium apps "MY SCRIPT.fdx"`.
+- [ ] **Spaces and accents.** A script in a folder like
+      `~/Documents/Guión final/`: everything above works.
+- [ ] **Folder access.** A script in Documents, Desktop or iCloud Drive. Tell
+      us about any question macOS asks, and whether apps work after you
+      allow it.
+- [ ] **Port taken.** In Terminal run `python3 -m http.server 28417`, then
+      open Scriptorium: the notice appears and the Apps menu is greyed out.
+      Quit the Terminal command and restart Scriptorium: apps work.
+- [ ] **Long script.** With an app open on a long script, type for a while:
+      typing stays smooth, and the page updates after a pause.
+- [ ] **Two Scriptoriums.** Open two copies: only the first serves apps.

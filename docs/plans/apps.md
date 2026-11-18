@@ -1,6 +1,6 @@
 # Plan: apps in the writer's browser
 
-Status: planned, not built. Release target **v0.7.0**, on branch
+Status: built (A1-A12), release step A13 left. Release target **v0.7.0**, on branch
 `v7/modules` (from v0.6.0). First review round folded in (2026-11-17).
 
 **The goal:** an agent (Claude Code, Cowork, Claude Desktop with the
@@ -678,4 +678,18 @@ A13. (A10 needs only A1 and A2 and may run beside A3–A9.)
 
 # As built
 
-(Left empty until built.)
+Steps A1 to A12 are in `git log --oneline v6/agent-connect..HEAD`.
+
+- Paths: `/api/p/<key>/a/<name>/{call,log,data/<path>}`; the menu opens
+  `/open?t=<token>&to=/p/<key>/<name>/`, which sets the cookie and redirects.
+- One fixed port, 28417. If it is taken, apps don't run, and the Apps menu,
+  a notice and `open_app` say so in plain words.
+- `tiny_http` 0.12 is vendored in `vendor/tiny_http` with one fix (the drain
+  of an unread request body uses a fixed buffer); see its `SCRIPTORIUM.md`.
+- The server (`crates/apps/src/serve.rs`) is hosted by `crates/app/src/
+  apps_host.rs`; calls use the agent socket's queue and
+  `Scriptorium.writer()`. `browser.rs` opens the page.
+- Examples: `crates/apps/examples/{scene-list,characters-by-scene}`.
+- End to end: S16 in `crates/app/tests/scenarios/`.
+- Docs: README, AGENTS.md, `docs/testing-on-mac.md` section 10, PLAN.md,
+  release notes. A13 (version bump, checks) still to do.

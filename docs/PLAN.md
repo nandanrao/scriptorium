@@ -23,6 +23,15 @@ Living notes on direction. Update this when a decision is made or reversed.
   gpui-kit (2026-11-14); the built-in-agent plan records the gpui-kit decision.
   Decided by the spike below. A web build may later come from `gpui_web`.
 
+- **v0.7.0** (2026-11-17): apps. Agent-built web apps on the open script,
+  shown in the writer's own browser from a new Apps menu (the "modules"
+  idea below, renamed; the browser step is built, an in-window panel is
+  still later). Folder `apps/<name>/` next to the script; a local server on
+  `127.0.0.1:28417` while Scriptorium is open; calls go through the agent
+  socket's path, suggestions only; live events and hot reload; `scriptorium
+  apps` and `guide('app')`. Security is simple and stated plainly (all apps
+  share one address; an app is code you trust). Plan:
+  [plans/apps.md](plans/apps.md).
 - **v0.2.0** (2026-11-15): a working version used through the Claude plugin
   (Claude Code / Cowork suggest via MCP; the writer decides in the app, which
   picks up outside changes live; a session lock keeps writers from
@@ -268,6 +277,10 @@ different, and Zed's agent crates are GPL-3.0 anyway.
   several threads.
 
 ### Modules: agent-built web apps on the script (draft, 2026-11-14)
+
+*Update (2026-11-17): the writer-facing name is now **Apps**. The browser
+step is built in v0.7.0 (apps open in the writer's own browser). The panel
+inside the app window is still later. See [plans/apps.md](plans/apps.md).*
 
 Agents (the built-in one, or any coding agent) build small web apps on top of
 the project: visualizations, a storyboard, a character bible, a scene

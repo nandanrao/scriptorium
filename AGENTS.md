@@ -28,6 +28,7 @@ crates/
   chat/   scriptorium-chat   chat threads and the host run loop shared by the CLI and the panel: `<script>.threads/`, locks, shared apply path (feature `shell`; core builds without it)
   fsio/   scriptorium-fsio   atomic writes, the session lock, `opened` (feature): the script opened as the CLI and chat host open it; `link` (feature): the socket between `scriptorium mcp` and the running app
   connect/ scriptorium-connect  agents' settings (Claude Desktop, Claude Code, Codex) merged and written for "Connect an AI agent…", and installing the command-line tool (feature `shell`)
+  apps/   scriptorium-apps   agent-built apps in the writer's browser: manifest, paths, routing, events, app list (pure); folder reading (feature `shell`) and the local HTTP server (`serve`, tiny_http)
   cli/    scriptorium-cli    `scriptorium` binary: headless access to everything, including `chat`, `threads`, `accounts` (feature `chat`, default), `connect`, and `mcp`: the MCP server agents start, which sends each call to the open app or runs it on the files
   app/    scriptorium-app    GPUI desktop app: script view, reviews, editing inside paragraphs, the agent panel (Ctrl/Cmd+L) and the accounts sheet
 ```
@@ -95,7 +96,10 @@ GPL-3.0 — read them for ideas, never copy code from them.
    leading `.`), the `<stem>.threads`
    folder must not be a link, the session file is never written through a
    link, and a script must be a regular `.fdx` before anything (the lock)
-   is written beside it (`check_script`). Only commands a person runs
+   is written beside it (`check_script`). Apps follow the same rule: an
+   app's files and data under `apps/<name>/` are reached only through
+   `scriptorium_apps` path checks (no `..`, no part starting with `.`, no
+   links anywhere under `apps/`). Only commands a person runs
    attach files from anywhere: the app's File › Add review and the CLI
    `reviews add`. A script opened through a link uses the folder of the
    file it points at.
@@ -180,7 +184,7 @@ More for the headless session:
   `XDG_STATE_HOME` at the scratch directory.
 - The end-to-end scenarios (S1–S14 in `docs/plans/chat-panel.md`, the chat
   panel; S15 in `docs/plans/agent-connect.md`, an outside agent through
-  `scriptorium mcp` and the app) run with one command, all of the above done for you:
+  `scriptorium mcp` and the app; S16 in `docs/plans/apps.md`, apps) run with one command, all of the above done for you:
   `crates/app/tests/scenarios/run.sh [S5 S11 …]`. It prints PASS/FAIL per
   scenario and the screenshots to look at; run it before a release and after
   changing the panel, the chat crates or the CLI's `chat`.
@@ -199,6 +203,9 @@ out in rows), `new_version.rs` (File › New version…),
 mcp` over the socket, run on the live open script), `connect.rs`
 (Scriptorium › Connect an AI agent… and Install command-line tool…, and the
 launch check that repairs agents' settings after the app moved),
+`apps_host.rs` (the app hosts apps: runs the apps server on port 28417, feeds its calls
+through the same queue as the agents', pushes live events), `browser.rs` (opens an app in
+the default browser: `open` on macOS, `xdg-open` on Linux),
 `settings.rs` (what the app remembers between runs), `disk.rs` (noticing
 outside changes to the open script's files), `blocks.rs`, `editor.rs`,
 `elements.rs`, `layout.rs`, `theme.rs`, `log.rs`.
