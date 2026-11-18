@@ -58,18 +58,16 @@ use scriptorium_fsio::link::{BindError, Replier, Server};
 use scriptorium_tools::context;
 
 use crate::agent_panel::live::LiveScript;
-use crate::disk;
-use crate::script_view::{LiveError, ScriptView, WRITER_REWRITING};
+use crate::apps_host::Apps;
+use crate::script_view::{LiveError, ScriptView, WRITER_REWRITING, file_name};
 use crate::workspace::Workspace;
+use crate::{browser, disk};
 use scriptorium_core::Document;
 use scriptorium_review::Session;
 
 /// Tools the app answers whatever script is open (or none): they never go
 /// to the files while the link is up.
 const APP_ONLY: [&str; 3] = ["guide", context::NAME, scriptorium_tools::OPEN_APP];
-
-/// `open_app` until apps are hosted (plan "apps"; a later step replaces it).
-pub(crate) const OPEN_APP_STUB: &str = "Apps arrive in a later step: Scriptorium can't open one yet.";
 
 /// The script open in the app, kept up to date from the UI thread
 /// ([`Workspace`]'s `note_open`) and read from other threads: the link's
@@ -297,12 +295,12 @@ pub(crate) async fn pump(mut jobs: UnboundedReceiver<Job>, workspace: WeakEntity
 /// Run one job on the workspace's script view as it is now, and answer it.
 /// False: the workspace is gone (the job goes to the files).
 pub(crate) fn handle(job: Job, workspace: &WeakEntity<Workspace>, cx: &mut AsyncApp) -> bool {
-    let Ok(view) = workspace.read_with(cx, |w, _| w.script_view()) else {
+    let Ok((view, apps)) = workspace.read_with(cx, |w, _| (w.script_view(), w.apps().clone())) else {
         let _ = job.answer.send(gone(&job));
         return false;
     };
     let answer = match view {
-        Some(view) => run_on_view(&job, &view, cx),
+        Some(view) => run_on_view(&job, &view, &apps, cx),
         None => run_without_script(&job),
     };
     let _ = job.answer.send(answer);
@@ -371,7 +369,11 @@ fn run_without_script(job: &Job) -> Answer {
         return Answer::Ran { done: answer_here(agent, &call, || NOTHING_OPEN.to_string()), busy: false };
     }
     if call.name == scriptorium_tools::OPEN_APP {
-        return Answer::Ran { done: answer_here(agent, &call, || OPEN_APP_STUB.to_string()), busy: false };
+        let done = answer_here(agent, &call, || {
+            let script = call.input.get("script").and_then(|s| s.as_str()).unwrap_or("the script");
+            format!("No script is open in Scriptorium. Ask the writer to open {script}, then call open_app again.")
+        });
+        return Answer::Ran { done: Done { is_error: true, ..done }, busy: false };
     }
     let ran = exec::run_call(&mut NoScript, Caller::Agent, &call);
     Answer::Ran { done: done(&ran), busy: false }
@@ -381,7 +383,8 @@ fn run_without_script(job: &Job) -> Answer {
 pub(crate) const NOTHING_OPEN: &str = "Scriptorium is open with no script in it; nothing is selected. Ask the writer to open the script, or for its \
      path.";
 
-/// Answer a tool the app answers itself (`where_is_writer`, `open_app`),
+/// Answer a tool the app answers itself (`where_is_writer`, `open_app`,
+/// `list_apps`),
 /// checked against `offer` as any call is: `place` gives the answer (for
 /// `where_is_writer`, where the writer is; on the files there is no writer
 /// to place).
@@ -450,8 +453,8 @@ fn routed_here(job: &Job, open: &Path) -> bool {
     }
 }
 
-/// Run `job` inside one update of `view`.
-fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answer {
+/// Run `job` inside one update of `view`, with `apps` as served this run.
+fn run_on_view(job: &Job, view: &Entity<ScriptView>, apps: &Apps, cx: &mut AsyncApp) -> Answer {
     view.update(cx, |v, cx| {
         let open = v.script_path().to_path_buf();
         let app = app_of(job);
@@ -479,7 +482,30 @@ fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answe
             if !taken(job, Some(&open)) {
                 return Answer::Files;
             }
-            return Answer::Ran { done: answer_here(offer, &call, || OPEN_APP_STUB.to_string()), busy: false };
+            let checked = answer_here(offer, &call, String::new);
+            if checked.is_error {
+                return Answer::Ran { done: checked, busy: false };
+            }
+            let done = match open_app(&call, &open, v.script_dir(), apps) {
+                Ok(text) => Done { text, is_error: false },
+                Err(text) => Done { text, is_error: true },
+            };
+            return Answer::Ran { done, busy: false };
+        }
+        if call.name == scriptorium_tools::LIST_APPS && app.is_none_or(scriptorium_apps::manifest::name_ok) {
+            // As on the files, plus what the server saw of each app's
+            // pages (loaded, the last error): an agent with no shell sees
+            // why its app failed.
+            if !taken(job, Some(&open)) {
+                return Answer::Files;
+            }
+            let dir = v.script_dir();
+            let seen = apps.running().map(|r| r.seen());
+            let done = answer_here(offer, &call, || {
+                let found = scriptorium_apps::shell::scan(dir);
+                scriptorium_apps::list::text(&dir.join("apps"), &found, seen.as_ref())
+            });
+            return Answer::Ran { done, busy: false };
         }
         let writes = opens_for_writing(&call.name);
         // While the writer rewrites a line nothing can be saved, so a call
@@ -539,6 +565,33 @@ fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answe
         drop(lease);
         Answer::Ran { done, busy: ran.busy }
     })
+}
+
+/// `open_app` (arguments checked) with script `open` open in folder `dir`:
+/// the app named opens in the writer's browser ([`browser::open_app`]).
+/// Ok: what to tell the agent. A `script` naming another script than the
+/// open one is refused: the app would act on the open one.
+fn open_app(call: &ToolCall, open: &Path, dir: &Path, apps: &Apps) -> Result<String, String> {
+    if let Some(named) = call.input.get("script").and_then(|s| s.as_str())
+        && !names(named, open)
+    {
+        let (open_name, named_name) = (file_name(open), file_name(Path::new(named)));
+        let (open_name, named_name) = if open_name == named_name {
+            (open.display().to_string(), named.to_string())
+        } else {
+            (open_name, named_name)
+        };
+        return Err(format!(
+            "Scriptorium has {open_name} open, not {named_name}. Ask the writer to open {named_name} in \
+             Scriptorium, then call open_app again."
+        ));
+    }
+    let name = call.input.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+    match browser::open_app(apps, dir, name) {
+        Ok(title) => Ok(format!("Opened {title} in the writer's browser.")),
+        Err(r) if r.check_apps => Err(format!("{} Check it with list_apps.", r.text)),
+        Err(r) => Err(r.text),
+    }
 }
 
 /// While the writer rewrites a line, whether writing call `call` still runs:
@@ -1216,34 +1269,162 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn open_app_is_answered_here_by_its_stub(cx: &mut TestAppContext) {
-        let f = Folder::new("openapp");
-        let mut served = app(cx, &f, Some(f.script()));
-        // Routed here whatever `script` names, as the other app-only tools.
-        let other = json!({ "name": "scene-list", "script": "/no/such/film.fdx" });
-        for args in [json!({ "name": "scene-list" }), other] {
-            match served.one(cx, call("open_app", args)) {
-                Ok(Got::Done { done, .. }) => assert_eq!((done.text.as_str(), done.is_error), (OPEN_APP_STUB, false)),
-                got => panic!("{got:?}"),
-            }
+    /// An app folder `apps/<name>/` in `dir` (with `index.html` when `ok`).
+    fn write_app(dir: &Path, name: &str, title: &str, ok: bool) {
+        let app = dir.join("apps").join(name);
+        std::fs::create_dir_all(&app).unwrap();
+        let manifest = format!(r#"{{"scriptorium": 1, "title": "{title}", "description": "d"}}"#);
+        std::fs::write(app.join("app.json"), manifest).unwrap();
+        if ok {
+            std::fs::write(app.join("index.html"), "<p>hi</p>").unwrap();
         }
-        // Checked against the offer.
-        match served.one(cx, call("open_app", json!({ "name": "x", "path": "y" }))) {
-            Ok(Got::Done { done, .. }) => assert!(done.is_error, "{}", done.text),
+    }
+
+    /// Serve apps for `served`'s window on a free port, with `token`.
+    fn serve_apps(served: &Served, cx: &mut TestAppContext, token: &str) -> u16 {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        // The page reports go to the open folder; no calls are made here.
+        let open = served.window.read_with(cx, |w, _| w.shared_open()).unwrap();
+        let (tx, _rx) = unbounded();
+        let host = Arc::new(crate::apps_host::AppHost::new(open, tx));
+        let running = scriptorium_apps::serve::Server::start(port, token.into(), host).unwrap();
+        let apps = Apps::Serving { running: Arc::new(running), token: token.into() };
+        served.window.update(cx, |w, _, _| w.set_apps(apps)).unwrap();
+        port
+    }
+
+    /// The call's answer: its text and whether it is an error.
+    fn answered(got: Result<Got, Gone>) -> (String, bool) {
+        match got {
+            Ok(Got::Done { done, .. }) => (done.text, done.is_error),
             got => panic!("{got:?}"),
         }
-        // `list_apps` runs on the open script like any read.
-        let listed = ran(served.one(cx, call("list_apps", json!({}))), &f);
-        assert!(listed.starts_with("No apps in "), "{listed}");
+    }
+
+    #[gpui::test]
+    fn open_app_opens_the_app_in_the_browser_hook(cx: &mut TestAppContext) {
+        let f = Folder::new("openapp");
+        write_app(&f.dir, "scene-list", "Scene list", true);
+        let hook = f.dir.join("opened");
+        browser::test_hook::set(Some(hook.clone()));
+        let mut served = app(cx, &f, Some(f.script()));
+        let token = "t".repeat(64);
+        let port = serve_apps(&served, cx, &token);
+
+        let script = f.script().display().to_string();
+        for args in [json!({ "name": "scene-list" }), json!({ "name": "scene-list", "script": script })] {
+            let (text, is_error) = answered(served.one(cx, call("open_app", args)));
+            assert_eq!((text.as_str(), is_error), ("Opened Scene list in the writer's browser.", false));
+            assert!(!text.contains(&token));
+        }
+        let key = project_key(&f.dir);
+        let url = format!("http://127.0.0.1:{port}/open?t={token}&to=/p/{key}/scene-list/\n");
+        assert_eq!(std::fs::read_to_string(&hook).unwrap(), url.repeat(2));
+
+        // Checked against the offer.
+        let (text, is_error) = answered(served.one(cx, call("open_app", json!({ "name": "x", "path": "y" }))));
+        assert!(is_error, "{text}");
+        browser::test_hook::set(None);
+    }
+
+    #[gpui::test]
+    fn open_app_says_why_it_cant(cx: &mut TestAppContext) {
+        let f = Folder::new("openapp-no");
+        write_app(&f.dir, "scene-list", "Scene list", true);
+        write_app(&f.dir, "broken", "Broken", false);
+        let hook = f.dir.join("opened");
+        browser::test_hook::set(Some(hook.clone()));
+        let mut served = app(cx, &f, Some(f.script()));
+        let open = |served: &mut Served, cx: &mut TestAppContext, args: Value| {
+            let (text, is_error) = answered(served.one(cx, call("open_app", args)));
+            assert!(is_error, "{text}");
+            text
+        };
+
+        // Port taken: the notice's words.
+        let taken = "Apps can't open: another program is using port 28417. Quit it and restart Scriptorium.";
+        served.window.update(cx, |w, _, _| w.set_apps(Apps::Unavailable(taken.into()))).unwrap();
+        assert_eq!(open(&mut served, cx, json!({ "name": "scene-list" })), taken);
+
+        serve_apps(&served, cx, &"t".repeat(64));
+        // Another script named (here one in another folder).
+        let g = Folder::new("openapp-other");
+        let other = g.script().display().to_string();
+        let text = open(&mut served, cx, json!({ "name": "scene-list", "script": other }));
+        assert!(text.starts_with("Scriptorium has "), "{text}");
+        assert!(text.contains(&format!("open, not {other}. Ask the writer to open {other} in Scriptorium")), "{text}");
+        assert!(text.ends_with("then call open_app again."), "{text}");
+        // A file named otherwise in the same folder.
+        std::fs::write(f.dir.join("v2.fdx"), script()).unwrap();
+        let v2 = f.dir.join("v2.fdx").display().to_string();
+        let text = open(&mut served, cx, json!({ "name": "scene-list", "script": v2 }));
+        assert!(text.starts_with("Scriptorium has film.fdx open, not v2.fdx."), "{text}");
+        // No such app; one with problems; not an app name.
+        let text = open(&mut served, cx, json!({ "name": "nope" }));
+        assert!(text.starts_with("There's no app nope in ") && text.ends_with("/. Check it with list_apps."), "{text}");
+        let text = open(&mut served, cx, json!({ "name": "broken" }));
+        assert!(
+            text.starts_with("The app broken can't open: ") && text.ends_with(". Check it with list_apps."),
+            "{text}"
+        );
+        let text = open(&mut served, cx, json!({ "name": "Not/A name" }));
+        assert!(
+            text.contains("isn't an app name") && text.ends_with("characters). Check it with list_apps."),
+            "{text}"
+        );
+        assert!(!hook.exists(), "nothing opened");
         drop(served);
 
-        let g = Folder::new("openapp-empty");
+        // No script open.
         let mut served = app(cx, &g, None);
-        match served.one(cx, call("open_app", json!({ "name": "scene-list" }))) {
-            Ok(Got::Done { done, script: None }) => assert_eq!(done.text, OPEN_APP_STUB),
-            got => panic!("{got:?}"),
-        }
+        let text = open(&mut served, cx, json!({ "name": "scene-list" }));
+        assert_eq!(
+            text,
+            "No script is open in Scriptorium. Ask the writer to open the script, then call open_app again."
+        );
+        let text = open(&mut served, cx, json!({ "name": "scene-list", "script": "/films/film.fdx" }));
+        assert_eq!(
+            text,
+            "No script is open in Scriptorium. Ask the writer to open /films/film.fdx, then call open_app again."
+        );
+        assert!(!hook.exists(), "nothing opened");
+        browser::test_hook::set(None);
+    }
+
+    #[gpui::test]
+    fn list_apps_shows_what_the_pages_reported(cx: &mut TestAppContext) {
+        let f = Folder::new("listapps");
+        let mut served = app(cx, &f, Some(f.script()));
+        // No server: as on the files.
+        let listed = ran(served.one(cx, call("list_apps", json!({}))), &f);
+        assert!(listed.starts_with("No apps in "), "{listed}");
+        write_app(&f.dir, "scene-list", "Scene list", true);
+        let listed = ran(served.one(cx, call("list_apps", json!({}))), &f);
+        assert!(!listed.contains("page:"), "{listed}");
+
+        // Served: each app's page, and the last error one reported.
+        let token = "t".repeat(64);
+        let port = serve_apps(&served, cx, &token);
+        let listed = ran(served.one(cx, call("list_apps", json!({}))), &f);
+        assert!(listed.contains("  page: not loaded this run"), "{listed}");
+        let key = project_key(&f.dir);
+        let body = r#"{"error": "x is not defined (app.js:3)"}"#;
+        let request = format!(
+            "POST /api/p/{key}/a/scene-list/log HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
+             Cookie: scriptorium={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        std::io::Write::write_all(&mut conn, request.as_bytes()).unwrap();
+        let mut reply = String::new();
+        std::io::Read::read_to_string(&mut conn, &mut reply).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 204"), "{reply}");
+        let listed = ran(served.one(cx, call("list_apps", json!({}))), &f);
+        assert!(listed.contains("  last error: x is not defined (app.js:3)"), "{listed}");
+        // Checked against the offer.
+        let (text, is_error) = answered(served.one(cx, call("list_apps", json!({ "nope": 1 }))));
+        assert!(is_error, "{text}");
     }
 
     #[gpui::test]

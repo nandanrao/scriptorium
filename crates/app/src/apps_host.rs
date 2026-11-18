@@ -47,6 +47,7 @@ pub(crate) const APP_JOBS_MAX: usize = 8;
 pub(crate) const TICK_EVERY: Duration = Duration::from_millis(250);
 
 /// Whether apps are served this run.
+#[derive(Clone)]
 pub(crate) enum Apps {
     /// Not started (another copy serves, or not yet).
     Off,

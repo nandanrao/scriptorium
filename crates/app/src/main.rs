@@ -6,6 +6,7 @@ mod agent_link;
 mod agent_panel;
 mod apps_host;
 mod blocks;
+mod browser;
 mod connect;
 mod disk;
 mod editor;
@@ -170,7 +171,7 @@ fn main() {
         cx.bind_keys(bindings());
         // With no window to handle it (all closed), Quit still quits.
         cx.on_action(|_: &SaveAndQuit, cx| cx.quit());
-        cx.set_menus(menus::app_menus());
+        cx.set_menus(menus::app_menus(&menus::AppsMenu::default()));
         let bounds = Bounds::centered(None, size(px(1500.), px(1000.)), cx);
         let window = cx
             .open_window(

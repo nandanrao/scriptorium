@@ -31,6 +31,14 @@ use crate::theme::*;
 
 actions!(scriptorium, [Open, AddReview, About]);
 
+/// Apps › <an app>: open the app `name` (its folder under the open
+/// script's `apps/`) in the writer's browser.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = scriptorium, no_json)]
+pub struct OpenApp {
+    pub name: String,
+}
+
 /// Test hook: when set, file pickers don't open; they return these paths
 /// (separated by `:`) instead. For driving the app headless, where the
 /// desktop portal can't show a dialog.
@@ -73,7 +81,21 @@ pub struct Workspace {
     /// Serving apps (plan "apps"), and the events tick while serving.
     apps: Apps,
     _apps_tick: Option<Task<()>>,
+    /// The Apps menu as last scanned ([`Self::refresh_apps_menu`]).
+    apps_menu: menus::AppsMenu,
+    /// Rescans the Apps menu when the window gains focus.
+    _activation: Option<Subscription>,
+    /// This window, to tell whether it is the active one (whose Apps menu
+    /// the macOS menu bar shows).
+    window: gpui::AnyWindowHandle,
 }
+
+/// The Apps menu last given to the macOS menu bar (one bar for every
+/// window): a window that becomes active sets it again when its own
+/// differs. Absent: `main.rs`'s first, [`menus::AppsMenu::default`].
+struct MenuBar(menus::AppsMenu);
+
+impl gpui::Global for MenuBar {}
 
 impl Workspace {
     pub fn new(script: Option<PathBuf>, reviews: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -96,7 +118,17 @@ impl Workspace {
             _own_pump: None,
             apps: Apps::Off,
             _apps_tick: None,
+            apps_menu: menus::AppsMenu::default(),
+            _activation: None,
+            window: window.window_handle(),
         };
+        // An agent may have built an app while the writer was elsewhere.
+        this._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.refresh_apps_menu(cx);
+                this.sync_menu_bar(cx);
+            }
+        }));
         // Closing the window saves, like Quit.
         let ws = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
@@ -184,11 +216,74 @@ impl Workspace {
             Apps::Unavailable(why) => self.set_notice(why.clone(), cx),
             Apps::Off => {}
         }
+        self.refresh_apps_menu(cx);
+    }
+
+    /// The Apps menu now: the open folder's apps (one `read_dir` and their
+    /// manifests), why apps can't run, or no script. Called when a script
+    /// opens, the window gains focus and the Linux dropdown opens, so it
+    /// needs no server thread; on macOS the menu bar is set again when it
+    /// changed.
+    fn refresh_apps_menu(&mut self, cx: &mut Context<Self>) {
+        let now = match (&self.apps, self.open.now()) {
+            (Apps::Unavailable(why), _) => menus::AppsMenu::Unavailable(why.clone()),
+            (_, None) => menus::AppsMenu::NoScript,
+            (Apps::Off, _) => menus::AppsMenu::Unavailable(crate::browser::APPS_OFF.into()),
+            (_, Some(open)) => menus::AppsMenu::listed(&scriptorium_apps::shell::scan(&open.dir)),
+        };
+        if now != self.apps_menu {
+            self.apps_menu = now;
+            if cx.active_window() == Some(self.window) {
+                self.sync_menu_bar(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// macOS: the menu bar shows this window's Apps menu, set again only
+    /// when what was last set (by any window) differs.
+    fn sync_menu_bar(&self, cx: &mut Context<Self>) {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let last = cx.try_global::<MenuBar>().map_or(menus::AppsMenu::default(), |m| m.0.clone());
+        if last != self.apps_menu {
+            cx.set_menus(menus::app_menus(&self.apps_menu));
+            cx.set_global(MenuBar(self.apps_menu.clone()));
+        }
+    }
+
+    /// The Apps menu as last scanned (tests).
+    #[cfg(test)]
+    pub(crate) fn apps_menu(&self) -> &menus::AppsMenu {
+        &self.apps_menu
+    }
+
+    /// Apps › <an app>: checked again (the folder may have changed since
+    /// the menu was built) and opened in the writer's browser, through the
+    /// same path as the `open_app` tool ([`crate::browser::open_app`]).
+    fn on_open_app(&mut self, a: &OpenApp, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        let said = match self.open.now() {
+            None => "Open a script to use its apps.".to_string(),
+            Some(open) => match crate::browser::open_app(&self.apps, &open.dir, &a.name) {
+                Ok(title) => format!("Opened {title} in your browser."),
+                Err(refused) => refused.text,
+            },
+        };
+        self.set_notice(said, cx);
+        self.refresh_apps_menu(cx);
     }
 
     /// Apps as served this run.
     pub(crate) fn apps(&self) -> &Apps {
         &self.apps
+    }
+
+    /// Apps as if served (tests of `open_app` and `list_apps`, A8).
+    #[cfg(test)]
+    pub(crate) fn set_apps(&mut self, apps: Apps) {
+        self.apps = apps;
     }
 
     /// Every [`apps_host::TICK_EVERY`]: while a page listens, what changed
@@ -331,6 +426,7 @@ impl Workspace {
         self.view = Some(view);
         self.notice = "".into();
         self.note_open(cx);
+        self.refresh_apps_menu(cx);
     }
 
     /// Write .fdx wrote the version in place: drop its view without saving
@@ -349,6 +445,7 @@ impl Workspace {
                 self._observe = None;
                 self._reopen = None;
                 self.note_open(cx);
+                self.refresh_apps_menu(cx);
                 window.set_window_title("Scriptorium");
                 self.set_notice(format!("{}  Reopening it failed: {e}", reopen.notice), cx);
             }
@@ -681,6 +778,7 @@ impl Workspace {
         if self.menu.is_some() {
             self.close_menu(window, cx);
         } else {
+            self.refresh_apps_menu(cx);
             self.menu = Some(window.focused(cx));
             window.focus(&self.menu_focus, cx);
             cx.notify();
@@ -703,13 +801,21 @@ impl Workspace {
 
     fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let has_script = self.view.is_some();
-        let items: Vec<gpui::AnyElement> = menus::file_dropdown()
+        let items: Vec<gpui::AnyElement> = menus::file_dropdown(&self.apps_menu)
             .into_iter()
             .enumerate()
             .map(|(ix, item)| match item {
                 Item::Separator => div().h(px(1.)).my_1().bg(RULE).into_any_element(),
+                Item::Heading(h) => div()
+                    .px_3()
+                    .pt_1()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(INK_3)
+                    .child(h)
+                    .into_any_element(),
                 Item::Action(e) => {
-                    let enabled = has_script || !e.needs_script;
+                    let enabled = e.action.is_some() && (has_script || !e.needs_script);
                     let action = e.action;
                     div()
                         .id(("menu-item", ix))
@@ -724,11 +830,13 @@ impl Workspace {
                             d.cursor_pointer().hover(|s| s.bg(ACCENT_SOFT)).on_click(cx.listener(
                                 move |this, _, window, cx| {
                                     this.close_menu(window, cx);
-                                    window.dispatch_action(action(), cx);
+                                    if let Some(action) = &action {
+                                        window.dispatch_action(action.boxed_clone(), cx);
+                                    }
                                 },
                             ))
                         })
-                        .child(div().flex_1().child(e.name))
+                        .child(div().flex_1().min_w_0().truncate().child(e.name))
                         .when_some(e.key, |d, k| d.child(div().text_color(INK_3).child(menus::shortcut(k))))
                         .into_any_element()
                 }
@@ -934,6 +1042,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_apply))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_about))
+            .on_action(cx.listener(Self::on_open_app))
             .on_action(cx.listener(Self::on_install_cli))
             .on_action(cx.listener(Self::on_connect_agent))
             .on_action(cx.listener(Self::on_toggle_agent))
@@ -982,5 +1091,144 @@ impl Render for Workspace {
             .children(new_version)
             .children(connect)
             .children(menu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TestAppContext, WindowHandle};
+
+    use super::*;
+    use crate::menus::{AppLine, AppsMenu};
+
+    const SCRIPT: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<FinalDraft DocumentType="Script" Template="No" Version="5">
+  <Content>
+    <Paragraph Type="Scene Heading"><Text>INT. KITCHEN - DAY</Text></Paragraph>
+    <Paragraph Type="Action"><Text>Laura smiles.</Text></Paragraph>
+  </Content>
+</FinalDraft>
+"#;
+
+    /// A folder holding `film.fdx`, removed when dropped.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("scriptorium-ws-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("film.fdx"), SCRIPT).unwrap();
+            Folder(dir.canonicalize().unwrap())
+        }
+
+        fn app(&self, name: &str, title: &str, index: bool) {
+            let app = self.0.join("apps").join(name);
+            std::fs::create_dir_all(&app).unwrap();
+            let manifest = format!(r#"{{"scriptorium": 1, "title": "{title}", "description": "d"}}"#);
+            std::fs::write(app.join("app.json"), manifest).unwrap();
+            if index {
+                std::fs::write(app.join("index.html"), "<p>hi</p>").unwrap();
+            }
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn workspace(cx: &mut TestAppContext, script: Option<PathBuf>) -> WindowHandle<Workspace> {
+        cx.update(|cx| {
+            crate::agent_panel::init(cx);
+            cx.bind_keys(crate::bindings());
+        });
+        let w = cx.add_window(|window, cx| Workspace::new(script, vec![], window, cx));
+        // As served (on a free port, calls going nowhere), so apps list.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let (tx, _rx) = futures::channel::mpsc::unbounded();
+        let host = std::sync::Arc::new(apps_host::AppHost::new(OpenScript::default(), tx));
+        let running = scriptorium_apps::serve::Server::start(port, "t".repeat(64), host).unwrap();
+        let apps = Apps::Serving { running: std::sync::Arc::new(running), token: "t".repeat(64) };
+        w.update(cx, |w, _, cx| {
+            w.apps = apps;
+            w.refresh_apps_menu(cx);
+        })
+        .unwrap();
+        w
+    }
+
+    #[gpui::test]
+    fn not_serving_apps_the_menu_says_where_they_open(cx: &mut TestAppContext) {
+        let f = Folder::new("off");
+        f.app("scene-list", "Scene list", true);
+        let w = workspace(cx, Some(f.0.join("film.fdx")));
+        w.update(cx, |w, _, cx| {
+            w.apps = Apps::Off;
+            w.refresh_apps_menu(cx);
+        })
+        .unwrap();
+        assert_eq!(menu(cx, w), AppsMenu::Unavailable(crate::browser::APPS_OFF.into()));
+    }
+
+    fn menu(cx: &mut TestAppContext, w: WindowHandle<Workspace>) -> AppsMenu {
+        w.read_with(cx, |w, _| w.apps_menu().clone()).unwrap()
+    }
+
+    fn line(name: &str, title: &str, problem: Option<&str>) -> AppLine {
+        AppLine { name: name.into(), title: title.into(), problem: problem.map(Into::into) }
+    }
+
+    #[gpui::test]
+    fn the_apps_menu_follows_the_folder_when_the_dropdown_opens(cx: &mut TestAppContext) {
+        let f = Folder::new("follows");
+        f.app("scene-list", "Scene list", true);
+        let w = workspace(cx, Some(f.0.join("film.fdx")));
+        // Scanned when the script opened.
+        assert_eq!(menu(cx, w), AppsMenu::Listed(vec![line("scene-list", "Scene list", None)]));
+
+        // An agent builds another app (one not finished yet): the next
+        // look at the dropdown shows it, with no server thread involved.
+        f.app("storyboard", "Storyboard", false);
+        w.update(cx, |w, window, cx| w.toggle_menu(window, cx)).unwrap();
+        assert_eq!(
+            menu(cx, w),
+            AppsMenu::Listed(vec![
+                line("scene-list", "Scene list", None),
+                line("storyboard", "Storyboard", Some("index.html is missing")),
+            ])
+        );
+        w.update(cx, |w, window, cx| w.close_menu(window, cx)).unwrap();
+
+        std::fs::remove_dir_all(f.0.join("apps")).unwrap();
+        w.update(cx, |w, _, cx| w.refresh_apps_menu(cx)).unwrap();
+        assert_eq!(menu(cx, w), AppsMenu::Listed(vec![]));
+    }
+
+    #[gpui::test]
+    fn with_no_script_the_apps_menu_says_open_one(cx: &mut TestAppContext) {
+        let w = workspace(cx, None);
+        assert_eq!(menu(cx, w), AppsMenu::NoScript);
+    }
+
+    #[gpui::test]
+    fn with_no_server_the_menu_and_opening_say_why(cx: &mut TestAppContext) {
+        let f = Folder::new("unavailable");
+        f.app("scene-list", "Scene list", true);
+        let w = workspace(cx, Some(f.0.join("film.fdx")));
+        let why = "Apps can't open: another program is using port 28417. Quit it and restart Scriptorium.";
+        w.update(cx, |w, _, cx| {
+            w.apps = Apps::Unavailable(why.into());
+            w.refresh_apps_menu(cx);
+        })
+        .unwrap();
+        assert_eq!(menu(cx, w), AppsMenu::Unavailable(why.into()));
+
+        w.update(cx, |_, window, cx| window.dispatch_action(Box::new(OpenApp { name: "scene-list".into() }), cx))
+            .unwrap();
+        cx.run_until_parked();
+        let notice = w.read_with(cx, |w, cx| w.script_view().unwrap().read(cx).notice_text()).unwrap();
+        assert_eq!(notice.as_ref(), why);
     }
 }

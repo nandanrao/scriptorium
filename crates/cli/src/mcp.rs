@@ -68,6 +68,15 @@ pub const NO_ANSWER: &str = "Scriptorium didn't answer, so its open script can't
 pub const NO_ANSWER_WHERE: &str = "Scriptorium didn't answer, so this connection can't tell what is open or where the writer is. Try again, or \
      ask the writer for the script's path.";
 
+/// `open_app` when another version of the app is open.
+pub const OPEN_APP_OTHER_VERSION: &str = "Scriptorium is open but a different version (another copy of the app), so \
+                                          the app can't be opened from here. Ask the writer to open it from \
+                                          Scriptorium's Apps menu.";
+
+/// `open_app` when the app didn't answer.
+pub const OPEN_APP_NO_ANSWER: &str = "Scriptorium didn't answer, so the app can't be opened. Try again, or ask the \
+                                      writer to open it from Scriptorium's Apps menu.";
+
 /// A writing tool whose call the app took and then closed during.
 pub const MAYBE_APPLIED: &str = "Scriptorium closed during this call; it may have been applied. Check with \
                                  list_suggestions before trying again.";
@@ -341,9 +350,18 @@ impl Connector {
             });
         }
         if name == "guide" || name == scriptorium_tools::OPEN_APP {
-            // Need no script (`open_app` on the files says Scriptorium isn't running).
+            // Need no script. `open_app` can't run on the files: why depends
+            // on why the app isn't used (its arguments checked first).
             let done = run_call(&mut NoScript, Caller::Agent, &call);
-            return Ended { text: done.result.content, is_error: done.result.is_error };
+            let mut text = done.result.content;
+            if text == scriptorium_tools::OPEN_APP_ON_FILES {
+                match why {
+                    NoApp::OtherVersion => text = OPEN_APP_OTHER_VERSION.into(),
+                    NoApp::NoAnswer => text = OPEN_APP_NO_ANSWER.into(),
+                    NoApp::Absent | NoApp::Routed => {}
+                }
+            }
+            return Ended { text, is_error: done.result.is_error };
         }
         let script = match args.get("script") {
             Some(Value::String(s)) => s,
@@ -483,6 +501,24 @@ mod tests {
         let r = c.call("read_scene", &json!({ "script": 3, "scene": 1 }));
         assert!(r.is_error && r.text.contains("script"), "{}", r.text);
         assert!(!offered("no_such_tool") && offered("where_is_writer") && offered("guide"));
+    }
+
+    #[test]
+    fn open_app_on_the_files_says_why() {
+        let mut c = Connector::new(None);
+        let args = json!({ "name": "scene-list" });
+        let mut notes = vec![];
+        for (why, text) in [
+            (NoApp::Absent, scriptorium_tools::OPEN_APP_ON_FILES),
+            (NoApp::OtherVersion, OPEN_APP_OTHER_VERSION),
+            (NoApp::NoAnswer, OPEN_APP_NO_ANSWER),
+        ] {
+            let r = c.on_files("open_app", &args, why, &mut notes);
+            assert!(r.is_error && r.text == text, "{}", r.text);
+            // Its arguments are checked first, whatever the reason.
+            let r = c.on_files("open_app", &json!({ "name": "x", "path": "y" }), why, &mut notes);
+            assert!(r.is_error && r.text.contains("path"), "{}", r.text);
+        }
     }
 
     #[test]
