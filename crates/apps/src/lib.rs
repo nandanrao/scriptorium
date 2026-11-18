@@ -2,7 +2,7 @@
 //! script's folder (`apps/<name>/`), served by the running Scriptorium on
 //! `127.0.0.1:28417` (see `docs/plans/apps.md`).
 //!
-//! This crate's modules are pure (AGENTS.md rule 1): they take and return
+//! Its modules but `shell` and `serve` are pure (AGENTS.md rule 1): they take and return
 //! values, never touch files, sockets or clocks, and compile to
 //! `wasm32-unknown-unknown`. Time comes in as milliseconds from the caller.
 //!
@@ -12,6 +12,10 @@
 //!   headers, MIME types, the cookie, and the server's own pages.
 //! - [`events`]: change events from snapshots, their pacing, and SSE frames.
 //! - [`list`]: the apps list as text (agents, CLI) and JSON.
+//! - `shell` (feature `shell`, default): the folder read and written:
+//!   the apps list, pages, data, and file stamps.
+//! - `serve` (feature `serve`, default): the HTTP server on `127.0.0.1`
+//!   the running app hosts apps with. With `shell`, the only I/O.
 //! - [`LIBRARY`]: `/scriptorium.js`, served to every app.
 
 pub mod events;
@@ -19,6 +23,10 @@ pub mod list;
 pub mod manifest;
 pub mod paths;
 pub mod route;
+#[cfg(feature = "serve")]
+pub mod serve;
+#[cfg(feature = "shell")]
+pub mod shell;
 
 /// The one port apps are served on (decision 3: fixed, no fallback).
 pub const PORT: u16 = 28417;

@@ -368,8 +368,32 @@ pub fn new_review_text(script_name: &str, thread_id: &str) -> String {
     insert_id(&format!("{FORMAT_HEADER}\nScript: {script_name}\n\n"), &naming::review_id(thread_id))
 }
 
-/// `list_apps` until the apps' folder is read (plan "apps", A4 replaces it).
-pub const LIST_APPS_STUB: &str = "Apps arrive in a later step: there are none to list yet.";
+/// The review an app's suggestions go into when it names none:
+/// `<name> (app).review.txt` in the script's folder, created with its first
+/// suggestions as an outside agent's new `review_file` is.
+pub fn app_review_file(name: &str) -> String {
+    format!("{name} (app).review.txt")
+}
+
+/// The tool result for a call from an app whose name isn't an app name
+/// (`[a-z0-9][a-z0-9-]{0,39}`): refused before anything else.
+pub fn bad_app_name(name: &str) -> String {
+    format!("{name:?} isn't an app name: lower-case letters, digits and -, at most 40 characters")
+}
+
+/// `list_apps` on the files: the apps in `dir/apps/` (the script's folder),
+/// as text. Nothing about pages: only the running app's server sees them.
+pub fn list_apps(dir: &Path) -> String {
+    let found = scriptorium_apps::shell::scan(dir);
+    scriptorium_apps::list::text(&dir.join("apps"), &found, None)
+}
+
+/// `script_info`'s first line for outside agents and apps: the script's
+/// folder, absolute, which an agent with no shell (Claude Desktop) needs to
+/// write an app there. The built-in agent's `script_info` has no such line.
+pub fn folder_line(dir: &Path) -> String {
+    format!("folder      {}", dir.display())
+}
 
 /// How many names [`apply_append`] tries for a new review before giving up.
 const NAME_TRIES: usize = 100;
@@ -388,6 +412,15 @@ pub enum Caller<'a> {
     /// suggestion must name its `review_file` ([`NO_REVIEW`] otherwise).
     /// Never creates a thread's review.
     Agent,
+    /// An app (a page in the writer's browser, `apps/<name>/`), offered
+    /// [`scriptorium_tools::Offer::App`]: the agent's rules, but with no
+    /// review named its suggestions go into [`app_review_file`], created on
+    /// first use; reads default to that review when it is attached, else to
+    /// the only attached one.
+    App {
+        /// The app's folder name, e.g. `scene-list`.
+        name: &'a str,
+    },
 }
 
 /// The tool result when an outside agent ([`Caller::Agent`]) proposes
@@ -535,6 +568,7 @@ fn resolve(
                 Ok((r, if here { Got::AttachedHere } else { Got::Attached }))
             }
             Caller::Agent => Err(ReviewError::Failed(NO_REVIEW.into())),
+            Caller::App { name } => file_review(store, &app_review_file(name), true),
         },
         Target::Review { index, id } => {
             let session = store.session();
@@ -547,7 +581,7 @@ fn resolve(
             Ok((recheck(store, r)?, Got::Attached))
         }
         Target::File(path) => {
-            let agent = matches!(caller, Caller::Agent);
+            let agent = matches!(caller, Caller::Agent | Caller::App { .. });
             file_review(store, named.unwrap_or(path), agent)
         }
     }
@@ -793,13 +827,22 @@ pub struct Added {
 ///
 /// The call is checked against what the caller is offered
 /// ([`scriptorium_tools::Offer::Chat`] for a thread, `Agent` for an outside
-/// agent). An outside agent's `script` is the host's (it picked the
-/// [`Script`]) and is dropped; its `review_file` is passed to the tools in
-/// the form the session stores, so an attached file is seen as attached.
+/// agent, `App` for an app). An outside agent's `script` is the host's (it
+/// picked the [`Script`]) and is dropped (an app is never offered one); an
+/// outside agent's or an app's `review_file` is passed to the tools in the
+/// form the session stores, so an attached file is seen as attached. For
+/// both, `script_info` starts with [`folder_line`].
 pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) -> CallDone {
+    if let Caller::App { name } = caller
+        && !scriptorium_apps::manifest::name_ok(name)
+    {
+        // The name becomes a file name (its review): never a path.
+        return CallDone::new(call, bad_app_name(name), true);
+    }
     let offer = match caller {
         Caller::Thread(_) => scriptorium_tools::Offer::Chat,
         Caller::Agent => scriptorium_tools::Offer::Agent,
+        Caller::App { .. } => scriptorium_tools::Offer::App,
     };
     // Only the arguments the host offered ([`scriptorium_tools::offered`]):
     // the tools read more than that (a thread isn't offered `review_file`).
@@ -814,7 +857,7 @@ pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) ->
     }
     let mut input = call.input.clone();
     let mut named = None;
-    if let (Caller::Agent, Some(map)) = (&caller, input.as_object_mut()) {
+    if let (Caller::Agent | Caller::App { .. }, Some(map)) = (&caller, input.as_object_mut()) {
         map.remove("script");
         named = map.get("review_file").and_then(Value::as_str).map(expand_home);
     }
@@ -849,8 +892,7 @@ pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) ->
         Err(e) => return CallDone::failed(call, &e),
     };
     if call.name == scriptorium_tools::LIST_APPS {
-        // A stub until the apps' folder is read here (plan "apps", A4).
-        return CallDone::new(call, LIST_APPS_STUB, false);
+        return CallDone::new(call, list_apps(store.dir()), false);
     }
     if let Some(f) = &named {
         input["review_file"] = Value::String(stored_path(store.dir(), &review_location(store.dir(), f)));
@@ -859,6 +901,13 @@ pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) ->
         let default_review = match &caller {
             Caller::Thread(file) => thread_review(&*store, file),
             Caller::Agent => (store.session().reviews.len() == 1).then_some(0),
+            // A suggestion with no review named goes into the app's own
+            // review ([`Target::Own`] when it isn't attached yet).
+            Caller::App { name } => {
+                attached_review_file(store.dir(), store.session(), &app_review_file(name)).or_else(|| {
+                    (!scriptorium_tools::may_append(&call.name) && store.session().reviews.len() == 1).then_some(0)
+                })
+            }
         };
         let ctx = Ctx {
             doc: store.doc(),
@@ -879,6 +928,9 @@ pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) ->
     };
     match outcome {
         Err(e) => CallDone::new(call, e.to_string(), true),
+        Ok(Outcome::Text(text)) if call.name == "script_info" && !matches!(caller, Caller::Thread(_)) => {
+            CallDone::new(call, format!("{}\n{text}", folder_line(store.dir())), false)
+        }
         Ok(Outcome::Text(text)) => CallDone::new(call, text, false),
         Ok(Outcome::Append(_) | Outcome::NewVersion(_)) if !writes => {
             CallDone::new(call, format!("{} can't change anything", call.name), true)

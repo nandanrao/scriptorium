@@ -9,6 +9,7 @@ rust-version.workspace = true
 [features]
 default = ["shell"]
 shell = [
+    "dep:scriptorium-apps",
     "dep:scriptorium-fsio",
     "dep:scriptorium-providers",
     "dep:scriptorium-tools",
@@ -21,6 +22,8 @@ scriptorium-agent.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 # The shell: the apply path, the file store and the run loop.
+# `list_apps` on the files: the apps' folder read (its `shell`, default).
+scriptorium-apps = { workspace = true, optional = true, default-features = false, features = ["shell"] }
 scriptorium-core = { workspace = true, optional = true }
 scriptorium-fsio = { workspace = true, optional = true, features = ["opened"] }
 # Without the keyring: the CLI and the app turn it on by depending on providers themselves.

@@ -47,6 +47,13 @@ SCRIPTS
   opens a script, info and dump first find again a version lined up with it
   that changed outside Scriptorium (updating its links file) and say so.
 
+APPS
+  scriptorium apps <script.fdx> [--json]
+        the apps in <script folder>/apps/: name, title, description, folder and
+        any problems (what stops one opening). Exit 1 if any app has problems.
+        With --json: [{name, title, description, folder, ok, problems,
+        loaded, error}] (loaded and error are null here).
+
 REVIEWING
   These work on the same saved session as the app (<script>.scriptorium.json
   next to the script), so an agent and a person see each other's decisions.
@@ -332,6 +339,7 @@ pub fn run_command(args: &[&str], notes: &mut Vec<String>) -> Result<String, Fai
     match args {
         [cmd, rest @ ..] if CHAT_COMMANDS.contains(cmd) => chat_command(cmd, rest, notes),
         [cmd, rest @ ..] if crate::connect::COMMANDS.contains(cmd) => crate::connect::command(rest, notes),
+        [cmd, rest @ ..] if crate::apps::COMMANDS.contains(cmd) => crate::apps::command(rest),
         _ => run_other(args, notes).map_err(Failed::from),
     }
 }

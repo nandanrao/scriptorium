@@ -54,7 +54,7 @@ fn the_guide_is_offered_read_only_without_script() {
     assert!(offered(Offer::Chat, "guide").is_err());
     assert!(spec.schema["properties"].get("script").is_none());
     assert_eq!(spec.schema["required"], json!(["topic"]));
-    assert_eq!(spec.schema["properties"]["topic"]["enum"], json!(["review", "translate"]));
+    assert_eq!(spec.schema["properties"]["topic"]["enum"], json!(["review", "translate", "app"]));
     assert!(read_only("guide") && !writes("guide"));
     assert_eq!(mcp_tool(&spec)["annotations"], json!({ "readOnlyHint": true }));
     assert!(spec.description.chars().count() < 4096);
@@ -64,8 +64,10 @@ fn the_guide_is_offered_read_only_without_script() {
 fn guide_returns_each_topic_in_full() {
     assert_eq!(guide(&json!({ "topic": "review" })).unwrap(), Topic::Review.text());
     assert_eq!(guide(&json!({ "topic": "translate" })).unwrap(), Topic::Translate.text());
+    assert_eq!(guide(&json!({ "topic": "app" })).unwrap(), Topic::App.text());
     assert!(Topic::Review.text().starts_with("# Reviewing"));
     assert!(Topic::Translate.text().starts_with("# Translating"));
+    assert!(Topic::App.text().starts_with("# Building an app"));
     for bad in [json!({}), json!({ "topic": 1 }), json!({ "topic": "poetry" })] {
         assert!(matches!(guide(&bad), Err(ToolError::Args(_))), "{bad}");
     }
@@ -81,6 +83,12 @@ fn the_guide_runs_through_call_like_the_other_tools() {
 <FinalDraft DocumentType="Script" Template="No" Version="5"><Content>
 <Paragraph Type="Action"><Text>Hello.</Text></Paragraph>
 </Content></FinalDraft>"#;
+    let out = with_ctx(fdx, |ctx| scriptorium_tools::call(ctx, "guide", &json!({ "topic": "translate" })).unwrap());
+    assert_eq!(out, scriptorium_tools::Outcome::Text(Topic::Translate.text().to_string()));
+}
+
+/// Runs `f` with a `Ctx` on the script `fdx`.
+fn with_ctx<T>(fdx: &str, f: impl FnOnce(&scriptorium_tools::Ctx) -> T) -> T {
     let fdx = scriptorium_fdx::FdxFile::parse(fdx.to_string()).unwrap();
     let doc = scriptorium_core::Document::new(fdx.to_script());
     let session = scriptorium_review::Session::default();
@@ -92,8 +100,87 @@ fn the_guide_runs_through_call_like_the_other_tools() {
         default_review: None,
         links: None,
     };
-    let out = scriptorium_tools::call(&ctx, "guide", &json!({ "topic": "translate" })).unwrap();
-    assert_eq!(out, scriptorium_tools::Outcome::Text(Topic::Translate.text().to_string()));
+    f(&ctx)
+}
+
+/// The JS library apps load, as the apps crate serves it.
+const LIBRARY: &str = include_str!("../../apps/assets/scriptorium.js");
+
+#[test]
+fn the_app_guide_names_only_what_the_library_has() {
+    let text = Topic::App.text();
+    // `Scriptorium.<name>` and `Scriptorium.data.<name>`.
+    let exported = LIBRARY.split("window.Scriptorium = {").nth(1).unwrap().split('}').next().unwrap();
+    let exported: Vec<&str> = exported.split(',').map(str::trim).collect();
+    let data = LIBRARY.split("const data = {").nth(1).unwrap().split("\n  };").next().unwrap();
+    let mut named = 0;
+    for (i, _) in text.match_indices("Scriptorium.") {
+        let rest = &text[i + "Scriptorium.".len()..];
+        let word: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        if word.is_empty() {
+            continue; // "… in Scriptorium." ends a sentence
+        }
+        if word == "data" && rest.starts_with("data.") {
+            let sub: String = rest["data.".len()..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+            assert!(data.contains(&format!("async {sub}(")), "Scriptorium.data.{sub}");
+        } else {
+            assert!(exported.contains(&word.as_str()), "Scriptorium.{word}");
+        }
+        named += 1;
+    }
+    assert!(named >= 10, "{named}");
+    // The events it names are the ones the library passes on.
+    for event in ["script", "writer", "decided", "open"] {
+        assert!(text.contains(&format!("`\"{event}\"`")), "{event}");
+        assert!(LIBRARY.contains(&format!("\"{event}\"")), "{event}");
+    }
+    // The tag it says to put first.
+    assert!(text.contains(r#"<script src="/scriptorium.js"></script>"#));
+}
+
+#[test]
+fn the_app_guide_lists_exactly_the_app_tools() {
+    let text = Topic::App.text();
+    let line = text.split("The tools an app may call: ").nth(1).unwrap().split(". ").next().unwrap();
+    let named: Vec<&str> = line.split(',').map(str::trim).collect();
+    assert_eq!(named, scriptorium_tools::APP_TOOLS);
+}
+
+#[test]
+fn the_app_guide_shows_list_paragraphs_as_it_answers() {
+    let line = Topic::App.text().lines().find(|l| l.starts_with(r#"{"total""#)).unwrap();
+    let shown: Value = serde_json::from_str(line).unwrap();
+    let fdx = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<FinalDraft DocumentType="Script" Template="No" Version="5"><Content>
+<Paragraph Type="Scene Heading"><Text>INT. KITCHEN - NIGHT</Text></Paragraph>
+<Paragraph Type="Character"><Text>ANNA</Text></Paragraph>
+<Paragraph Type="Dialogue"><Text>Where were you?</Text></Paragraph>
+</Content></FinalDraft>"#;
+    let real =
+        with_ctx(fdx, |ctx| scriptorium_tools::call(ctx, "list_paragraphs", &json!({ "kind": "Dialogue" })).unwrap());
+    let scriptorium_tools::Outcome::Text(real) = real else { panic!("{real:?}") };
+    let real: Value = serde_json::from_str(&real).unwrap();
+    let keys = |v: &Value| -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(&shown), keys(&real));
+    assert_eq!(keys(&shown["paragraphs"][0]), keys(&real["paragraphs"][0]));
+    // The same values too, but for the id.
+    let (mut s, mut r) = (shown["paragraphs"][0].clone(), real["paragraphs"][0].clone());
+    assert!(s["id"].is_u64() && r["id"].is_u64());
+    s["id"] = json!(0);
+    r["id"] = json!(0);
+    assert_eq!(s, r);
+    assert_eq!((shown["total"].clone(), shown["more"].clone()), (real["total"].clone(), real["more"].clone()));
+}
+
+#[test]
+fn the_instructions_point_at_the_app_guide() {
+    assert!(INSTRUCTIONS.contains("To build an app (a small web page on the script), call guide('app') first."));
+    let spec = offered(Offer::Agent, "guide").unwrap();
+    assert!(spec.description.contains("guide('app')"));
 }
 
 #[test]
@@ -133,4 +220,80 @@ fn the_prompts_send_the_guides_text() {
     let bare = prompt("translate", &Value::Null).unwrap();
     assert!(text(&bare, 1).contains("ask me"));
     assert_eq!(prompt("nope", &Value::Null), Err(ToolError::Unknown("nope".into())));
+}
+
+#[test]
+fn the_library_reads_where_is_writer_as_it_answers() {
+    use scriptorium_core::ParaId;
+    use scriptorium_tools::context::{Scene, Selected, Showing, ViewContext, text};
+    // The library's patterns, as written in it.
+    let paragraph = r"/^(?:Cursor: on|Selected:) ¶(\d+)/m";
+    let scene = r"/^Scene: \d+, (.*) \(read_scene with scene \d+\)\.$/m";
+    assert!(LIBRARY.contains(paragraph) && LIBRARY.contains(scene));
+
+    let ctx = |selection: Option<Selected>, scene: Option<Scene>| ViewContext {
+        script: "/films/film.fdx".into(),
+        pair: None,
+        view: Showing::Script,
+        card: None,
+        selection,
+        scene,
+        visible: None,
+        unwritten: false,
+    };
+    let kitchen = || Some(Scene { number: 4, heading: "INT. KITCHEN (NIGHT) - DAY".into() });
+    let lines = |t: &str| t.lines().map(str::to_string).collect::<Vec<_>>();
+
+    // A cursor: "Cursor: on ¶41" starts a line; the scene line is whole.
+    let cursor = Selected { first: ParaId(41), last: ParaId(41), text: "Hi.".into(), collapsed: true };
+    let t = lines(&text(&ctx(Some(cursor), kitchen())));
+    assert!(t.iter().any(|l| l.starts_with("Cursor: on ¶41,")), "{t:?}");
+    assert!(t.iter().any(|l| l == "Scene: 4, INT. KITCHEN (NIGHT) - DAY (read_scene with scene 4)."), "{t:?}");
+
+    // A selection: its first line.
+    let sel = Selected { first: ParaId(41), last: ParaId(44), text: "a\nb".into(), collapsed: false };
+    let t = lines(&text(&ctx(Some(sel), kitchen())));
+    assert!(t.iter().any(|l| l.starts_with("Selected: ¶41 to ¶44")), "{t:?}");
+
+    // No scene and no line: neither pattern finds anything.
+    let t = lines(&text(&ctx(None, None)));
+    assert!(!t.iter().any(|l| l.starts_with("Cursor: on ¶") || l.starts_with("Selected: ¶")), "{t:?}");
+    assert!(!t.iter().any(|l| l.starts_with("Scene: ") && l.as_bytes()[7].is_ascii_digit()), "{t:?}");
+}
+
+#[test]
+fn the_app_guide_names_the_tools_that_answer_json() {
+    let text = Topic::App.text().split_whitespace().collect::<Vec<_>>().join(" ");
+    let named = text.split("for the tools that answer JSON: ").nth(1).unwrap().split(". ").next().unwrap();
+    let named: Vec<&str> = named.split(',').map(str::trim).collect();
+    let json_tools = [
+        "list_paragraphs",
+        "list_reviews",
+        "list_suggestions",
+        "list_versions",
+        "read_rows",
+        "suggest_change",
+        "suggest_changes",
+    ];
+    assert_eq!(named, json_tools);
+    // Every other app tool answers text: those that run on a bare script here.
+    let fdx = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<FinalDraft DocumentType="Script" Template="No" Version="5"><Content>
+<Paragraph Type="Scene Heading"><Text>INT. KITCHEN - NIGHT</Text></Paragraph>
+<Paragraph Type="Action"><Text>Rain.</Text></Paragraph>
+</Content></FinalDraft>"#;
+    with_ctx(fdx, |ctx| {
+        let answer = |name: &str, args: Value| match scriptorium_tools::call(ctx, name, &args).unwrap() {
+            scriptorium_tools::Outcome::Text(t) => t,
+            other => panic!("{name}: {other:?}"),
+        };
+        for name in ["list_paragraphs", "list_reviews"] {
+            assert!(serde_json::from_str::<Value>(&answer(name, json!({}))).is_ok(), "{name}");
+        }
+        for (name, args) in
+            [("script_info", json!({})), ("read_scene", json!({ "scene": 1 })), ("read_script", json!({}))]
+        {
+            assert!(serde_json::from_str::<Value>(&answer(name, args)).is_err(), "{name}");
+        }
+    });
 }

@@ -15,6 +15,7 @@
 //! - [`mcp`]: `scriptorium mcp`, the agent connector (MCP over stdio, to the
 //!   running app or the files).
 
+mod apps;
 #[cfg(feature = "chat")]
 pub mod chat;
 pub mod commands;

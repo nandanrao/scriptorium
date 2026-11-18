@@ -13,6 +13,7 @@
 //   await s.data.blob("img/a.png")             // a Blob, or null
 //   await s.data.write("notes.json", value)    // JSON, or a Blob
 //   await s.data.list(); await s.data.remove("notes.json")
+//   await s.writer()                           // { scene, paragraph }, or null
 //   s.on("script" | "decided" | "writer" | "open", fn)
 (function () {
   "use strict";
@@ -317,14 +318,41 @@
 
   // ---- Events. ----
 
+  // Where the writer is now, in the `writer` event's shape: { scene (the
+  // heading text, "" before the first scene), paragraph (the id) }; null
+  // when there is no line to place them on. Read from where_is_writer's
+  // lines "Scene: 3, <heading> (read_scene with scene 3)." and "Cursor: on
+  // ¶41, ..." or "Selected: ¶41 to ¶44:" (checked against the tool in Rust).
+  const WRITER_PARAGRAPH = /^(?:Cursor: on|Selected:) ¶(\d+)/m;
+  const WRITER_SCENE = /^Scene: \d+, (.*) \(read_scene with scene \d+\)\.$/m;
+  async function writer() {
+    const text = await call("where_is_writer");
+    const para = text.match(WRITER_PARAGRAPH);
+    if (!para) return null;
+    const scene = text.match(WRITER_SCENE);
+    return { scene: scene ? scene[1] : "", paragraph: Number(para[1]) };
+  }
+
   const handlers = {};
+  let writerMoves = 0;  // writer events so far
   function on(name, fn) {
     (handlers[name] = handlers[name] || []).push(fn);
+    // Events only come when the writer moves: tell a new listener where
+    // they are now, unless a move arrives first (it is newer).
+    if (name === "writer" && api && !notOpenPage) {
+      const before = writerMoves;
+      writer().then(
+        (place) => { if (place && writerMoves === before) emitTo(fn, place); },
+        () => {} // a failed call shows its own message
+      );
+    }
+  }
+  function emitTo(fn, value) {
+    try { fn(value); } catch (e) { showError(`${e.message || e}${e.stack ? where(firstFrame(e.stack)) : ""}`); }
   }
   function emit(name, value) {
-    for (const fn of handlers[name] || []) {
-      try { fn(value); } catch (e) { showError(`${e.message || e}${e.stack ? where(firstFrame(e.stack)) : ""}`); }
-    }
+    if (name === "writer") writerMoves += 1;
+    for (const fn of handlers[name] || []) emitTo(fn, value);
   }
 
   let events = null;
@@ -367,7 +395,7 @@
     };
   }
 
-  window.Scriptorium = { app, project, call, json, paragraphs, suggest, data, on, ScriptoriumError };
+  window.Scriptorium = { app, project, call, json, paragraphs, suggest, writer, data, on, ScriptoriumError };
   window.ScriptoriumError = ScriptoriumError;
 
   // `loaded` once the page and everything it loads are in: a page whose

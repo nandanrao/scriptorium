@@ -1,14 +1,25 @@
 [package]
 name = "scriptorium-apps"
-description = "Apps in the writer's browser: manifests, paths, request decisions, change events, the list, and the Scriptorium JS library. Pure: no I/O."
+description = "Apps in the writer's browser: manifests, paths, request decisions, change events, the list, and the Scriptorium JS library (pure); feature `shell`: reading and writing apps' folders; feature `serve`: the HTTP server."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["shell", "serve"]
+# `shell`: reading apps' folders (the list, pages, data, stamps). Without it
+# the crate is pure and builds for wasm32.
+shell = ["dep:scriptorium-fsio"]
+# `serve`: the HTTP server on 127.0.0.1 (tiny_http) the running app hosts
+# apps with.
+serve = ["shell", "dep:tiny_http"]
+
 [dependencies]
+scriptorium-fsio = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+tiny_http = { workspace = true, optional = true }
 
 [lints]
 workspace = true

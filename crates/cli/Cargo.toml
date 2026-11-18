@@ -25,6 +25,8 @@ chat = ["dep:ctrlc", "dep:scriptorium-providers"]
 # Ctrl+C stops a `chat` run through its cancel token.
 ctrlc = { workspace = true, optional = true }
 scriptorium-agent.workspace = true
+# `apps`: the apps list (the folder scan only, not the server).
+scriptorium-apps = { workspace = true, default-features = false, features = ["shell"] }
 # The tool executor (`tool`): always, also without `chat` (the MCP server).
 # Its shell brings the providers' HTTP but not the keyring.
 scriptorium-chat.workspace = true

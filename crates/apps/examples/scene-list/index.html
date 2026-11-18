@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <script src="/scriptorium.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scene list</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Scenes</h1>
+    <p id="status">Reading the script…</p>
+  </header>
+  <ol id="scenes"></ol>
+  <section id="edit" hidden>
+    <h2>Suggest a new heading for scene <span id="edit-number"></span></h2>
+    <form id="edit-form">
+      <input id="edit-text" type="text" autocomplete="off" spellcheck="true">
+      <button type="submit">Suggest</button>
+      <button type="button" id="edit-cancel">Cancel</button>
+    </form>
+    <p id="edit-result"></p>
+  </section>
+  <script src="app.js"></script>
+</body>
+</html>

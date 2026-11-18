@@ -1116,8 +1116,9 @@ mod tests {
             Ok(Got::Done { done, .. }) => assert!(done.is_error, "{}", done.text),
             got => panic!("{got:?}"),
         }
-        // `list_apps` runs on the open script like any read (a stub for now).
-        assert_eq!(ran(served.one(cx, call("list_apps", json!({}))), &f), exec::LIST_APPS_STUB);
+        // `list_apps` runs on the open script like any read.
+        let listed = ran(served.one(cx, call("list_apps", json!({}))), &f);
+        assert!(listed.starts_with("No apps in "), "{listed}");
         drop(served);
 
         let g = Folder::new("openapp-empty");

@@ -36,7 +36,9 @@ earlier read.
 To translate (after guide('translate')): list_versions, then new_version makes (or finds) the version and returns \
 its absolute path, used as script from then on; read_rows by scene, then suggest_changes with row (each item \
 covering all of its row's this ids) into \"Translation from <the original's label from list_versions>.review.txt\"; \
-updates go in the same review.";
+updates go in the same review.
+
+To build an app (a small web page on the script), call guide('app') first.";
 
 /// What the `guide` tool explains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,17 +47,21 @@ pub enum Topic {
     Review,
     /// Making a version in another language and translating it.
     Translate,
+    /// Building an app: a small web page on the script, in the writer's
+    /// browser.
+    App,
 }
 
 impl Topic {
     /// Every topic, in the order the `guide` schema lists them.
-    pub const ALL: [Topic; 2] = [Topic::Review, Topic::Translate];
+    pub const ALL: [Topic; 3] = [Topic::Review, Topic::Translate, Topic::App];
 
     /// The topic's name, as `guide` takes it.
     pub fn name(self) -> &'static str {
         match self {
             Topic::Review => "review",
             Topic::Translate => "translate",
+            Topic::App => "app",
         }
     }
 
@@ -69,6 +75,7 @@ impl Topic {
         match self {
             Topic::Review => include_str!("guidance/review.md"),
             Topic::Translate => include_str!("guidance/translate.md"),
+            Topic::App => include_str!("guidance/app.md"),
         }
     }
 }
@@ -80,9 +87,10 @@ pub fn guide_spec() -> ToolSpec {
         "guide",
         "How to work with Scriptorium, in full: call guide('review') before a review pass (reading, proposing, \
          naming the review file, deciding only when asked), and guide('translate') before translating (making the \
-         version, the brief and glossary, rows, updates). Read-only; works without a script.",
+         version, the brief and glossary, rows, updates), and guide('app') before building an app (a small web page on \
+         the script). Read-only; works without a script.",
         json!({
-            "topic": { "type": "string", "enum": topics, "description": "review: a pass of changes on a script. translate: a version in another language." },
+            "topic": { "type": "string", "enum": topics, "description": "review: a pass of changes on a script. translate: a version in another language. app: a web page on the script." },
         }),
         &["topic"],
     )
@@ -93,10 +101,10 @@ pub fn guide(args: &Value) -> Result<String, ToolError> {
     let topic = args
         .get("topic")
         .and_then(Value::as_str)
-        .ok_or_else(|| ToolError::Args("guide needs `topic`: \"review\" or \"translate\"".into()))?;
-    Topic::from_name(topic)
-        .map(|t| t.text().to_string())
-        .ok_or_else(|| ToolError::Args(format!("guide: unknown topic {topic:?}; use \"review\" or \"translate\"")))
+        .ok_or_else(|| ToolError::Args("guide needs `topic`: \"review\", \"translate\" or \"app\"".into()))?;
+    Topic::from_name(topic).map(|t| t.text().to_string()).ok_or_else(|| {
+        ToolError::Args(format!("guide: unknown topic {topic:?}; use \"review\", \"translate\" or \"app\""))
+    })
 }
 
 /// Points tool `spec`'s description at the guide where it matters (agent
@@ -171,6 +179,7 @@ pub fn prompt(name: &str, arguments: &Value) -> Result<Value, ToolError> {
     let arg = |key: &str| arguments.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
     let mut task = match (p.topic, arg("language")) {
         (Topic::Review, _) => "Run a review pass on the script".to_string(),
+        (Topic::App, _) => "Build an app on the script".to_string(),
         (Topic::Translate, Some(language)) => format!("Translate the script into {language}"),
         (Topic::Translate, None) => "Translate the script (ask me into which language)".to_string(),
     };

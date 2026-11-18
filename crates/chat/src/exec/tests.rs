@@ -688,3 +688,215 @@ fn a_leading_tilde_is_the_home_folder() {
     assert_eq!(resolve_in(Path::new("/s"), "r.review.txt"), "/s/r.review.txt");
     assert_eq!(resolve_in(Path::new("/s"), "/x/r.review.txt"), "/x/r.review.txt");
 }
+
+fn app_call(script: &mut OneStore, name: &str, input: serde_json::Value) -> CallDone {
+    let c = ToolCall { name: name.into(), input, ..suggest("a", 1, "x") };
+    run_call(script, Caller::App { name: "scene-list" }, &c)
+}
+
+/// A real (empty) folder for the script, so the folder rules can be checked.
+fn temp_folder(tag: &str) -> PathBuf {
+    let base = std::env::temp_dir().join(format!("scriptorium-exec-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    base.canonicalize().unwrap()
+}
+
+#[test]
+fn an_apps_suggestions_go_into_its_own_review() {
+    let dir = temp_folder("app-review");
+    let mut m = Mem::new();
+    m.dir = dir.clone();
+    // Another review attached, the only one: reads default to it, but the
+    // app's suggestions never go there.
+    let other = dir.join("a.review.txt");
+    m.files.insert(other.clone(), format!("{FORMAT_HEADER}\nScript: film.fdx\n\n"));
+    m.attach(&other).unwrap();
+    let mut s = OneStore(m);
+    let listed = app_call(&mut s, "list_suggestions", json!({}));
+    assert!(!listed.result.is_error, "{}", listed.result.content);
+
+    let name = "scene-list (app).review.txt";
+    let first = app_call(&mut s, "suggest_change", json!({"paragraph_id": 1, "options": ["Laura grins."]}));
+    assert!(!first.result.is_error, "{}", first.result.content);
+    assert_eq!(first.added.as_ref().unwrap().numbers, [Some(1)]);
+    let text = s.0.file(name).to_string();
+    assert!(text.starts_with(FORMAT_HEADER) && text.contains("Laura grins."), "{text}");
+    assert_eq!(s.0.session.reviews.len(), 2);
+    assert_eq!(s.0.session.reviews[1].path, name);
+    assert_eq!(s.0.file("a.review.txt"), format!("{FORMAT_HEADER}\nScript: film.fdx\n\n"));
+
+    // The second appends to the same file.
+    let second = app_call(
+        &mut s,
+        "suggest_changes",
+        json!({"suggestions": [{"paragraph_id": 3, "options": ["I am going to town tomorrow."]}]}),
+    );
+    assert!(!second.result.is_error, "{}", second.result.content);
+    assert_eq!(second.added.as_ref().unwrap().numbers, [Some(2)]);
+    let text = s.0.file(name);
+    assert!(text.contains("Laura grins.") && text.contains("I am going to town tomorrow."), "{text}");
+    assert_eq!(s.0.session.reviews.len(), 2);
+    // Reads now default to the app's review.
+    let listed = app_call(&mut s, "list_suggestions", json!({}));
+    assert!(listed.result.content.contains("Laura grins."), "{}", listed.result.content);
+
+    // Naming another review goes there, under the agent rules.
+    let named = app_call(
+        &mut s,
+        "suggest_change",
+        json!({"paragraph_id": 1, "options": ["Laura beams."], "review_file": "a.review.txt"}),
+    );
+    assert!(!named.result.is_error, "{}", named.result.content);
+    assert!(s.0.file("a.review.txt").contains("Laura beams."));
+    let outside = app_call(
+        &mut s,
+        "suggest_change",
+        json!({"paragraph_id": 1, "options": ["x"], "review_file": "../x.review.txt"}),
+    );
+    assert!(outside.result.is_error, "{}", outside.result.content);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_app_is_offered_only_the_app_tools() {
+    let mut s = OneStore(Mem::new());
+    let mut refused: Vec<(&str, serde_json::Value)> = vec![
+        ("edit_paragraph", json!({ "paragraph_id": 1, "text": "Laura grins." })),
+        ("undo", json!({})),
+        ("redo", json!({})),
+        ("decide_suggestion", json!({ "n": 1, "decision": "keep" })),
+        ("write_script", json!({})),
+        ("attach_reviews", json!({ "files": ["a.review.txt"] })),
+        ("detach_reviews", json!({ "files": ["a.review.txt"] })),
+        ("guide", json!({ "topic": "app" })),
+        ("new_version", json!({ "language": "es" })),
+        ("open_app", json!({ "name": "scene-list" })),
+        // `script` isn't offered: an app works on the open script only.
+        ("script_info", json!({ "script": "/elsewhere/film.fdx" })),
+        ("read_scene", json!({ "scene": 1, "script": "film.fdx" })),
+    ];
+    for name in scriptorium_tools::AGENT_ONLY {
+        if !refused.iter().any(|(n, _)| *n == name) {
+            refused.push((name, json!({})));
+        }
+    }
+    for (name, input) in refused {
+        let done = app_call(&mut s, name, input);
+        assert!(done.result.is_error, "{name}: {}", done.result.content);
+    }
+    assert_eq!(s.0.doc.paragraphs()[1].text(), "Laura smiles.");
+    assert!(s.0.files.is_empty() && s.0.session.reviews.is_empty());
+}
+
+#[test]
+fn list_apps_reads_the_scripts_folder() {
+    let dir = temp_folder("list-apps");
+    let mut m = Mem::new();
+    m.dir = dir.clone();
+    let mut s = OneStore(m);
+    let list = |s: &mut OneStore, caller: Caller<'_>| {
+        let c = ToolCall { name: "list_apps".into(), input: json!({}), ..suggest("a", 1, "x") };
+        let done = run_call(s, caller, &c);
+        assert!(!done.result.is_error, "{}", done.result.content);
+        done.result.content
+    };
+    assert_eq!(list(&mut s, Caller::Agent), format!("No apps in {}/apps/.", dir.display()));
+
+    let app = dir.join("apps/scene-list");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("app.json"), r#"{"scriptorium": 1, "title": "Scene list", "description": "Every scene."}"#)
+        .unwrap();
+    std::fs::write(app.join("index.html"), "<p>hi</p>").unwrap();
+    std::fs::create_dir_all(dir.join("apps/broken")).unwrap();
+    std::fs::write(dir.join("apps/broken/app.json"), "{ not json").unwrap();
+    for caller in [Caller::Agent, Caller::App { name: "scene-list" }] {
+        let text = list(&mut s, caller);
+        assert!(text.starts_with(&format!("2 apps in {}/apps/:", dir.display())), "{text}");
+        assert!(text.contains("- scene-list: Scene list (Every scene.)"), "{text}");
+        assert!(text.contains(&format!("folder {}/apps/scene-list/", dir.display())), "{text}");
+        assert!(text.contains("- broken\n") && text.contains("problem:"), "{text}");
+        // No server here: nothing said about pages.
+        assert!(!text.contains("page:"), "{text}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn script_info_names_the_folder_for_agents_and_apps_only() {
+    let mut s = OneStore(Mem::new());
+    let c = ToolCall { name: "script_info".into(), input: json!({}), ..suggest("a", 1, "x") };
+    let mut file = thread("Info");
+    let chat = call(&mut s, &mut file, c.clone()).result.content;
+    assert!(chat.starts_with("paragraphs "), "{chat}");
+    for caller in [Caller::Agent, Caller::App { name: "scene-list" }] {
+        let done = run_call(&mut s, caller, &c);
+        assert!(!done.result.is_error, "{}", done.result.content);
+        assert_eq!(done.result.content, format!("folder      /mem\n{chat}"));
+    }
+}
+
+#[test]
+fn open_app_on_the_files_says_scriptorium_isnt_running() {
+    let mut s = OneStore(Mem::new());
+    let c = ToolCall { name: "open_app".into(), input: json!({ "name": "scene-list" }), ..suggest("a", 1, "x") };
+    let done = run_call(&mut s, Caller::Agent, &c);
+    assert!(done.result.is_error);
+    assert_eq!(
+        done.result.content,
+        "Scriptorium isn't running, so the app can't be opened. Ask the writer to open the script in Scriptorium, \
+         then call open_app again."
+    );
+}
+
+#[test]
+fn an_app_with_a_bad_name_is_refused_before_anything() {
+    let dir = temp_folder("app-bad-name");
+    let mut m = Mem::new();
+    m.dir = dir.clone();
+    let mut s = OneStore(m);
+    for name in ["a/b", "../x", "", "Scene", ".hidden"] {
+        for (tool, input) in
+            [("suggest_change", json!({"paragraph_id": 1, "options": ["Laura grins."]})), ("script_info", json!({}))]
+        {
+            let c = ToolCall { name: tool.into(), input, ..suggest("a", 1, "x") };
+            let done = run_call(&mut s, Caller::App { name }, &c);
+            assert!(done.result.is_error, "{name}: {}", done.result.content);
+            assert_eq!(done.result.content, bad_app_name(name));
+        }
+    }
+    assert!(s.0.files.is_empty() && s.0.session.reviews.is_empty());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_existing_apps_review_is_attached_and_a_non_review_refused() {
+    let dir = temp_folder("app-existing");
+    let name = "scene-list (app).review.txt";
+    let mut m = Mem::new();
+    m.dir = dir.clone();
+    let at = dir.join(name);
+    let before = format!("{FORMAT_HEADER}\nScript: film.fdx\n\n");
+    std::fs::write(&at, &before).unwrap();
+    m.files.insert(at.clone(), before.clone());
+    let mut s = OneStore(m);
+    let done = app_call(&mut s, "suggest_change", json!({"paragraph_id": 1, "options": ["Laura grins."]}));
+    assert!(!done.result.is_error, "{}", done.result.content);
+    assert_eq!(s.0.session.reviews.len(), 1);
+    assert_eq!(s.0.session.reviews[0].path, name);
+    let text = s.0.file(name);
+    assert!(text.starts_with(FORMAT_HEADER) && text.contains("Laura grins."), "{text}");
+
+    // Not a review at that name: refused, left as it is, nothing attached.
+    let mut m = Mem::new();
+    m.dir = dir.clone();
+    std::fs::write(&at, "export PATH=/tmp\n").unwrap();
+    m.files.insert(at.clone(), "export PATH=/tmp\n".into());
+    let mut s = OneStore(m);
+    let done = app_call(&mut s, "suggest_change", json!({"paragraph_id": 1, "options": ["Laura grins."]}));
+    assert!(done.result.is_error, "{}", done.result.content);
+    assert_eq!(s.0.file(name), "export PATH=/tmp\n");
+    assert!(s.0.session.reviews.is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
