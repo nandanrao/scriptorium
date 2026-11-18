@@ -33,6 +33,16 @@ const SCRIPT: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 const ACCOUNTS: &str = r#"{"version": 1, "default": "work",
   "accounts": [{"id": "work", "name": "Work", "provider": "anthropic", "model": "claude-opus-5-5"}]}"#;
 
+/// Where the binary looks for the accounts file, relative to the folder: it
+/// is `HOME`, and `XDG_CONFIG_HOME` / `APPDATA` are its `config`. macOS
+/// ignores `XDG_CONFIG_HOME` and keeps settings in `~/Library/Application
+/// Support` (see the providers crate's `shell::config`).
+const ACCOUNTS_FILE: &str = if cfg!(target_os = "macos") {
+    "Library/Application Support/scriptorium/accounts.json"
+} else {
+    "config/scriptorium/accounts.json"
+};
+
 /// A fresh folder holding `film.fdx` and a config folder with one account;
 /// removed on drop.
 struct Folder(PathBuf);
@@ -45,9 +55,9 @@ impl Folder {
     fn with_script(name: &str, script: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("scriptorium-cli-chat-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("config/scriptorium")).unwrap();
+        std::fs::create_dir_all(dir.join(ACCOUNTS_FILE).parent().unwrap()).unwrap();
         std::fs::write(dir.join("film.fdx"), script).unwrap();
-        std::fs::write(dir.join("config/scriptorium/accounts.json"), ACCOUNTS).unwrap();
+        std::fs::write(dir.join(ACCOUNTS_FILE), ACCOUNTS).unwrap();
         Folder(dir.canonicalize().unwrap())
     }
 
@@ -71,6 +81,7 @@ impl Folder {
         c.current_dir(&self.0)
             .args(args)
             .env("XDG_CONFIG_HOME", self.path("config"))
+            .env("APPDATA", self.path("config"))
             .env("HOME", &self.0)
             .env("SCRIPTORIUM_KEYRING", "off")
             .env("SCRIPTORIUM_TEST_CLOCK", "2026-11-15T09:30:00Z")
@@ -338,7 +349,7 @@ fn record_and_replay_together_are_refused() {
 #[test]
 fn accounts_add_list_remove() {
     let f = Folder::new("accounts");
-    std::fs::remove_file(f.path("config/scriptorium/accounts.json")).unwrap();
+    std::fs::remove_file(f.path(ACCOUNTS_FILE)).unwrap();
     let list = f.run(&["accounts", "list"], None).expect_ok().stdout();
     assert!(list.starts_with("no accounts yet"), "{list}");
 
@@ -396,7 +407,7 @@ fn accounts_add_list_remove() {
     f.run(&["accounts", "default", "anthropic"], None).expect_ok();
     f.run(&["accounts", "remove", "local"], None).expect_ok();
     f.run(&["accounts", "remove", "local"], None).expect_err();
-    let file: Value = serde_json::from_str(&f.read("config/scriptorium/accounts.json")).unwrap();
+    let file: Value = serde_json::from_str(&f.read(ACCOUNTS_FILE)).unwrap();
     assert_eq!(file["default"], "anthropic");
     assert_eq!(file["accounts"].as_array().unwrap().len(), 1);
 }
@@ -420,12 +431,12 @@ fn keys_come_from_stdin_and_with_keyring_off_nothing_is_pretended() {
     assert!(run.stderr().contains("nothing was stored or deleted"), "{}", run.all());
     let run = f.run_with_stdin(&["accounts", "add", "two", "--provider", "openai", "--key-stdin"], "sk-secret\n");
     run.expect_err();
-    assert!(!f.read("config/scriptorium/accounts.json").contains("two"), "nothing added");
+    assert!(!f.read(ACCOUNTS_FILE).contains("two"), "nothing added");
     let status = f.run(&["accounts", "key", "status", "work", "--json"], None).expect_ok().json();
     assert_eq!(status["key"]["status"], "env");
     let run = f.run(&["accounts", "remove", "work"], None).expect_ok();
     assert!(run.stdout().contains("keyring not touched (SCRIPTORIUM_KEYRING=off)"), "{}", run.all());
-    assert!(!f.read("config/scriptorium/accounts.json").contains("sk-"));
+    assert!(!f.read(ACCOUNTS_FILE).contains("sk-"));
 }
 
 #[test]
@@ -679,11 +690,8 @@ fn the_message_can_come_from_stdin() {
 #[test]
 fn accounts_set_and_the_providers_default_model() {
     let f = Folder::new("set");
-    std::fs::write(
-        f.path("config/scriptorium/accounts.json"),
-        r#"{"version": 1, "accounts": [{"id": "work", "provider": "anthropic"}]}"#,
-    )
-    .unwrap();
+    std::fs::write(f.path(ACCOUNTS_FILE), r#"{"version": 1, "accounts": [{"id": "work", "provider": "anthropic"}]}"#)
+        .unwrap();
     // No model in the file: the provider's default is used.
     let list = f.run(&["accounts", "--json"], None).expect_ok().json();
     assert_eq!(list[0]["model"], "claude-opus-5-5");

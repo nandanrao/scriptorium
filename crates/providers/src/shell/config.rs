@@ -125,5 +125,13 @@ mod tests {
             assert_eq!(config_dir(env(&[("XDG_CONFIG_HOME", "rel"), ("HOME", "/h")])), Some("/h/.config".into()));
             assert_eq!(config_dir(env(&[])), None);
         }
+        if cfg!(target_os = "macos") {
+            // XDG_CONFIG_HOME isn't read on macOS: settings live in Application Support.
+            assert_eq!(
+                config_dir(env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")])),
+                Some("/h/Library/Application Support".into())
+            );
+            assert_eq!(config_dir(env(&[])), None);
+        }
     }
 }
