@@ -709,7 +709,13 @@ impl Server {
     /// with the acts in turn, then hangs up. After the last it closes the
     /// socket. The thread returns the calls it got (name and arguments).
     fn fake_app(&self, conns: Vec<(Hello, Vec<Act>)>) -> std::thread::JoinHandle<Vec<(String, Value)>> {
-        let socket = self.short.join("run/scriptorium/agent.sock");
+        // Where the connector looks: from HOME on macOS (it has no
+        // XDG_RUNTIME_DIR), from XDG_RUNTIME_DIR elsewhere.
+        let socket = if cfg!(target_os = "macos") {
+            scriptorium_fsio::link::proto::socket_path(&self.short.join("home"))
+        } else {
+            self.short.join("run/scriptorium/agent.sock")
+        };
         let server = scriptorium_fsio::link::Server::bind_at(&socket).unwrap();
         let script = self.script_path();
         std::thread::spawn(move || {

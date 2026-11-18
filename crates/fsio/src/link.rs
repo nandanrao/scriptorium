@@ -152,8 +152,8 @@ mod shell {
             }
             // Calls have no timeout below the agent's own.
             let stream = reader.get_ref();
-            stream.set_read_timeout(None).map_err(failed)?;
-            stream.set_write_timeout(None).map_err(failed)?;
+            unless_shut(stream.set_read_timeout(None)).map_err(failed)?;
+            unless_shut(stream.set_write_timeout(None)).map_err(failed)?;
             Ok(Client { reader, theirs, next_id: 1, broken: false })
         }
 
@@ -395,11 +395,11 @@ mod shell {
             let theirs = Hello::decode(&line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             self.writer.reply_raw(&ours.encode())?;
             let stream = self.reader.get_ref();
-            stream.set_read_timeout(None)?;
+            unless_shut(stream.set_read_timeout(None))?;
             // Replies are written from the app's UI thread too (`taken`):
             // a connector that stops reading must never block it. A reply
             // that can't be written within this is a hang-up.
-            stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
+            unless_shut(stream.set_write_timeout(Some(REPLY_TIMEOUT)))?;
             Ok(proto::compatible(ours, &theirs).then_some(theirs))
         }
 
@@ -453,6 +453,18 @@ mod shell {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "a line cut off"));
         }
         String::from_utf8(buf).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// A timeout change, where the peer having already hung up isn't an
+    /// error. macOS refuses `setsockopt` on a socket whose peer has closed
+    /// (`EINVAL`, both directions shut), where Linux allows it; the next
+    /// read or write sees the hang-up either way, so a hello answered and
+    /// then a quick hang-up stays a link that is gone, not a failed connect.
+    fn unless_shut(set: io::Result<()>) -> io::Result<()> {
+        match set {
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+            other => other,
+        }
     }
 
     /// The peer hung up (as opposed to sending something wrong).
