@@ -5339,6 +5339,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "scriptorium-apps"
+version = "0.6.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "scriptorium-chat"
 version = "0.6.0"
 dependencies = [
