@@ -3,8 +3,9 @@
 //! the host fields (`script`, `review_file`, `before`), and the tools only
 //! agents get (attach and detach reviews, decide, edit, undo, redo, write
 //! the script), `guide` ([`crate::guidance`]) and `where_is_writer`
-//! ([`crate::context`]). Also each tool's MCP
-//! annotations.
+//! ([`crate::context`]), and the app tools (`list_apps`, `open_app`). Also
+//! each tool's MCP annotations, and [`Offer::App`](crate::Offer::App): the
+//! agents' offer cut to [`APP_TOOLS`], without `script`.
 //!
 //! Paths: `script` is optional (left out, the host uses the script open in
 //! the app); given, it is an absolute path. Every other path a tool names is
@@ -39,6 +40,37 @@ const READ_ONLY: &[&str] = &[
     "read_rows",
     "guide",
     crate::context::NAME,
+    LIST_APPS,
+    OPEN_APP,
+];
+
+/// `list_apps`: the apps in the script's folder (`apps/<name>/`).
+pub const LIST_APPS: &str = "list_apps";
+/// `open_app`: open an app in the writer's browser. Only the running app
+/// can; on the files it answers [`OPEN_APP_ON_FILES`].
+pub const OPEN_APP: &str = "open_app";
+
+/// `open_app` run on the files: Scriptorium isn't running to open it.
+pub const OPEN_APP_ON_FILES: &str = "Scriptorium isn't running, so the app can't be opened. Ask the writer to open the \
+                                     script in Scriptorium, then call open_app again.";
+
+/// The tools an app (a web page in the writer's browser) is offered
+/// ([`Offer::App`](crate::Offer::App)): the reading tools and the
+/// suggesting tools, in the agents' order. Never `guide`, `new_version`,
+/// `open_app` or a host operation ([`AGENT_ONLY`]).
+pub const APP_TOOLS: [&str; 12] = [
+    "script_info",
+    "list_paragraphs",
+    "read_scene",
+    "read_script",
+    "list_reviews",
+    "list_suggestions",
+    "list_versions",
+    "read_rows",
+    "suggest_change",
+    "suggest_changes",
+    crate::context::NAME,
+    LIST_APPS,
 ];
 
 /// The tools only [`Offer::Agent`](crate::Offer::Agent) has, in the order
@@ -55,9 +87,12 @@ pub fn read_only(name: &str) -> bool {
 /// The MCP annotations of tool `name` (`readOnlyHint` and friends), or
 /// `None` for a name no offer has. Read tools are read-only; every other
 /// tool can be undone (`destructiveHint: false`) except `write_script`,
-/// which may replace a file.
+/// which may replace a file. `open_app` changes nothing but reaches outside
+/// (the writer's browser): `openWorldHint`.
 pub fn annotations(name: &str) -> Option<Value> {
-    if read_only(name) {
+    if name == OPEN_APP {
+        Some(json!({ "readOnlyHint": true, "openWorldHint": true }))
+    } else if read_only(name) {
         Some(json!({ "readOnlyHint": true }))
     } else if name == "write_script" {
         Some(json!({ "readOnlyHint": false, "destructiveHint": true }))
@@ -99,7 +134,50 @@ pub(crate) fn offer(base: Vec<ToolSpec>) -> Vec<ToolSpec> {
     specs.extend(agent_only());
     specs.push(crate::guidance::guide_spec());
     specs.push(crate::context::where_spec());
+    specs.extend(app_tools());
     specs
+}
+
+/// The agents' catalogue `agent` cut to [`APP_TOOLS`] (in its order), with
+/// `script` taken out: an app only ever works on the open script.
+pub(crate) fn app_offer(agent: Vec<ToolSpec>) -> Vec<ToolSpec> {
+    let mut specs: Vec<ToolSpec> = agent.into_iter().filter(|s| APP_TOOLS.contains(&s.name.as_str())).collect();
+    for spec in &mut specs {
+        if let Some(props) = spec.schema["properties"].as_object_mut() {
+            props.remove("script");
+        }
+        if let Some(required) = spec.schema["required"].as_array_mut() {
+            required.retain(|r| r != "script");
+        }
+    }
+    specs
+}
+
+/// `list_apps` and `open_app`, for agents.
+fn app_tools() -> Vec<ToolSpec> {
+    let script = json!({ "type": "string", "description": SCRIPT });
+    vec![
+        spec(
+            LIST_APPS,
+            "The apps in the script's folder (apps/<name>/, small web pages on the script that the writer opens \
+             from Scriptorium's Apps menu): each one's name, title, folder and any problems with it, and, when \
+             Scriptorium is open, whether its page loaded and the last error it showed. To build or fix an app, \
+             call guide('app') first.",
+            json!({ "script": script }),
+            &[],
+        ),
+        spec(
+            OPEN_APP,
+            "Open an app (apps/<name>/ in the script's folder) in the writer's own browser, on the script open in \
+             Scriptorium. Needs Scriptorium running with the script open. Call it after building or changing an \
+             app, when the writer wants to see it; check it with list_apps first. How to build one: guide('app').",
+            json!({
+                "script": script,
+                "name": { "type": "string", "description": "The app's folder name under apps/, e.g. \"scene-list\"." },
+            }),
+            &["name"],
+        ),
+    ]
 }
 
 fn agent_only() -> Vec<ToolSpec> {

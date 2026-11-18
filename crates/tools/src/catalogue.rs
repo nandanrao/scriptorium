@@ -34,8 +34,14 @@ pub enum Offer {
     /// Outside agents (MCP, the CLI `tool`): the chat's tools with `script`
     /// on each, `review_file` on the suggesting tools and `before` on
     /// `suggest_change`, then the agent-only tools
-    /// ([`AGENT_ONLY`](crate::agent::AGENT_ONLY)).
+    /// ([`AGENT_ONLY`](crate::agent::AGENT_ONLY)), `guide`,
+    /// `where_is_writer`, `list_apps` and `open_app`.
     Agent,
+    /// An app (a page in the writer's browser, served by the running app):
+    /// the agents' tools in [`APP_TOOLS`](crate::agent::APP_TOOLS), as
+    /// agents get them but without `script` (an app only works on the open
+    /// script).
+    App,
 }
 
 /// The tools `offer` gives a model, in the order they are listed.
@@ -43,6 +49,7 @@ pub fn catalogue(offer: Offer) -> Vec<ToolSpec> {
     match offer {
         Offer::Chat => chat(),
         Offer::Agent => crate::agent::offer(chat()),
+        Offer::App => crate::agent::app_offer(crate::agent::offer(chat())),
     }
 }
 

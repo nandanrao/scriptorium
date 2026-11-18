@@ -31,7 +31,7 @@ use scriptorium_core::{Document, ElementKind};
 use scriptorium_review::{Entry, Session};
 use serde_json::Value;
 
-pub use agent::{AGENT_ONLY, annotations, mcp_tool, read_only};
+pub use agent::{AGENT_ONLY, APP_TOOLS, LIST_APPS, OPEN_APP, OPEN_APP_ON_FILES, annotations, mcp_tool, read_only};
 pub use block::{MAX_LINES, Spot, block_entry};
 pub use catalogue::{
     HostField, KINDS, MAX_BATCH, MAX_OPTIONS, MAX_PAGE, Offer, PAGE, ToolSpec, add_before, add_host_fields, catalogue,
@@ -263,6 +263,8 @@ pub fn call(ctx: &Ctx, name: &str, args: &Value) -> Result<Outcome, ToolError> {
         // On the files there is no writer to place; the app answers it
         // itself from its open view (`context::text`).
         context::NAME => Ok(Outcome::Text(context::ON_FILES.to_string())),
+        // Only the running app opens an app.
+        agent::OPEN_APP => Ok(Outcome::Text(agent::OPEN_APP_ON_FILES.to_string())),
         _ => Err(ToolError::Unknown(name.to_string())),
     }
 }

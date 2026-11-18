@@ -40,7 +40,7 @@ const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "
 
 /// The tools the app answers whatever script is open: never run on the
 /// files while the link is up.
-const APP_ONLY: [&str; 2] = ["guide", "where_is_writer"];
+const APP_ONLY: [&str; 3] = ["guide", "where_is_writer", scriptorium_tools::OPEN_APP];
 
 /// A call that needs a script, with none given and no app to use its open one.
 pub const NO_APP: &str = "Scriptorium isn't open, so there's no open script to use. Ask the writer to open the script in Scriptorium, \
@@ -340,7 +340,8 @@ impl Connector {
                 NoApp::Absent | NoApp::Routed => context::ON_FILES,
             });
         }
-        if name == "guide" {
+        if name == "guide" || name == scriptorium_tools::OPEN_APP {
+            // Need no script (`open_app` on the files says Scriptorium isn't running).
             let done = run_call(&mut NoScript, Caller::Agent, &call);
             return Ended { text: done.result.content, is_error: done.result.is_error };
         }

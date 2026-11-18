@@ -5,7 +5,8 @@ use std::collections::HashSet;
 
 use scriptorium_agent::file::tools_hash;
 use scriptorium_tools::{
-    AGENT_ONLY, Offer, ToolError, annotations, catalogue, check_args, mcp_tool, offered, read_only, writes,
+    AGENT_ONLY, APP_TOOLS, OPEN_APP_ON_FILES, Offer, ToolError, annotations, catalogue, check_args, mcp_tool, offered,
+    read_only, writes,
 };
 use serde_json::json;
 
@@ -32,7 +33,7 @@ fn the_chat_catalogue_has_no_agent_only_tool_or_host_field() {
 
 #[test]
 fn names_are_unique_in_each_offer() {
-    for offer in [Offer::Chat, Offer::Agent] {
+    for offer in [Offer::Chat, Offer::Agent, Offer::App] {
         let specs = catalogue(offer);
         let names: HashSet<_> = specs.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names.len(), specs.len(), "{offer:?}");
@@ -47,6 +48,8 @@ fn the_agent_offer_is_the_chat_offer_then_the_agent_only_tools() {
     expected.extend(AGENT_ONLY.iter().map(|s| s.to_string()));
     expected.push("guide".into());
     expected.push("where_is_writer".into());
+    expected.push("list_apps".into());
+    expected.push("open_app".into());
     assert_eq!(agent, expected);
 }
 
@@ -99,6 +102,8 @@ fn every_agent_tool_has_annotations_and_read_only_is_right() {
         "read_rows",
         "guide",
         "where_is_writer",
+        "list_apps",
+        "open_app",
     ];
     for spec in catalogue(Offer::Agent) {
         let name = spec.name.as_str();
@@ -110,6 +115,7 @@ fn every_agent_tool_has_annotations_and_read_only_is_right() {
         if !ro {
             assert_eq!(a["destructiveHint"], json!(name == "write_script"), "{name}");
         }
+        assert_eq!(a.get("openWorldHint").is_some(), name == "open_app", "{name}");
         let tool = mcp_tool(&spec);
         assert_eq!(tool["annotations"], a, "{name}");
         assert_eq!(tool["inputSchema"], spec.schema, "{name}");
@@ -165,4 +171,79 @@ fn where_is_writer_is_offered_to_agents_read_only_without_arguments() {
     assert_eq!(mcp_tool(&spec)["annotations"], json!({ "readOnlyHint": true }));
     assert!(check_args(&spec, &json!({})).is_ok());
     assert!(check_args(&spec, &json!({ "script": "/a.fdx" })).is_err());
+}
+
+#[test]
+fn the_app_offer_is_the_agent_offer_cut_to_the_app_tools_without_script() {
+    let agent = catalogue(Offer::Agent);
+    let app = catalogue(Offer::App);
+    let names: Vec<&str> = app.iter().map(|s| s.name.as_str()).collect();
+    // In the agents' order, every app tool and nothing else.
+    let expected: Vec<&str> = agent.iter().map(|s| s.name.as_str()).filter(|n| APP_TOOLS.contains(n)).collect();
+    assert_eq!(names, expected);
+    assert_eq!(names.len(), APP_TOOLS.len());
+    for spec in &app {
+        let theirs = agent.iter().find(|s| s.name == spec.name).unwrap();
+        assert_eq!(spec.description, theirs.description, "{}", spec.name);
+        assert!(spec.schema["properties"].get("script").is_none(), "{}", spec.name);
+        assert!(!spec.schema["required"].as_array().unwrap().iter().any(|r| r == "script"), "{}", spec.name);
+        // Otherwise the agents' schema: `review_file` and `before` stay.
+        let mut theirs = theirs.schema.clone();
+        theirs["properties"].as_object_mut().unwrap().remove("script");
+        theirs["required"].as_array_mut().unwrap().retain(|r| r != "script");
+        assert_eq!(spec.schema, theirs, "{}", spec.name);
+    }
+    assert!(offered(Offer::App, "suggest_changes").unwrap().schema["properties"]["review_file"].is_object());
+}
+
+#[test]
+fn an_app_is_offered_no_host_operation_guide_new_version_or_open_app() {
+    for name in AGENT_ONLY.iter().copied().chain(["guide", "new_version", "open_app"]) {
+        assert_eq!(offered(Offer::App, name).err(), Some(ToolError::Unknown(name.to_string())), "{name}");
+    }
+    for name in APP_TOOLS {
+        assert!(offered(Offer::App, name).is_ok(), "{name}");
+        assert!(offered(Offer::Agent, name).is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn check_args_refuses_script_for_an_app() {
+    for spec in catalogue(Offer::App) {
+        let err = check_args(&spec, &json!({ "script": "/s/film.fdx" })).unwrap_err();
+        assert!(err.to_string().contains("`script`"), "{}: {err}", spec.name);
+    }
+    let suggest = offered(Offer::App, "suggest_change").unwrap();
+    let ok = json!({ "paragraph_id": 41, "options": ["new text"], "review_file": "x.review.txt" });
+    assert_eq!(check_args(&suggest, &ok), Ok(()));
+    let batch = offered(Offer::App, "suggest_changes").unwrap();
+    let item_script = json!({ "suggestions": [{ "paragraph_id": 41, "options": ["x"], "script": "/a.fdx" }] });
+    assert!(check_args(&batch, &item_script).is_err());
+}
+
+#[test]
+fn list_apps_and_open_app_are_offered_to_agents() {
+    let list = offered(Offer::Agent, "list_apps").unwrap();
+    assert!(list.schema["properties"]["script"].is_object());
+    assert_eq!(list.schema["required"], json!([]));
+    assert!(list.description.contains("guide('app')"), "{}", list.description);
+    assert!(read_only("list_apps") && !writes("list_apps"));
+    assert_eq!(mcp_tool(&list)["annotations"], json!({ "readOnlyHint": true }));
+    assert!(check_args(&list, &json!({ "script": "/s/film.fdx" })).is_ok());
+    assert!(check_args(&list, &json!({ "name": "x" })).is_err());
+
+    let open = offered(Offer::Agent, "open_app").unwrap();
+    assert!(open.schema["properties"]["script"].is_object());
+    assert_eq!(open.schema["required"], json!(["name"]));
+    assert!(open.description.contains("guide('app')"), "{}", open.description);
+    assert!(read_only("open_app") && !writes("open_app"));
+    assert_eq!(mcp_tool(&open)["annotations"], json!({ "readOnlyHint": true, "openWorldHint": true }));
+    assert!(check_args(&open, &json!({ "name": "scene-list", "script": "/s/film.fdx" })).is_ok());
+    assert!(check_args(&open, &json!({ "name": "scene-list", "path": "x" })).is_err());
+
+    // Neither is the chat's.
+    for name in ["list_apps", "open_app"] {
+        assert!(offered(Offer::Chat, name).is_err(), "{name}");
+    }
+    assert!(OPEN_APP_ON_FILES.contains("open_app again"));
 }

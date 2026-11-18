@@ -368,6 +368,9 @@ pub fn new_review_text(script_name: &str, thread_id: &str) -> String {
     insert_id(&format!("{FORMAT_HEADER}\nScript: {script_name}\n\n"), &naming::review_id(thread_id))
 }
 
+/// `list_apps` until the apps' folder is read (plan "apps", A4 replaces it).
+pub const LIST_APPS_STUB: &str = "Apps arrive in a later step: there are none to list yet.";
+
 /// How many names [`apply_append`] tries for a new review before giving up.
 const NAME_TRIES: usize = 100;
 
@@ -827,6 +830,11 @@ pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) ->
         // to place, and no script is needed.
         return CallDone::new(call, scriptorium_tools::context::ON_FILES, false);
     }
+    if call.name == scriptorium_tools::OPEN_APP {
+        // Only the running app opens an app (it answers this itself); here
+        // Scriptorium isn't running.
+        return CallDone::new(call, scriptorium_tools::OPEN_APP_ON_FILES, true);
+    }
     if call.name == "guide" {
         // Needs no script.
         return match scriptorium_tools::guidance::guide(&input) {
@@ -840,6 +848,10 @@ pub fn run_call(script: &mut dyn Script, caller: Caller<'_>, call: &ToolCall) ->
         Ok(s) => s,
         Err(e) => return CallDone::failed(call, &e),
     };
+    if call.name == scriptorium_tools::LIST_APPS {
+        // A stub until the apps' folder is read here (plan "apps", A4).
+        return CallDone::new(call, LIST_APPS_STUB, false);
+    }
     if let Some(f) = &named {
         input["review_file"] = Value::String(stored_path(store.dir(), &review_location(store.dir(), f)));
     }

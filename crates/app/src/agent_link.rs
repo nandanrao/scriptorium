@@ -58,7 +58,10 @@ use scriptorium_review::Session;
 
 /// Tools the app answers whatever script is open (or none): they never go
 /// to the files while the link is up.
-const APP_ONLY: [&str; 2] = ["guide", context::NAME];
+const APP_ONLY: [&str; 3] = ["guide", context::NAME, scriptorium_tools::OPEN_APP];
+
+/// `open_app` until apps are hosted (plan "apps"; a later step replaces it).
+pub(crate) const OPEN_APP_STUB: &str = "Apps arrive in a later step: Scriptorium can't open one yet.";
 
 /// The script open in the app, for the hello (informational only).
 #[derive(Clone, Default)]
@@ -277,7 +280,10 @@ fn run_without_script(job: &Job) -> Answer {
     }
     let call = tool_call(&job.request);
     if call.name == context::NAME {
-        return Answer::Ran { done: where_is_writer(&call, || NOTHING_OPEN.to_string()), busy: false };
+        return Answer::Ran { done: answer_here(&call, || NOTHING_OPEN.to_string()), busy: false };
+    }
+    if call.name == scriptorium_tools::OPEN_APP {
+        return Answer::Ran { done: answer_here(&call, || OPEN_APP_STUB.to_string()), busy: false };
     }
     let ran = exec::run_call(&mut NoScript, Caller::Agent, &call);
     Answer::Ran { done: done(&ran), busy: false }
@@ -287,10 +293,11 @@ fn run_without_script(job: &Job) -> Answer {
 pub(crate) const NOTHING_OPEN: &str = "Scriptorium is open with no script in it; nothing is selected. Ask the writer to open the script, or for its \
      path.";
 
-/// Answer `where_is_writer` (checked against the offer as any call is):
-/// `place` says where the writer is. The app answers it itself: on the
-/// files there is no writer to place.
-fn where_is_writer(call: &ToolCall, place: impl FnOnce() -> String) -> Done {
+/// Answer a tool the app answers itself (`where_is_writer`, `open_app`),
+/// checked against the offer as any call is: `place` gives the answer (for
+/// `where_is_writer`, where the writer is; on the files there is no writer
+/// to place).
+fn answer_here(call: &ToolCall, place: impl FnOnce() -> String) -> Done {
     let checked = scriptorium_tools::offered(scriptorium_tools::Offer::Agent, &call.name)
         .and_then(|spec| scriptorium_tools::check_args(&spec, &call.input));
     match checked {
@@ -371,7 +378,13 @@ fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answe
             if !taken(job, Some(&open)) {
                 return Answer::Files;
             }
-            return Answer::Ran { done: where_is_writer(&call, || context::text(&v.where_is_writer(cx))), busy: false };
+            return Answer::Ran { done: answer_here(&call, || context::text(&v.where_is_writer(cx))), busy: false };
+        }
+        if call.name == scriptorium_tools::OPEN_APP {
+            if !taken(job, Some(&open)) {
+                return Answer::Files;
+            }
+            return Answer::Ran { done: answer_here(&call, || OPEN_APP_STUB.to_string()), busy: false };
         }
         let writes = opens_for_writing(&call.name);
         // While the writer rewrites a line nothing can be saved, so a call
@@ -1083,6 +1096,35 @@ mod tests {
             Some("array") => json!([value_for(&schema["items"])]),
             Some("object") => args_for(schema),
             _ => json!("x"),
+        }
+    }
+
+    #[gpui::test]
+    fn open_app_is_answered_here_by_its_stub(cx: &mut TestAppContext) {
+        let f = Folder::new("openapp");
+        let mut served = app(cx, &f, Some(f.script()));
+        // Routed here whatever `script` names, as the other app-only tools.
+        let other = json!({ "name": "scene-list", "script": "/no/such/film.fdx" });
+        for args in [json!({ "name": "scene-list" }), other] {
+            match served.one(cx, call("open_app", args)) {
+                Ok(Got::Done { done, .. }) => assert_eq!((done.text.as_str(), done.is_error), (OPEN_APP_STUB, false)),
+                got => panic!("{got:?}"),
+            }
+        }
+        // Checked against the offer.
+        match served.one(cx, call("open_app", json!({ "name": "x", "path": "y" }))) {
+            Ok(Got::Done { done, .. }) => assert!(done.is_error, "{}", done.text),
+            got => panic!("{got:?}"),
+        }
+        // `list_apps` runs on the open script like any read (a stub for now).
+        assert_eq!(ran(served.one(cx, call("list_apps", json!({}))), &f), exec::LIST_APPS_STUB);
+        drop(served);
+
+        let g = Folder::new("openapp-empty");
+        let mut served = app(cx, &g, None);
+        match served.one(cx, call("open_app", json!({ "name": "scene-list" }))) {
+            Ok(Got::Done { done, script: None }) => assert_eq!(done.text, OPEN_APP_STUB),
+            got => panic!("{got:?}"),
         }
     }
 
