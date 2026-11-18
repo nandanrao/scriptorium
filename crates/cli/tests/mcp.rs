@@ -770,7 +770,9 @@ fn calls_go_to_the_app_when_it_answers() {
     assert_eq!(s.ok("guide", json!({ "topic": "review" })), "c");
     let got = app.join().unwrap();
     assert_eq!(got[0], ("read_scene".to_string(), json!({ "scene": 1 })));
-    assert_eq!(got[1].1["script"], json!(s.script_path()));
+    // Compared resolved: macOS's temp folder is behind a link (/var -> /private/var).
+    let sent = std::fs::canonicalize(got[1].1["script"].as_str().unwrap()).unwrap();
+    assert_eq!(sent, std::fs::canonicalize(s.script_path()).unwrap());
     assert_eq!(got[2].0, "guide");
     // The app is gone: where_is_writer answers plainly, and a call with no
     // script says how to go on.
