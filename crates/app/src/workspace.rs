@@ -14,9 +14,12 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::agent_link::{self, Link, OpenScript};
+use futures::channel::mpsc::UnboundedSender;
+
+use crate::agent_link::{self, Job, Link, OpenScript};
 use crate::agent_panel::accounts::{AccountsSheet, Dismissed};
 use crate::agent_panel::{OpenAccounts, ToggleAgentPanel};
+use crate::apps_host::{self, Apps};
 use crate::connect::{self, ConnectAgent, ConnectSheet, InstallCli};
 use crate::menus::{self, Item};
 use crate::new_version::{MarkInSync, MarkNotInSync, NewVersion, NewVersionSheet, SheetEvent, Swap};
@@ -60,6 +63,16 @@ pub struct Workspace {
     /// Serving outside agents (`agent_link`): the script open, for the
     /// link's hello, and the task running their calls.
     link: Option<(OpenScript, Task<()>)>,
+    /// The script open, for the apps server (read from its threads).
+    open: OpenScript,
+    /// The queue outside agents' and apps' calls run through, one at a
+    /// time ([`agent_link::pump`]): the link's, or (with no link) one of
+    /// the apps' own, with its task.
+    queue: Option<UnboundedSender<Job>>,
+    _own_pump: Option<Task<()>>,
+    /// Serving apps (plan "apps"), and the events tick while serving.
+    apps: Apps,
+    _apps_tick: Option<Task<()>>,
 }
 
 impl Workspace {
@@ -78,6 +91,11 @@ impl Workspace {
             _observe: None,
             _reopen: None,
             link: None,
+            open: OpenScript::default(),
+            queue: None,
+            _own_pump: None,
+            apps: Apps::Off,
+            _apps_tick: None,
         };
         // Closing the window saves, like Quit.
         let ws = cx.entity().downgrade();
@@ -101,9 +119,10 @@ impl Workspace {
     /// Run outside agents' calls (from `link`) on the script open here, as
     /// it is at each call.
     pub fn serve_agents(&mut self, link: Link, cx: &mut Context<Self>) {
-        let Link { jobs, open, .. } = link;
-        open.set(self.view.as_ref().map(|v| v.read(cx).script_path()));
+        let Link { jobs, queue, open, .. } = link;
         self.link = Some((open, agent_link::spawn_pump(jobs, cx)));
+        self.queue = Some(queue);
+        self.note_open(cx);
     }
 
     /// [`Self::serve_agents`] with no task: the test runs the calls
@@ -115,17 +134,87 @@ impl Workspace {
         link: Link,
         cx: &mut Context<Self>,
     ) -> futures::channel::mpsc::UnboundedReceiver<agent_link::Job> {
-        let Link { jobs, open, .. } = link;
-        open.set(self.view.as_ref().map(|v| v.read(cx).script_path()));
+        let Link { jobs, queue, open, .. } = link;
         self.link = Some((open, Task::ready(())));
+        self.queue = Some(queue);
+        self.note_open(cx);
         jobs
     }
 
-    /// Tell the link which script is open (for its hello).
+    /// Tell the link (for its hello) and the apps server which script is
+    /// open.
     fn note_open(&self, cx: &App) {
+        let view = self.view.as_ref().map(|v| v.read(cx));
+        let now = view.map(|v| (v.script_path(), v.script_dir()));
+        self.open.set(now);
         if let Some((open, _)) = &self.link {
-            open.set(self.view.as_ref().map(|v| v.read(cx).script_path()));
+            open.set(now);
         }
+    }
+
+    /// The script open, as the apps server reads it.
+    #[cfg(test)]
+    pub(crate) fn shared_open(&self) -> OpenScript {
+        self.open.clone()
+    }
+
+    /// The calls' queue, if one runs.
+    #[cfg(test)]
+    pub(crate) fn queue(&self) -> Option<UnboundedSender<Job>> {
+        self.queue.clone()
+    }
+
+    /// Serve apps from this window ([`apps_host::start`]): calls through
+    /// the agents' queue (one of their own when the link isn't served),
+    /// events from a tick while a page listens. Can't: said once, and kept
+    /// for the Apps menu and `open_app`.
+    pub fn serve_apps(&mut self, cx: &mut Context<Self>) {
+        let queue = match &self.queue {
+            Some(q) => q.clone(),
+            None => {
+                let (tx, jobs) = futures::channel::mpsc::unbounded();
+                self._own_pump = Some(agent_link::spawn_pump(jobs, cx));
+                self.queue = Some(tx.clone());
+                tx
+            }
+        };
+        self.apps = apps_host::start(self.open.clone(), queue);
+        match &self.apps {
+            Apps::Serving { running, .. } => self._apps_tick = Some(Self::apps_tick(running.clone(), cx)),
+            Apps::Unavailable(why) => self.set_notice(why.clone(), cx),
+            Apps::Off => {}
+        }
+    }
+
+    /// Apps as served this run.
+    pub(crate) fn apps(&self) -> &Apps {
+        &self.apps
+    }
+
+    /// Every [`apps_host::TICK_EVERY`]: while a page listens, what changed
+    /// in the open view goes to the pages.
+    fn apps_tick(running: std::sync::Arc<scriptorium_apps::serve::Running>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |ws, cx| {
+            let start = std::time::Instant::now();
+            let mut ticker = apps_host::Ticker::default();
+            loop {
+                cx.background_executor().timer(apps_host::TICK_EVERY).await;
+                if running.listeners() == 0 {
+                    // No page: nothing looked at, and a fresh start when
+                    // one comes (its `hello` says where things stand).
+                    ticker = apps_host::Ticker::default();
+                    continue;
+                }
+                let now = start.elapsed().as_millis() as u64;
+                let Ok(events) = ws.update(cx, |w, cx| ticker.step(now, true, w.view.as_ref(), w.open.now(), cx))
+                else {
+                    break;
+                };
+                for event in &events {
+                    running.broadcast(event);
+                }
+            }
+        })
     }
 
     /// Write .fdx in place, as the view's [`Reopen`] has it (tests).

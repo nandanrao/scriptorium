@@ -364,6 +364,18 @@ impl ScriptView {
 }
 
 impl ScriptView {
+    /// The line the writer looks at, as [`Self::where_is_writer`] places
+    /// it (the card's while a review shows, else the cursor's), without
+    /// the rest of its work: apps' pages follow it several times a second.
+    pub(crate) fn writer_para(&self, cx: &App) -> ParaId {
+        let editor = self.editor.read(cx);
+        let doc = &editor.doc;
+        match self.current() {
+            Some((r, i)) => anchor_para(&self.session, doc, r, i),
+            None => doc.clamp_selection(editor.sel).head.para,
+        }
+    }
+
     /// Where the writer is, for an outside agent's `where_is_writer` (plan
     /// "agent connect", C3): the open script, its pair, what shows, the card,
     /// the selection (or the cursor's line), the scene, the lines on screen,

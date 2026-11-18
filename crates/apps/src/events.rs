@@ -29,12 +29,22 @@ pub struct Snapshot {
     pub writer: Option<Writer>,
 }
 
-/// One attached review: its file name and each suggestion's number and
-/// status (as words, e.g. `pending`, `accepted`).
+/// One attached review: its name and each suggestion's state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewState {
     pub name: String,
-    pub items: Vec<(usize, String)>,
+    pub items: Vec<ItemState>,
+}
+
+/// One suggestion: `index`, which stays the same while the review is open
+/// (its place in the review's list), is what [`diff`] matches by; `number`
+/// is the one tools show now (by script position: adding a suggestion
+/// above renumbers those below); `status` in words (`pending`, …).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemState {
+    pub index: usize,
+    pub number: usize,
+    pub status: String,
 }
 
 /// The writer's place: the scene heading and the paragraph id.
@@ -116,15 +126,15 @@ pub fn diff(prev: &Snapshot, now: &Snapshot) -> Vec<Event> {
             script = true;
             continue;
         };
-        let before: BTreeMap<usize, &str> = before.items.iter().map(|(n, s)| (*n, s.as_str())).collect();
+        let before: BTreeMap<usize, &str> = before.items.iter().map(|it| (it.index, it.status.as_str())).collect();
         if before.len() != review.items.len() {
             script = true;
         }
         let mut numbers = Vec::new();
-        for (n, status) in &review.items {
-            match before.get(n) {
+        for item in &review.items {
+            match before.get(&item.index) {
                 None => script = true,
-                Some(was) if *was != status => numbers.push(*n),
+                Some(was) if *was != item.status => numbers.push(item.number),
                 Some(_) => {}
             }
         }
@@ -282,9 +292,13 @@ mod tests {
             project: Some("00112233445566aa".into()),
             script: Some("PURPLE LIST.fdx".into()),
             log_len,
-            reviews: vec![ReviewState { name: "a.review.txt".into(), items: vec![(1, "pending".into())] }],
+            reviews: vec![ReviewState { name: "a.review.txt".into(), items: vec![item(0, 1, "pending")] }],
             writer: None,
         }
+    }
+
+    fn item(index: usize, number: usize, status: &str) -> ItemState {
+        ItemState { index, number, status: status.into() }
     }
 
     fn writer(p: u64) -> Writer {
@@ -304,7 +318,7 @@ mod tests {
     #[test]
     fn a_decision_is_decided_and_script() {
         let mut now = snap(3);
-        now.reviews[0].items[0].1 = "accepted".into();
+        now.reviews[0].items[0].status = "accepted".into();
         assert_eq!(
             diff(&snap(3), &now),
             vec![Event::Script, Event::Decided { review: "a.review.txt".into(), numbers: vec![1] }]
@@ -314,8 +328,19 @@ mod tests {
     #[test]
     fn new_suggestions_and_reviews_are_script() {
         let mut now = snap(3);
-        now.reviews[0].items.push((2, "pending".into()));
+        now.reviews[0].items.push(item(1, 2, "pending"));
         assert_eq!(diff(&snap(3), &now), vec![Event::Script]);
+        // Added above the first: it is renumbered, not decided.
+        let mut now = snap(3);
+        now.reviews[0].items = vec![item(0, 2, "pending"), item(1, 1, "pending")];
+        assert_eq!(diff(&snap(3), &now), vec![Event::Script]);
+        // Then decided: reported by its number now.
+        let mut later = now.clone();
+        later.reviews[0].items[0].status = "kept".into();
+        assert_eq!(
+            diff(&now, &later),
+            vec![Event::Script, Event::Decided { review: "a.review.txt".into(), numbers: vec![2] }]
+        );
         let mut now = snap(3);
         now.reviews.push(ReviewState { name: "b.review.txt".into(), items: vec![] });
         assert_eq!(diff(&snap(3), &now), vec![Event::Script]);

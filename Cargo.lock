@@ -5337,10 +5337,12 @@ name = "scriptorium-app"
 version = "0.6.0"
 dependencies = [
  "futures",
+ "getrandom 0.3.4",
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
  "scriptorium-agent",
+ "scriptorium-apps",
  "scriptorium-chat",
  "scriptorium-connect",
  "scriptorium-core",

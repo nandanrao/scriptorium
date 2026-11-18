@@ -4,6 +4,7 @@
 
 mod agent_link;
 mod agent_panel;
+mod apps_host;
 mod blocks;
 mod connect;
 mod disk;
@@ -186,7 +187,10 @@ fn main() {
             )
             .expect("open window");
         window.update(cx, |_, _, cx| cx.activate(true)).ok();
-        serve_agents(window, cx);
+        // Only the copy that owns the agent link serves apps.
+        if serve_agents(window, cx) {
+            serve_apps(window, cx);
+        }
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -199,8 +203,9 @@ fn main() {
 /// Serve outside agents (`scriptorium mcp`) from this app while it runs:
 /// the link's socket is removed on a clean quit (a crash leaves its lock
 /// free, and the next app replaces the socket). Another copy of the app
-/// serving already: said once, and this one doesn't serve.
-fn serve_agents(window: gpui::WindowHandle<Workspace>, cx: &mut App) {
+/// serving already: said once, and this one doesn't serve. False only then
+/// (any other error still leaves this copy the one to serve apps).
+fn serve_agents(window: gpui::WindowHandle<Workspace>, cx: &mut App) -> bool {
     match agent_link::start() {
         Ok(link) => {
             let close = link.closer();
@@ -210,13 +215,30 @@ fn serve_agents(window: gpui::WindowHandle<Workspace>, cx: &mut App) {
             })
             .detach();
             window.update(cx, |w, _, cx| w.serve_agents(link, cx)).ok();
+            true
         }
         Err(e) => {
             log::warn(&format!("not serving AI agents: {e}"));
-            if e == scriptorium_fsio::link::BindError::Owned {
+            let owned = e == scriptorium_fsio::link::BindError::Owned;
+            if owned {
                 window.update(cx, |w, _, cx| w.set_notice(e.to_string(), cx)).ok();
             }
+            !owned
         }
+    }
+}
+
+/// Serve apps in the writer's browser while the app runs (plan "apps"):
+/// the server stops on a clean quit, so the port is free for the next run.
+fn serve_apps(window: gpui::WindowHandle<Workspace>, cx: &mut App) {
+    window.update(cx, |w, _, cx| w.serve_apps(cx)).ok();
+    let running = window.read(cx).ok().and_then(|w| w.apps().running().cloned());
+    if let Some(running) = running {
+        cx.on_app_quit(move |_| {
+            running.stop();
+            async {}
+        })
+        .detach();
     }
 }
 

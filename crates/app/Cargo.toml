@@ -42,6 +42,11 @@ serde_json.workspace = true
 # Sheet); pins the same gpui-pre. Not gpui-component: we keep theme.rs's look.
 gpui-base = "=0.9.1"
 unicode-segmentation.workspace = true
+# Apps in the writer's browser (plan "apps"): the server on 127.0.0.1 the
+# app runs while it is open, and its change events.
+scriptorium-apps.workspace = true
+# The apps token: 32 random bytes from the OS (already in the tree).
+getrandom = "0.3"
 
 # Test tool: a virtual pointer for clicking in headless Sway (see the file).
 [[example]]

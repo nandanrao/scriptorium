@@ -28,6 +28,14 @@
 //!   so an agent is told about a change only once it is on disk; one that
 //!   changed nothing there saves nothing.
 //!
+//! Apps' calls (plan "apps", A7) come through the same queue from the apps
+//! server's threads ([`crate::apps_host`]): a [`Job`] whose [`Source`] is
+//! [`Source::App`], run with `Caller::App`. They differ from a link's:
+//! no `taken`; the project (the script's folder) is checked again here;
+//! busy is answered at once, never retried; and while the writer rewrites
+//! a line a suggestion goes ahead only if its target review (the app's own
+//! by default) is attached already.
+//!
 //! Routes ([`Route::Files`]: the connector runs the call on the files):
 //! a call naming a script other than the open one (canonical paths), or
 //! with nothing open. Every tool an outside agent has runs here, the host
@@ -45,7 +53,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{App, AsyncApp, Context, Entity, WeakEntity};
 use scriptorium_agent::ToolCall;
 use scriptorium_chat::exec::{self, Caller, ReviewError, ReviewStore, Script};
-use scriptorium_fsio::link::proto::{Done, Hello, Reply, Request, Route};
+use scriptorium_fsio::link::proto::{Call, Done, Hello, Reply, Request, Route};
 use scriptorium_fsio::link::{BindError, Replier, Server};
 use scriptorium_tools::context;
 
@@ -63,23 +71,54 @@ const APP_ONLY: [&str; 3] = ["guide", context::NAME, scriptorium_tools::OPEN_APP
 /// `open_app` until apps are hosted (plan "apps"; a later step replaces it).
 pub(crate) const OPEN_APP_STUB: &str = "Apps arrive in a later step: Scriptorium can't open one yet.";
 
-/// The script open in the app, for the hello (informational only).
+/// The script open in the app, kept up to date from the UI thread
+/// ([`Workspace`]'s `note_open`) and read from other threads: the link's
+/// hello (informational only) and the apps server, which asks on every
+/// request and so must never wait on the UI thread.
 #[derive(Clone, Default)]
-pub struct OpenScript(Arc<Mutex<Option<String>>>);
+pub struct OpenScript(Arc<Mutex<Option<OpenNow>>>);
+
+/// What [`OpenScript`] holds while a script is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenNow {
+    /// The script's path as opened.
+    pub path: PathBuf,
+    /// Its folder, canonical when it resolves.
+    pub dir: PathBuf,
+    /// The folder's project key (apps' URLs name it).
+    pub key: String,
+}
 
 impl OpenScript {
-    pub fn set(&self, script: Option<&Path>) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = script.map(|p| p.display().to_string());
+    /// The script open now (`path`, in folder `dir`), or none.
+    pub fn set(&self, script: Option<(&Path, &Path)>) {
+        let now = script.map(|(path, dir)| {
+            let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            OpenNow { path: path.to_path_buf(), key: scriptorium_apps::paths::project_key(&dir), dir }
+        });
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = now;
+    }
+
+    pub(crate) fn now(&self) -> Option<OpenNow> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn get(&self) -> Option<String> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.now().map(|o| o.path.display().to_string())
     }
+}
+
+/// The project key of script folder `dir` (canonical when it resolves), as
+/// [`OpenScript`] has it.
+pub(crate) fn project_key(dir: &Path) -> String {
+    scriptorium_apps::paths::project_key(&dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
 }
 
 /// The served link, handed to the workspace ([`Workspace::serve_agents`]).
 pub struct Link {
     pub(crate) jobs: UnboundedReceiver<Job>,
+    /// The same queue's sender: apps' calls join the agents' ([`crate::apps_host`]).
+    pub(crate) queue: UnboundedSender<Job>,
     pub(crate) open: OpenScript,
     server: Arc<Server>,
 }
@@ -109,13 +148,13 @@ fn serve(server: Server) -> Result<Link, BindError> {
     let server = Arc::new(server);
     let (tx, jobs) = unbounded();
     let open = OpenScript::default();
-    let (s, o) = (server.clone(), open.clone());
+    let (s, o, t) = (server.clone(), open.clone(), tx.clone());
     std::thread::Builder::new()
         .name("agent-link".into())
-        .spawn(move || accept_loop(&s, &tx, &o))
+        .spawn(move || accept_loop(&s, &t, &o))
         .map_err(|e| BindError::Io(format!("agent link thread: {e}")))?;
     crate::log::info(&format!("serving AI agents at {}", server.path().display()));
-    Ok(Link { jobs, open, server })
+    Ok(Link { jobs, queue: tx, open, server })
 }
 
 fn accept_loop(server: &Server, tx: &UnboundedSender<Job>, open: &OpenScript) {
@@ -145,8 +184,26 @@ fn accept_loop(server: &Server, tx: &UnboundedSender<Job>, open: &OpenScript) {
 /// One call for the UI task, and where its answer goes.
 pub(crate) struct Job {
     request: Request,
-    replier: Replier,
+    source: Source,
     answer: mpsc::Sender<Answer>,
+}
+
+/// Who sent a [`Job`].
+pub(crate) enum Source {
+    /// An outside agent, over the link: `taken` goes back through it.
+    Link(Replier),
+    /// App `name`'s page, for the script of folder `project` (its key).
+    App { name: String, project: String },
+}
+
+impl Job {
+    /// A call from app `name`'s page for the script of folder `project`,
+    /// and where its answer will come.
+    pub(crate) fn app(name: &str, project: &str, id: u64, call: Call) -> (Job, mpsc::Receiver<Answer>) {
+        let (answer, rx) = mpsc::channel();
+        let source = Source::App { name: name.into(), project: project.into() };
+        (Job { request: Request { id, call }, source, answer }, rx)
+    }
 }
 
 /// The UI task's answer to one [`Job`].
@@ -162,6 +219,9 @@ pub(crate) enum Answer {
     /// Taken and run. `busy`: it found the files busy after all (nothing
     /// ran); ask again.
     Ran { done: Done, busy: bool },
+    /// An app's call, not taken: no script is open, or one from another
+    /// folder than the app's page is for.
+    NotOpen,
 }
 
 /// One connector's connection: requests one at a time, each sent to the UI
@@ -202,13 +262,14 @@ fn run_request(request: &Request, replier: &Replier, tx: &UnboundedSender<Job>) 
     let mut busy_after_taken: Option<Done> = None;
     loop {
         let (answer, rx) = mpsc::channel();
-        let job = Job { request: request.clone(), replier: replier.clone(), answer };
+        let job = Job { request: request.clone(), source: Source::Link(replier.clone()), answer };
         let answer = match tx.unbounded_send(job).ok().and_then(|()| rx.recv().ok()) {
             Some(a) => a,
             None => return busy_after_taken.map(Reply::Done),
         };
         let busy_done = match answer {
-            Answer::Files => return Some(Reply::Route(Route::Files)),
+            // (Never for a link's job.)
+            Answer::Files | Answer::NotOpen => return Some(Reply::Route(Route::Files)),
             Answer::Ran { done, busy: false } => return Some(Reply::Done(done)),
             Answer::Ran { done, busy: true } => {
                 busy_after_taken = Some(done.clone());
@@ -237,7 +298,7 @@ pub(crate) async fn pump(mut jobs: UnboundedReceiver<Job>, workspace: WeakEntity
 /// False: the workspace is gone (the job goes to the files).
 pub(crate) fn handle(job: Job, workspace: &WeakEntity<Workspace>, cx: &mut AsyncApp) -> bool {
     let Ok(view) = workspace.read_with(cx, |w, _| w.script_view()) else {
-        let _ = job.answer.send(Answer::Files);
+        let _ = job.answer.send(gone(&job));
         return false;
     };
     let answer = match view {
@@ -248,9 +309,25 @@ pub(crate) fn handle(job: Job, workspace: &WeakEntity<Workspace>, cx: &mut Async
     true
 }
 
-fn tool_call(request: &Request) -> ToolCall {
+/// Not taken: a link's call goes to the files, an app's finds no script.
+fn gone(job: &Job) -> Answer {
+    match job.source {
+        Source::Link(_) => Answer::Files,
+        Source::App { .. } => Answer::NotOpen,
+    }
+}
+
+/// The app a job is from, if it is an app's.
+fn app_of(job: &Job) -> Option<&str> {
+    match &job.source {
+        Source::Link(_) => None,
+        Source::App { name, .. } => Some(name),
+    }
+}
+
+fn tool_call(request: &Request, app: Option<&str>) -> ToolCall {
     ToolCall {
-        id: format!("link-{}", request.id),
+        id: format!("{}-{}", if app.is_some() { "app" } else { "link" }, request.id),
         name: request.call.name.clone(),
         input: request.call.arguments.clone(),
         input_error: None,
@@ -263,27 +340,38 @@ fn done(d: &exec::CallDone) -> Done {
     Done { text: d.result.content.clone(), is_error: d.result.is_error }
 }
 
-/// Write `taken` for the job, naming `script`. False: the connector hung up
-/// (don't run the call).
+/// Write `taken` for a link's job, naming `script`. False: the connector
+/// hung up (don't run the call). An app's job has no `taken`: its page
+/// waits for the answer alone.
 fn taken(job: &Job, script: Option<&Path>) -> bool {
-    let script = script.map(|p| p.display().to_string());
-    job.replier.reply(job.request.id, &Reply::Taken { script }).is_ok()
+    match &job.source {
+        Source::Link(replier) => {
+            let script = script.map(|p| p.display().to_string());
+            replier.reply(job.request.id, &Reply::Taken { script }).is_ok()
+        }
+        Source::App { .. } => true,
+    }
 }
 
-/// Nothing open: only the tools that need no script run here.
+/// Nothing open: only the tools that need no script run here (never an
+/// app's: an app works only on its folder's open script).
 fn run_without_script(job: &Job) -> Answer {
+    if app_of(job).is_some() {
+        return Answer::NotOpen;
+    }
     if !APP_ONLY.contains(&job.request.call.name.as_str()) {
         return Answer::Files;
     }
     if !taken(job, None) {
         return Answer::Files;
     }
-    let call = tool_call(&job.request);
+    let call = tool_call(&job.request, None);
+    let agent = scriptorium_tools::Offer::Agent;
     if call.name == context::NAME {
-        return Answer::Ran { done: answer_here(&call, || NOTHING_OPEN.to_string()), busy: false };
+        return Answer::Ran { done: answer_here(agent, &call, || NOTHING_OPEN.to_string()), busy: false };
     }
     if call.name == scriptorium_tools::OPEN_APP {
-        return Answer::Ran { done: answer_here(&call, || OPEN_APP_STUB.to_string()), busy: false };
+        return Answer::Ran { done: answer_here(agent, &call, || OPEN_APP_STUB.to_string()), busy: false };
     }
     let ran = exec::run_call(&mut NoScript, Caller::Agent, &call);
     Answer::Ran { done: done(&ran), busy: false }
@@ -294,11 +382,11 @@ pub(crate) const NOTHING_OPEN: &str = "Scriptorium is open with no script in it;
      path.";
 
 /// Answer a tool the app answers itself (`where_is_writer`, `open_app`),
-/// checked against the offer as any call is: `place` gives the answer (for
+/// checked against `offer` as any call is: `place` gives the answer (for
 /// `where_is_writer`, where the writer is; on the files there is no writer
 /// to place).
-fn answer_here(call: &ToolCall, place: impl FnOnce() -> String) -> Done {
-    let checked = scriptorium_tools::offered(scriptorium_tools::Offer::Agent, &call.name)
+fn answer_here(offer: scriptorium_tools::Offer, call: &ToolCall, place: impl FnOnce() -> String) -> Done {
+    let checked = scriptorium_tools::offered(offer, &call.name)
         .and_then(|spec| scriptorium_tools::check_args(&spec, &call.input));
     match checked {
         Ok(()) => Done { text: place(), is_error: false },
@@ -366,25 +454,32 @@ fn routed_here(job: &Job, open: &Path) -> bool {
 fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answer {
     view.update(cx, |v, cx| {
         let open = v.script_path().to_path_buf();
-        if !routed_here(job, &open) {
-            return Answer::Files;
+        let app = app_of(job);
+        match &job.source {
+            Source::Link(_) if !routed_here(job, &open) => return Answer::Files,
+            // Checked again here: another script may have opened since the
+            // request came in.
+            Source::App { project, .. } if project_key(v.script_dir()) != *project => return Answer::NotOpen,
+            _ => {}
         }
         if v.is_retired() {
             return Answer::Busy(exec::BUSY);
         }
-        let call = tool_call(&job.request);
+        let call = tool_call(&job.request, app);
+        let offer = if app.is_some() { scriptorium_tools::Offer::App } else { scriptorium_tools::Offer::Agent };
         if call.name == context::NAME {
             // Read-only, and needs no lock: what the view shows now.
             if !taken(job, Some(&open)) {
                 return Answer::Files;
             }
-            return Answer::Ran { done: answer_here(&call, || context::text(&v.where_is_writer(cx))), busy: false };
+            let done = answer_here(offer, &call, || context::text(&v.where_is_writer(cx)));
+            return Answer::Ran { done, busy: false };
         }
-        if call.name == scriptorium_tools::OPEN_APP {
+        if call.name == scriptorium_tools::OPEN_APP && app.is_none() {
             if !taken(job, Some(&open)) {
                 return Answer::Files;
             }
-            return Answer::Ran { done: answer_here(&call, || OPEN_APP_STUB.to_string()), busy: false };
+            return Answer::Ran { done: answer_here(offer, &call, || OPEN_APP_STUB.to_string()), busy: false };
         }
         let writes = opens_for_writing(&call.name);
         // While the writer rewrites a line nothing can be saved, so a call
@@ -392,7 +487,7 @@ fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answe
         // change that isn't on disk); suggestions into an attached review
         // change only its file, and go ahead.
         let rewriting = v.is_rewriting();
-        if writes && rewriting && !runs_while_rewriting(&call, v) {
+        if writes && rewriting && !runs_while_rewriting(&call, app, v) {
             return Answer::Busy(WRITER_REWRITING);
         }
         let busy = if rewriting { WRITER_REWRITING } else { exec::BUSY };
@@ -415,7 +510,11 @@ fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answe
             return Answer::Files;
         }
         let mut live = LiveScript::new(v, cx);
-        let ran = exec::run_call(&mut live, Caller::Agent, &call);
+        let caller = match app {
+            Some(name) => Caller::App { name },
+            None => Caller::Agent,
+        };
+        let ran = exec::run_call(&mut live, caller, &call);
         let notes = live.take_notes();
         let mut done = done(&ran);
         if ran.busy && v.is_rewriting() {
@@ -430,7 +529,8 @@ fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answe
                 crate::log::warn("agent link: the session wasn't saved before the reply; it is saved shortly");
             }
             let summary = disk::summarize(session, doc, v.session(), v.live_doc(cx));
-            let news = agent_news(&call.name, &summary, v.session()).into_iter().chain(notes);
+            let who = app.map_or_else(|| AN_AGENT.to_string(), app_subject);
+            let news = agent_news(&who, &call.name, &summary, v.session()).into_iter().chain(notes);
             let news: Vec<String> = news.collect();
             if !news.is_empty() {
                 v.say_agent_news(news.join("  "), cx);
@@ -443,15 +543,18 @@ fn run_on_view(job: &Job, view: &Entity<ScriptView>, cx: &mut AsyncApp) -> Answe
 
 /// While the writer rewrites a line, whether writing call `call` still runs:
 /// only suggestions into a review already attached, which write that
-/// review's file and leave the session as it is. With no `review_file` the
-/// only attached review is meant (or the tool refuses, changing nothing).
-fn runs_while_rewriting(call: &ToolCall, v: &ScriptView) -> bool {
+/// review's file and leave the session as it is. With no `review_file` an
+/// agent means the only attached review (or the tool refuses, changing
+/// nothing); an app means its own review, which must be attached already
+/// (one that would be created and attached is busy).
+fn runs_while_rewriting(call: &ToolCall, app: Option<&str>, v: &ScriptView) -> bool {
     if !scriptorium_tools::may_append(&call.name) {
         return false;
     }
+    let attached = |f: &str| exec::attached_review_file(v.script_dir(), v.session(), f).is_some();
     match call.input.get("review_file") {
-        None | Some(serde_json::Value::Null) => true,
-        Some(serde_json::Value::String(f)) => exec::attached_review_file(v.script_dir(), v.session(), f).is_some(),
+        None | Some(serde_json::Value::Null) => app.is_none_or(|name| attached(&exec::app_review_file(name))),
+        Some(serde_json::Value::String(f)) => attached(f),
         // Not a path: the tool refuses it.
         Some(_) => true,
     }
@@ -465,10 +568,24 @@ fn session_changed(session: &Session, doc: &Document, v: &ScriptView, cx: &App) 
     v.live_doc(cx).log().len() != doc.log().len() || attached(v.session()) != attached(session)
 }
 
-/// What an outside agent's call changed, for the status bar ("An AI agent
-/// added 6 suggestions to dialogue-pass."), from the same summary a reload
-/// makes. `None`: nothing to say.
-pub(crate) fn agent_news(tool: &str, s: &disk::Summary, now: &scriptorium_review::Session) -> Option<String> {
+/// Who [`agent_news`] names for an outside agent.
+pub(crate) const AN_AGENT: &str = "An AI agent";
+
+/// Who [`agent_news`] names for app `name`: "The scene-list app".
+pub(crate) fn app_subject(name: &str) -> String {
+    format!("The {name} app")
+}
+
+/// What an outside agent's (or an app's) call changed, for the status bar
+/// ("An AI agent added 6 suggestions to dialogue-pass.", "The scene-list
+/// app added 1 suggestion to scene-list (app)."): `who` and the same summary
+/// a reload makes. `None`: nothing to say.
+pub(crate) fn agent_news(
+    who: &str,
+    tool: &str,
+    s: &disk::Summary,
+    now: &scriptorium_review::Session,
+) -> Option<String> {
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     let numbers = |list: &[(String, usize)]| {
         let one = list.iter().all(|(n, _)| *n == list[0].0);
@@ -504,7 +621,7 @@ pub(crate) fn agent_news(tool: &str, s: &disk::Summary, now: &scriptorium_review
         parts.push(format!("removed {} line{}", s.removed, plural(s.removed)));
     }
     parts.extend(s.detached.iter().map(|n| format!("detached {n}")));
-    (!parts.is_empty()).then(|| format!("An AI agent {}.", parts.join(", ")))
+    (!parts.is_empty()).then(|| format!("{who} {}.", parts.join(", ")))
 }
 
 /// Start serving outside agents for `workspace`'s window: the pump task.
@@ -1205,14 +1322,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            agent_news("suggest_changes", &s, &now).as_deref(),
+            agent_news(AN_AGENT, "suggest_changes", &s, &now).as_deref(),
             Some("An AI agent added 6 suggestions to dialogue-pass, decided #2, #3 in dialogue-pass.")
         );
-        assert_eq!(agent_news("undo", &disk::Summary::default(), &now), None);
+        assert_eq!(agent_news(AN_AGENT, "undo", &disk::Summary::default(), &now), None);
         let s = disk::Summary { edited: 1, detached: vec!["notes".into()], ..Default::default() };
         assert_eq!(
-            agent_news("suggest_changes", &s, &now).as_deref(),
-            Some("An AI agent edited 1 line, detached notes.")
+            agent_news(&app_subject("scene-list"), "suggest_changes", &s, &now).as_deref(),
+            Some("The scene-list app edited 1 line, detached notes.")
         );
     }
 }
