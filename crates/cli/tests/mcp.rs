@@ -35,6 +35,8 @@ struct Server {
     stdout: BufReader<ChildStdout>,
     next_id: u64,
     dir: PathBuf,
+    /// Short runtime/home folders (under /tmp) holding the agent socket.
+    short: PathBuf,
 }
 
 impl Server {
@@ -66,14 +68,22 @@ impl Server {
         };
         // Its own runtime and home folders, so no real app is reached; and
         // as little environment as Claude Desktop passes.
-        std::fs::create_dir_all(dir.join("run")).unwrap();
-        std::fs::create_dir_all(dir.join("home")).unwrap();
+        // Short, under /tmp: macOS's TMPDIR is too long for a socket path.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let short = PathBuf::from(format!(
+            "/tmp/scm.{}.{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&short);
+        std::fs::create_dir_all(short.join("run")).unwrap();
+        std::fs::create_dir_all(short.join("home")).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_scriptorium"))
             .arg("mcp")
             .current_dir(cwd)
             .env_clear()
-            .env("HOME", dir.join("home"))
-            .env("XDG_RUNTIME_DIR", dir.join("run"))
+            .env("HOME", short.join("home"))
+            .env("XDG_RUNTIME_DIR", short.join("run"))
             .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -81,7 +91,7 @@ impl Server {
             .unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Self { child, stdin, stdout, next_id: 1, dir }
+        Self { child, stdin, stdout, next_id: 1, dir, short }
     }
 
     fn send(&mut self, msg: &Value) {
@@ -119,6 +129,7 @@ impl Drop for Server {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.short);
     }
 }
 
@@ -698,7 +709,7 @@ impl Server {
     /// with the acts in turn, then hangs up. After the last it closes the
     /// socket. The thread returns the calls it got (name and arguments).
     fn fake_app(&self, conns: Vec<(Hello, Vec<Act>)>) -> std::thread::JoinHandle<Vec<(String, Value)>> {
-        let socket = self.dir.join("run/scriptorium/agent.sock");
+        let socket = self.short.join("run/scriptorium/agent.sock");
         let server = scriptorium_fsio::link::Server::bind_at(&socket).unwrap();
         let script = self.script_path();
         std::thread::spawn(move || {

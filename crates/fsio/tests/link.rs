@@ -18,7 +18,7 @@ use serde_json::json;
 /// (under /tmp), so socket paths fit.
 fn scratch() -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
-    let d = std::env::temp_dir().join(format!("sclink-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let d = PathBuf::from("/tmp").join(format!("sclink-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d

@@ -77,4 +77,4 @@ jobs:
       - name: build (release)
         run: cargo build --release -p scriptorium-app -p scriptorium-cli
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
