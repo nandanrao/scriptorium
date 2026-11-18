@@ -14,9 +14,14 @@
 //!   checked again there). At most [`APP_JOBS_MAX`] app calls wait at once;
 //!   more are busy at once, and busy is never retried here (the page's
 //!   library retries), so a busy script never holds the server's threads.
-//! - **Events:** a workspace task every [`TICK_EVERY`], while a page
-//!   listens, takes a [`Snapshot`] of the open view ([`Ticker`]) and
-//!   broadcasts what [`events::diff`] finds, paced by [`events::Pacer`].
+//! - **Events:** a workspace task every [`TICK_EVERY`] takes a
+//!   [`Snapshot`] of the open view ([`Ticker`]) and broadcasts what
+//!   [`events::diff`] finds, paced by [`events::Pacer`]. With no page
+//!   listening it takes only the light part (log length, the reviews'
+//!   shape, the writer's place), so a page's first changes after its
+//!   `hello` are found against a look from before it came, never lost to
+//!   a first look that only takes a baseline (at most a change from just
+//!   before the page came is sent again, which pages take as a re-read).
 //!   The snapshot stays light on a long script: the reviews' statuses are
 //!   worked out again only once the text has been still for a tick, and the
 //!   writer's scene only when the line or the text changed.
@@ -43,7 +48,7 @@ use crate::script_view::{ScriptView, file_name};
 
 /// The most app calls waiting at once; one more is busy at once.
 pub(crate) const APP_JOBS_MAX: usize = 8;
-/// How often the events tick looks at the open view while a page listens.
+/// How often the events tick looks at the open view.
 pub(crate) const TICK_EVERY: Duration = Duration::from_millis(250);
 
 /// Whether apps are served this run.
@@ -99,7 +104,7 @@ pub(crate) fn start(open: OpenScript, queue: UnboundedSender<Job>) -> Apps {
 }
 
 /// [`start`] on `port` with `token`.
-fn start_on(port: u16, token: String, open: OpenScript, queue: UnboundedSender<Job>) -> Apps {
+pub(crate) fn start_on(port: u16, token: String, open: OpenScript, queue: UnboundedSender<Job>) -> Apps {
     match Server::start(port, token.clone(), Arc::new(AppHost::new(open, queue))) {
         Ok(running) => {
             crate::log::info(&format!("serving apps at http://127.0.0.1:{port}/"));
@@ -189,30 +194,41 @@ fn call_answer(answer: Answer) -> CallAnswer {
 
 /// The events tick's state: the last snapshot, the pacer, and what is kept
 /// between ticks so a long script isn't read through on each.
+///
+/// With no page listening it takes only the light part (the log length,
+/// the reviews' shape, the writer's place): enough for a page that comes
+/// to miss nothing. The tick a page comes on works out the reviews in
+/// full before anything is sent: their shape changed since the last look
+/// is `script`.
 #[derive(Default)]
 pub(crate) struct Ticker {
     prev: Option<Snapshot>,
+    /// The reviews' shape at `prev` ([`reviews_sig`]).
+    prev_sig: u64,
+    /// Whether a page listened at the last tick.
+    listened: bool,
     pacer: Pacer,
     /// The log length at the last tick: the text is still when it is the same.
     last_log: Option<usize>,
     /// The reviews' states, and what they were worked out for.
-    reviews: Option<(ReviewsKey, Vec<ReviewState>)>,
+    reviews: Option<(ReviewsKey, Arc<Vec<ReviewState>>)>,
     /// The writer's place, and the (log length, line) it was found for.
     writer: Option<((usize, ParaId), Writer)>,
     /// The script and view the caches above are for: another (or none)
     /// clears them, so a script just opened never shows the last one's.
     cached_for: Option<(PathBuf, EntityId)>,
+    /// No reviews (shared, made once).
+    none: Arc<Vec<ReviewState>>,
 }
 
 /// What the reviews' states depend on: the text (decisions are in its log)
-/// and each review with its number of suggestions.
-type ReviewsKey = (usize, Vec<(String, usize)>);
+/// and the reviews' shape ([`reviews_sig`]).
+type ReviewsKey = (usize, u64);
 
 impl Ticker {
     /// One tick at `now` (ms from any fixed start): the events to send.
-    /// `listening`: whether any page listens; with none it does nothing
-    /// and starts over when one comes back (its `hello` says where things
-    /// stand).
+    /// `listening`: whether any page listens (with none, only the light
+    /// part is looked at and nothing is sent). The first tick only looks.
     pub(crate) fn step(
         &mut self,
         now: u64,
@@ -221,23 +237,51 @@ impl Ticker {
         open: Option<OpenNow>,
         cx: &App,
     ) -> Vec<Event> {
-        if !listening {
-            *self = Ticker::default();
-            return vec![];
-        }
-        let snap = self.snapshot(view, open, cx);
+        let came = listening && !self.listened;
+        self.listened = listening;
+        let (snap, sig) = self.snapshot(view, open, listening, came, cx);
         let found = match &self.prev {
+            _ if !listening => vec![],
+            Some(prev) if came => {
+                // The reviews weren't worked out while no page listened:
+                // they are the baseline now, and a change in their shape
+                // since the last look (a new suggestion, a review) is
+                // `script`.
+                let base = Snapshot { reviews: snap.reviews.clone(), ..prev.clone() };
+                let mut found = events::diff(&base, &snap);
+                let open = matches!(found.first(), Some(Event::Open { .. }));
+                if self.prev_sig != sig && !open && !found.contains(&Event::Script) {
+                    found.insert(0, Event::Script);
+                }
+                found
+            }
             Some(prev) => events::diff(prev, &snap),
             None => vec![],
         };
         self.prev = Some(snap);
+        self.prev_sig = sig;
+        if !listening {
+            self.pacer = Pacer::new();
+            return vec![];
+        }
         self.pacer.step(now, found)
     }
 
-    fn snapshot(&mut self, view: Option<&Entity<ScriptView>>, open: Option<OpenNow>, cx: &App) -> Snapshot {
+    /// The snapshot, and the reviews' shape. `full`: the reviews' states
+    /// too (else the last ones stand); `now`: work them out whatever the
+    /// text is doing.
+    fn snapshot(
+        &mut self,
+        view: Option<&Entity<ScriptView>>,
+        open: Option<OpenNow>,
+        full: bool,
+        now: bool,
+        cx: &App,
+    ) -> (Snapshot, u64) {
         let (Some(entity), Some(open)) = (view, open) else {
             self.forget();
-            return Snapshot::default();
+            let none = Snapshot { project: None, script: None, log_len: 0, reviews: self.none.clone(), writer: None };
+            return (none, 0);
         };
         let now_for = (open.path.clone(), entity.entity_id());
         if self.cached_for.as_ref() != Some(&now_for) {
@@ -250,30 +294,32 @@ impl Ticker {
         let still = self.last_log == Some(log_len);
         self.last_log = Some(log_len);
         let session = v.session();
-        let key: ReviewsKey = (log_len, session.reviews.iter().map(|r| (r.id.clone(), r.items.len())).collect());
-        let stale = self.reviews.as_ref().is_none_or(|(k, _)| *k != key);
-        // While the text changes (typing), the last states stand: worked
-        // out again once it is still (decisions are in the log, so they
-        // show a tick later at most).
-        if stale && (still || self.reviews.is_none()) {
-            self.reviews = Some((key, review_states(session, doc)));
+        let sig = reviews_sig(session);
+        if full {
+            let key: ReviewsKey = (log_len, sig);
+            let stale = self.reviews.as_ref().is_none_or(|(k, _)| *k != key);
+            // While the text changes (typing), the last states stand:
+            // worked out again once it is still (decisions are in the log,
+            // so they show a tick later at most).
+            if stale && (still || now || self.reviews.is_none()) {
+                self.reviews = Some((key, Arc::new(review_states(session, doc))));
+            }
         }
         let at = v.writer_para(cx);
         if self.writer.as_ref().is_none_or(|(k, _)| *k != (log_len, at)) {
             let scene = scene_heading(doc, at);
             self.writer = Some(((log_len, at), Writer { scene, paragraph: at.0 }));
         }
-        Snapshot {
+        let snap = Snapshot {
             project: Some(open.key),
             script: Some(file_name(&open.path)),
             log_len,
-            reviews: self.reviews.as_ref().map(|(_, r)| r.clone()).unwrap_or_default(),
+            reviews: self.reviews.as_ref().map_or_else(|| self.none.clone(), |(_, r)| r.clone()),
             writer: self.writer.as_ref().map(|(_, w)| w.clone()),
-        }
+        };
+        (snap, sig)
     }
-}
 
-impl Ticker {
     /// Clear what was kept about the view.
     fn forget(&mut self) {
         self.last_log = None;
@@ -281,6 +327,25 @@ impl Ticker {
         self.writer = None;
         self.cached_for = None;
     }
+}
+
+/// The reviews' shape, without allocating: each one's id and number of
+/// suggestions (FNV-1a over them). Statuses aren't in it: decisions are in
+/// the text's log.
+fn reviews_sig(session: &Session) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    for r in &session.reviews {
+        eat(r.id.as_bytes());
+        eat(&[0xff]);
+        eat(&r.items.len().to_le_bytes());
+    }
+    h
 }
 
 /// Each attached review's suggestions: number (as the tools number them)
@@ -484,10 +549,14 @@ mod tests {
 
         /// One tick of the events, at `now` ms, with a page listening.
         fn tick(&self, cx: &mut TestAppContext, ticker: &mut Ticker, now: u64) -> Vec<Event> {
+            self.tick_as(cx, ticker, now, true)
+        }
+
+        fn tick_as(&self, cx: &mut TestAppContext, ticker: &mut Ticker, now: u64, listening: bool) -> Vec<Event> {
             self.window
                 .read_with(cx, |w, cx| {
                     let view = w.script_view();
-                    ticker.step(now, true, view.as_ref(), w.shared_open().now(), cx)
+                    ticker.step(now, listening, view.as_ref(), w.shared_open().now(), cx)
                 })
                 .unwrap()
         }
@@ -740,12 +809,6 @@ mod tests {
         s.window.update(cx, |w, window, cx| w.reopen_for_test(g.script(), window, cx)).unwrap();
         let got = tick(&s, cx, &mut t, 250);
         assert_eq!(got, vec![Event::Open { project: Some(g.key()), script: Some("film.fdx".into()) }]);
-
-        // No page listening: nothing, and it starts over.
-        let none =
-            s.window.read_with(cx, |w, cx| t.step(now.get() + 250, false, w.script_view().as_ref(), None, cx)).unwrap();
-        assert_eq!(none, vec![]);
-        assert_eq!(tick(&s, cx, &mut t, 500), vec![], "a fresh start only looks");
     }
 
     /// A script just opened never shows the last one's scene or reviews,
@@ -774,6 +837,85 @@ mod tests {
         assert_eq!(now.log_len, first.log_len);
         assert_eq!(now.writer.as_ref().map(|w| (w.scene.as_str(), w.paragraph)), Some(("EXT. BARN - DAY", 0)));
         assert!(now.reviews.is_empty(), "{:?}", now.reviews);
+    }
+
+    /// A page that just said hello gets the first change after it, even
+    /// one before the next tick (the tick looked before the page came):
+    /// the workspace's own tick, over a real event stream.
+    #[gpui::test]
+    fn a_change_right_after_hello_is_sent(cx: &mut TestAppContext) {
+        use std::io::{Read, Write};
+        let f = Folder::new("hello");
+        let s = served(cx, &f);
+        let v = s.view(cx);
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+        let token = "a".repeat(64);
+        s.window.update(cx, |w, _, cx| w.serve_apps_at(port, token.clone(), cx)).unwrap();
+        // The tick runs a while with no page.
+        for _ in 0..4 {
+            cx.executor().advance_clock(TICK_EVERY);
+            cx.run_until_parked();
+        }
+        let mut page = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        page.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        write!(page, "GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: scriptorium={token}\r\n\r\n")
+            .unwrap();
+        let mut seen = String::new();
+        let mut read_until = |page: &mut std::net::TcpStream, want: &str, cx: &mut TestAppContext| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !seen.contains(want) {
+                assert!(Instant::now() < until, "no {want:?} in {seen}");
+                let mut buf = [0u8; 4096];
+                if let Ok(n) = page.read(&mut buf) {
+                    seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+                cx.executor().advance_clock(TICK_EVERY);
+                cx.run_until_parked();
+            }
+        };
+        let until = Instant::now() + Duration::from_secs(5);
+        while s.window.read_with(cx, |w, _| w.apps().running().unwrap().listeners()).unwrap() == 0 {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The writer moves at once, before any tick since the hello.
+        v.update(cx, |v, cx| v.set_selection_for_test(Selection::cursor(Pos::new(ParaId(6), 0)), cx));
+        read_until(&mut page, "event: hello", cx);
+        read_until(&mut page, "\"paragraph\":6", cx);
+        s.window.read_with(cx, |w, _| w.apps().running().unwrap().stop()).unwrap();
+    }
+
+    /// With no page listening nothing is sent and the reviews aren't worked
+    /// out; the tick a page comes on works them out, and a suggestion added
+    /// meanwhile is `script`. Unchanged reviews are handed on, not copied.
+    #[gpui::test]
+    fn idle_ticks_stay_light_and_a_page_coming_misses_nothing(cx: &mut TestAppContext) {
+        let f = Folder::new("idle");
+        let mut s = served(cx, &f);
+        let mut t = Ticker::default();
+        assert_eq!(s.tick_as(cx, &mut t, 0, false), vec![]);
+        s.agent(
+            cx,
+            "suggest_change",
+            json!({"paragraph_id": 1, "options": ["Grins."], "review_file": "notes.review.txt"}),
+        );
+        assert_eq!(s.tick_as(cx, &mut t, 250, false), vec![], "nothing sent with no page");
+        assert!(t.reviews.is_none(), "no reviews worked out with no page");
+        s.agent(
+            cx,
+            "suggest_change",
+            json!({"paragraph_id": 2, "options": ["CESAR."], "review_file": "notes.review.txt"}),
+        );
+        // A page comes: the new suggestion is `script` (once still 300 ms).
+        let mut got = s.tick(cx, &mut t, 500);
+        assert_eq!(t.prev.as_ref().unwrap().reviews.len(), 1, "worked out in full");
+        for i in 1..4 {
+            got.extend(s.tick(cx, &mut t, 500 + i * 250));
+        }
+        assert_eq!(got, vec![Event::Script]);
+        let before = t.prev.as_ref().unwrap().reviews.clone();
+        assert_eq!(s.tick(cx, &mut t, 1750), vec![]);
+        assert!(Arc::ptr_eq(&before, &t.prev.as_ref().unwrap().reviews), "handed on, not worked out again");
     }
 
     #[test]

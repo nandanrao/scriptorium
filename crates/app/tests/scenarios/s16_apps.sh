@@ -166,9 +166,6 @@ S16() {
     curl -s -N --noproxy '*' --max-time 12 -b "$WORK/jar" "$BASE/api/events" > "$WORK/events.log" 2>&1 &
     local events=$!
     check "the event stream says hello" wait_for 5 grep -q '^event: hello' "$WORK/events.log"
-    # The events tick's first look (every 250 ms) is its baseline: a change
-    # before it would go unseen.
-    sleep 0.6
     check "…naming the project and script" grep -qF "\"project\":\"$key\"" "$WORK/events.log"
 
     # 8. A suggestion from the app: its default review, on the card.
@@ -211,7 +208,7 @@ S16() {
     if [ -n "${WDS:-}" ]; then
         # It may load twice (the first time before the script is open): what
         # counts is where it settles.
-        check "the browser page reloads by itself: the scenes back, no overlay" wait_for 20 page_back
+        check "the browser page reloads by itself: the scenes back, no overlay" wait_for 10 page_back
         browser_shot 05-reloaded
         browser_stop
     fi

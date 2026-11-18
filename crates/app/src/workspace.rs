@@ -198,9 +198,23 @@ impl Workspace {
 
     /// Serve apps from this window ([`apps_host::start`]): calls through
     /// the agents' queue (one of their own when the link isn't served),
-    /// events from a tick while a page listens. Can't: said once, and kept
-    /// for the Apps menu and `open_app`.
+    /// events from a tick. Can't: said once, and kept for the Apps menu
+    /// and `open_app`.
     pub fn serve_apps(&mut self, cx: &mut Context<Self>) {
+        self.serve_apps_with(apps_host::start, cx);
+    }
+
+    /// [`Self::serve_apps`] on `port` with `token` (tests).
+    #[cfg(test)]
+    pub(crate) fn serve_apps_at(&mut self, port: u16, token: String, cx: &mut Context<Self>) {
+        self.serve_apps_with(|open, queue| apps_host::start_on(port, token, open, queue), cx);
+    }
+
+    fn serve_apps_with(
+        &mut self,
+        start: impl FnOnce(OpenScript, UnboundedSender<Job>) -> Apps,
+        cx: &mut Context<Self>,
+    ) {
         let queue = match &self.queue {
             Some(q) => q.clone(),
             None => {
@@ -210,7 +224,7 @@ impl Workspace {
                 tx
             }
         };
-        self.apps = apps_host::start(self.open.clone(), queue);
+        self.apps = start(self.open.clone(), queue);
         match &self.apps {
             Apps::Serving { running, .. } => self._apps_tick = Some(Self::apps_tick(running.clone(), cx)),
             Apps::Unavailable(why) => self.set_notice(why.clone(), cx),
@@ -286,22 +300,20 @@ impl Workspace {
         self.apps = apps;
     }
 
-    /// Every [`apps_host::TICK_EVERY`]: while a page listens, what changed
-    /// in the open view goes to the pages.
+    /// Every [`apps_host::TICK_EVERY`]: what changed in the open view goes
+    /// to the pages. With no page listening it still takes the light part
+    /// ([`apps_host::Ticker`]), so a page that just said hello misses
+    /// nothing: its first changes are found against a look from before it
+    /// came.
     fn apps_tick(running: std::sync::Arc<scriptorium_apps::serve::Running>, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |ws, cx| {
             let start = std::time::Instant::now();
             let mut ticker = apps_host::Ticker::default();
             loop {
                 cx.background_executor().timer(apps_host::TICK_EVERY).await;
-                if running.listeners() == 0 {
-                    // No page: nothing looked at, and a fresh start when
-                    // one comes (its `hello` says where things stand).
-                    ticker = apps_host::Ticker::default();
-                    continue;
-                }
                 let now = start.elapsed().as_millis() as u64;
-                let Ok(events) = ws.update(cx, |w, cx| ticker.step(now, true, w.view.as_ref(), w.open.now(), cx))
+                let listening = running.listeners() > 0;
+                let Ok(events) = ws.update(cx, |w, cx| ticker.step(now, listening, w.view.as_ref(), w.open.now(), cx))
                 else {
                     break;
                 };

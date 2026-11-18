@@ -2,15 +2,18 @@
 //! disk watch does: no hooks inside the script view), paced, and written
 //! as Server-Sent Events.
 //!
-//! The host takes a [`Snapshot`] of the open view every 250 ms while a page
-//! listens; [`diff`] gives the events; a [`Pacer`] holds `script` and
-//! `writer` back so typing doesn't make every page re-read on each key.
+//! The host takes a [`Snapshot`] of the open view every 250 ms (its light
+//! part also with no page listening, so a page's first changes after
+//! `hello` are found); [`diff`] gives the events; a [`Pacer`] holds
+//! `script` and `writer` back so typing doesn't make every page re-read on
+//! each key.
 //! The server stamps each app's files every second; [`Quiet`] turns a
 //! change followed by a second of quiet into `reload`.
 //!
 //! Times are milliseconds from any fixed start, passed in by the caller.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::json;
 
@@ -23,8 +26,10 @@ pub struct Snapshot {
     pub script: Option<String>,
     /// The document's event-log length: it grows on every edit.
     pub log_len: usize,
-    /// Each attached review, in the session's order.
-    pub reviews: Vec<ReviewState>,
+    /// Each attached review, in the session's order. Shared: the host
+    /// hands on the same list while nothing in it changed, and [`diff`]
+    /// skips comparing it then.
+    pub reviews: Arc<Vec<ReviewState>>,
     /// Where the writer is.
     pub writer: Option<Writer>,
 }
@@ -117,11 +122,14 @@ pub fn diff(prev: &Snapshot, now: &Snapshot) -> Vec<Event> {
     let mut events = Vec::new();
     let mut script = prev.log_len != now.log_len;
     let mut decided = Vec::new();
-    let old: BTreeMap<&str, &ReviewState> = prev.reviews.iter().map(|r| (r.name.as_str(), r)).collect();
-    if old.len() != now.reviews.len() {
+    let same_reviews = Arc::ptr_eq(&prev.reviews, &now.reviews);
+    let old: BTreeMap<&str, &ReviewState> =
+        if same_reviews { BTreeMap::new() } else { prev.reviews.iter().map(|r| (r.name.as_str(), r)).collect() };
+    if !same_reviews && old.len() != now.reviews.len() {
         script = true;
     }
-    for review in &now.reviews {
+    let reviews: &[ReviewState] = if same_reviews { &[] } else { &now.reviews };
+    for review in reviews {
         let Some(before) = old.get(review.name.as_str()) else {
             script = true;
             continue;
@@ -292,7 +300,7 @@ mod tests {
             project: Some("00112233445566aa".into()),
             script: Some("PURPLE LIST.fdx".into()),
             log_len,
-            reviews: vec![ReviewState { name: "a.review.txt".into(), items: vec![item(0, 1, "pending")] }],
+            reviews: Arc::new(vec![ReviewState { name: "a.review.txt".into(), items: vec![item(0, 1, "pending")] }]),
             writer: None,
         }
     }
@@ -308,6 +316,12 @@ mod tests {
     #[test]
     fn nothing_changed_nothing_sent() {
         assert!(diff(&snap(3), &snap(3)).is_empty());
+        // The same shared list: not compared at all.
+        let a = snap(3);
+        let mut b = a.clone();
+        assert!(Arc::ptr_eq(&a.reviews, &b.reviews));
+        b.log_len = 4;
+        assert_eq!(diff(&a, &b), vec![Event::Script]);
     }
 
     #[test]
@@ -318,7 +332,7 @@ mod tests {
     #[test]
     fn a_decision_is_decided_and_script() {
         let mut now = snap(3);
-        now.reviews[0].items[0].status = "accepted".into();
+        Arc::make_mut(&mut now.reviews)[0].items[0].status = "accepted".into();
         assert_eq!(
             diff(&snap(3), &now),
             vec![Event::Script, Event::Decided { review: "a.review.txt".into(), numbers: vec![1] }]
@@ -328,24 +342,24 @@ mod tests {
     #[test]
     fn new_suggestions_and_reviews_are_script() {
         let mut now = snap(3);
-        now.reviews[0].items.push(item(1, 2, "pending"));
+        Arc::make_mut(&mut now.reviews)[0].items.push(item(1, 2, "pending"));
         assert_eq!(diff(&snap(3), &now), vec![Event::Script]);
         // Added above the first: it is renumbered, not decided.
         let mut now = snap(3);
-        now.reviews[0].items = vec![item(0, 2, "pending"), item(1, 1, "pending")];
+        Arc::make_mut(&mut now.reviews)[0].items = vec![item(0, 2, "pending"), item(1, 1, "pending")];
         assert_eq!(diff(&snap(3), &now), vec![Event::Script]);
         // Then decided: reported by its number now.
         let mut later = now.clone();
-        later.reviews[0].items[0].status = "kept".into();
+        Arc::make_mut(&mut later.reviews)[0].items[0].status = "kept".into();
         assert_eq!(
             diff(&now, &later),
             vec![Event::Script, Event::Decided { review: "a.review.txt".into(), numbers: vec![2] }]
         );
         let mut now = snap(3);
-        now.reviews.push(ReviewState { name: "b.review.txt".into(), items: vec![] });
+        Arc::make_mut(&mut now.reviews).push(ReviewState { name: "b.review.txt".into(), items: vec![] });
         assert_eq!(diff(&snap(3), &now), vec![Event::Script]);
         let mut now = snap(3);
-        now.reviews.clear();
+        Arc::make_mut(&mut now.reviews).clear();
         assert_eq!(diff(&snap(3), &now), vec![Event::Script]);
     }
 

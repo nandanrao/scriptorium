@@ -153,9 +153,19 @@
 
   // ---- When Scriptorium is gone, or another folder is open. ----
 
+  // A failed check of /api/status can be a moment's hiccup (a background
+  // tab, a stream the browser dropped): ask once more before saying
+  // Scriptorium is gone, which ends in a reload.
+  function confirmLost(stillThere) {
+    setTimeout(() => {
+      fetch("/api/status", { cache: "no-store" }).then(stillThere, () => lost());
+    }, 1000);
+  }
+
   let lostSince = null;
   function lost() {
     if (lostSince !== null) return;
+    stopPoll(); // this overlay takes over, and reloads when it's back
     lostSince = Date.now();
     showOverlay("Scriptorium isn't running. This page reconnects when it's open again.");
     if (events) { events.close(); events = null; }
@@ -167,9 +177,33 @@
     setTimeout(retry, 2000);
   }
 
+  // While "Open … in Scriptorium" shows, ask every 2 s whether this page's
+  // folder is open now, and reload when it is: the `open` event alone can
+  // be missed (the stream reconnecting, Scriptorium starting).
+  // Only once the script itself is open (the one `hello` named, when
+  // known), so a folder open with no script, or another, never reloads it
+  // again and again.
   let notOpenShown = false;
+  let notOpenPoll = null;
+  function stopPoll() {
+    if (notOpenPoll) { clearInterval(notOpenPoll); notOpenPoll = null; }
+  }
+  function pollOpen() {
+    let known = null;
+    try { known = localStorage.getItem(scriptKey); } catch (_) { /* storage off */ }
+    fetch("/api/status", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || !project || d.project !== project || !d.script) return;
+        if (known && d.script !== known) return;
+        stopPoll();
+        location.reload();
+      })
+      .catch(() => {});
+  }
   function notOpen() {
     notOpenShown = true;
+    if (!notOpenPoll && project) notOpenPoll = setInterval(pollOpen, 2000);
     let script = null;
     try { script = localStorage.getItem(scriptKey); } catch (_) { /* storage off */ }
     showOverlay(script ? `Open ${script} in Scriptorium to use this.` : "Open this app's script in Scriptorium.");
@@ -190,7 +224,7 @@
         // A failed fetch isn't always Scriptorium gone (a body the browser
         // couldn't send, say): ask it before saying so.
         if (await answers()) throw new ScriptoriumError(`Couldn't reach Scriptorium: ${e.message || e}`, 0);
-        lost();
+        confirmLost(() => {});
         throw new ScriptoriumError("Scriptorium isn't running.", 0);
       }
       if (r.status === 503 && wait !== null) { await sleep(wait); continue; }
@@ -389,9 +423,10 @@
       // The browser would retry on its own; instead tell a full listener
       // list (503) from Scriptorium gone, and retry the stream ourselves.
       if (events) { events.close(); events = null; }
+      const answered = (r) => (r.status === 401 ? showOverlay(UNAUTHORIZED) : setTimeout(listen, 2000));
       fetch("/api/status", { cache: "no-store" })
-        .then((r) => (r.status === 401 ? showOverlay(UNAUTHORIZED) : setTimeout(listen, 2000)))
-        .catch(() => lost());
+        .then(answered)
+        .catch(() => confirmLost(answered));
     };
   }
 
